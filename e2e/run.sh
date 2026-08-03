@@ -5,6 +5,12 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# jenv resolves the `java` on PATH by searching for a .java-version file
+# upward from the current directory, falling back to a global default if
+# none is found; pin CWD to the repo root (whose .java-version is 11.0.29)
+# so the proxy binary launched below doesn't inherit whatever directory
+# this script happened to be invoked from.
+cd "$REPO_ROOT"
 WORKDIR="$(mktemp -d /tmp/aicoin-e2e.XXXXXX)"
 FAIL=0
 PIDS=()

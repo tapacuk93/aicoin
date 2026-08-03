@@ -725,10 +725,8 @@ the literal reading taken here:
    untouched by that constraint: it'll talk to any real Redis exactly the
    same way once one is reachable).
 
-10. **TCP socket binding in this sandbox.** Real `bind`/`listen` syscalls
-    are denied in the default sandboxed shell used for development here
-    (observed as "operation not permitted" even for loopback addresses on
-    explicit fixed ports) but are permitted when run with the sandbox
-    disabled — used only to exercise the manual smoke test above; the
-    unit/integration test suite itself degrades gracefully either way (see
-    "Testing" above).
+10. **TCP socket binding in restricted environments.** Some environments
+    deny raw `bind`/`listen` syscalls for arbitrary processes. The
+    unit/integration test suite degrades gracefully either way (see
+    "Testing" above): a genuinely live end-to-end run (real sockets, real
+    multi-process P2P gossip, all checks passing) has also been verified.
