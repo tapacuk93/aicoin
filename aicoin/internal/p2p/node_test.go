@@ -1,7 +1,9 @@
 package p2p
 
 import (
+	"crypto/ed25519"
 	"fmt"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -41,10 +43,18 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 }
 
-func startNode(t *testing.T, difficulty int) (*Node, *chain.Blockchain) {
+func genKeyPair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
-	bc := chain.NewBlockchain(difficulty)
-	n := NewNode(testPortAddr(), difficulty, bc)
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	return pub, priv
+}
+
+func startNode(t *testing.T, role string, bc *chain.Blockchain) *Node {
+	t.Helper()
+	n := NewNode(testPortAddr(), role, bc)
 	if err := n.Listen(); err != nil {
 		// Some sandboxed CI environments deny raw TCP bind/listen
 		// syscalls outright (observed here as "operation not
@@ -59,18 +69,22 @@ func startNode(t *testing.T, difficulty int) (*Node, *chain.Blockchain) {
 	}
 	go n.Serve()
 	t.Cleanup(func() { n.ln.Close() })
-	return n, bc
+	return n
 }
 
-// TestNodeGossipsMinedBlockOverRealTCP starts two Node instances bound to
-// real TCP sockets on loopback, connects B to A, waits for the startup
-// handshake to converge (both nodes agree on genesis), then mines a block
-// on A and verifies it propagates to B over the wire.
-func TestNodeGossipsMinedBlockOverRealTCP(t *testing.T) {
-	const difficulty = 1
+// TestNodeGossipsSealedBlockOverRealTCP starts a primary and a follower
+// Node on real TCP sockets on loopback, connects the follower to the
+// primary, waits for the startup handshake to converge (both nodes agree
+// on genesis), then seals+signs a block on the primary and verifies it
+// propagates to the follower over the wire and is accepted.
+func TestNodeGossipsSealedBlockOverRealTCP(t *testing.T) {
+	pub, priv := genKeyPair(t)
 
-	nodeA, chainA := startNode(t, difficulty)
-	nodeB, chainB := startNode(t, difficulty)
+	primaryChain := chain.NewBlockchain(pub, priv)
+	followerChain := chain.NewBlockchain(pub, nil)
+
+	nodeA := startNode(t, "primary", primaryChain)
+	nodeB := startNode(t, "follower", followerChain)
 
 	nodeB.ConnectToPeers([]string{nodeA.ListenAddr})
 
@@ -78,7 +92,7 @@ func TestNodeGossipsMinedBlockOverRealTCP(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return len(nodeA.Peers()) == 1 })
 	waitFor(t, 2*time.Second, func() bool { return len(nodeB.Peers()) == 1 })
 
-	block, err := chainA.MineAndAppend(chain.Transaction{
+	block, err := primaryChain.SealAndAppend(chain.Transaction{
 		Type:      "event",
 		UserID:    "alice",
 		Provider:  "openai",
@@ -86,40 +100,167 @@ func TestNodeGossipsMinedBlockOverRealTCP(t *testing.T) {
 		Timestamp: "2026-08-03T12:00:00Z",
 	})
 	if err != nil {
-		t.Fatalf("MineAndAppend: %v", err)
+		t.Fatalf("SealAndAppend: %v", err)
 	}
 	nodeA.BroadcastBlock(block, nil)
 
 	waitFor(t, 2*time.Second, func() bool {
-		return chainB.Tip().Hash == block.Hash && chainB.Tip().Index == block.Index
+		return followerChain.Tip().Hash == block.Hash && followerChain.Tip().Index == block.Index
 	})
 }
 
-// TestNodeSyncsLongerChainOnConnect starts node A with a 3-block head start
-// before node B ever connects, then connects B to A and checks that the
-// startup hello/chain_request/chain_response handshake brings B's chain up
-// to match A's via the longest-valid-chain rule (no block gossip
-// involved — this exercises pure startup sync).
+// TestNodeSyncsLongerChainOnConnect starts a primary with a 3-block head
+// start before a follower ever connects, then connects the follower to
+// the primary and checks that the startup hello/chain_request/
+// chain_response handshake brings the follower's chain up to match the
+// primary's via the longest-valid-chain rule (no block gossip involved —
+// this exercises pure startup sync).
 func TestNodeSyncsLongerChainOnConnect(t *testing.T) {
-	const difficulty = 1
+	pub, priv := genKeyPair(t)
 
-	nodeA, chainA := startNode(t, difficulty)
+	primaryChain := chain.NewBlockchain(pub, priv)
 	for i := 0; i < 3; i++ {
-		if _, err := chainA.MineAndAppend(chain.Transaction{
+		if _, err := primaryChain.SealAndAppend(chain.Transaction{
 			Type:      "event",
 			UserID:    "alice",
 			Provider:  "openai",
 			CostUSD:   0.01,
 			Timestamp: "2026-08-03T12:00:00Z",
 		}); err != nil {
-			t.Fatalf("MineAndAppend: %v", err)
+			t.Fatalf("SealAndAppend: %v", err)
 		}
 	}
+	nodeA := startNode(t, "primary", primaryChain)
 
-	nodeB, chainB := startNode(t, difficulty)
+	followerChain := chain.NewBlockchain(pub, nil)
+	nodeB := startNode(t, "follower", followerChain)
 	nodeB.ConnectToPeers([]string{nodeA.ListenAddr})
 
 	waitFor(t, 2*time.Second, func() bool {
-		return chainB.Len() == chainA.Len() && chainB.Tip().Hash == chainA.Tip().Hash
+		return followerChain.Len() == primaryChain.Len() && followerChain.Tip().Hash == primaryChain.Tip().Hash
 	})
+}
+
+// newInProcessPeer builds a *Peer backed by one end of a net.Pipe — an
+// in-memory, synchronous net.Conn that never touches the OS network stack
+// (no bind/listen/socket syscalls at all), so tests using it run even in
+// sandboxes that deny raw TCP. It is only usable for dispatch paths that
+// don't call peer.Send with anything the test doesn't also drain, which
+// holds for every case exercised below.
+func newInProcessPeer(t *testing.T) *Peer {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+	return newPeer(serverConn)
+}
+
+// TestFollowerAdoptsLongerValidChainViaDispatch simulates a follower
+// receiving a chain_response from a peer, without any real TCP socket —
+// see newInProcessPeer. It proves the follower half of CONTRACT.md's
+// "Chain-replacement asymmetry" rule: adopt a longer chain if every block
+// in it validates against the configured trusted pubkey.
+func TestFollowerAdoptsLongerValidChainViaDispatch(t *testing.T) {
+	pub, priv := genKeyPair(t)
+
+	primaryChain := chain.NewBlockchain(pub, priv)
+	for i := 0; i < 3; i++ {
+		if _, err := primaryChain.SealAndAppend(chain.Transaction{
+			Type:      "event",
+			UserID:    "alice",
+			Provider:  "openai",
+			CostUSD:   0.01,
+			Timestamp: "2026-08-03T12:00:00Z",
+		}); err != nil {
+			t.Fatalf("SealAndAppend: %v", err)
+		}
+	}
+
+	followerChain := chain.NewBlockchain(pub, nil)
+	node := NewNode("unused", "follower", followerChain)
+
+	env, err := newEnvelope(msgChainResponse, primaryChain.Blocks())
+	if err != nil {
+		t.Fatalf("newEnvelope: %v", err)
+	}
+	node.dispatch(newInProcessPeer(t), env)
+
+	if followerChain.Len() != primaryChain.Len() {
+		t.Fatalf("follower chain len = %d, want %d after adopting longer valid chain", followerChain.Len(), primaryChain.Len())
+	}
+	if followerChain.Tip().Hash != primaryChain.Tip().Hash {
+		t.Fatalf("follower tip hash = %q, want %q", followerChain.Tip().Hash, primaryChain.Tip().Hash)
+	}
+}
+
+// TestPrimaryNeverReplacesChainViaDispatch proves the other half of the
+// asymmetry: a primary node must never replace its own chain based on an
+// incoming chain_response, no matter how long (or how validly signed by
+// its own trusted key) the offered chain is — it is authoritative by
+// construction. Exercised via the same in-process dispatch path (no real
+// sockets).
+func TestPrimaryNeverReplacesChainViaDispatch(t *testing.T) {
+	pub, priv := genKeyPair(t)
+
+	primaryChain := chain.NewBlockchain(pub, priv)
+	node := NewNode("unused", "primary", primaryChain)
+
+	// A longer, fully valid chain signed by the very same trusted key —
+	// even so, a primary must not adopt it.
+	otherChain := chain.NewBlockchain(pub, priv)
+	for i := 0; i < 5; i++ {
+		if _, err := otherChain.SealAndAppend(chain.Transaction{
+			Type:      "event",
+			UserID:    "bob",
+			Provider:  "anthropic",
+			CostUSD:   0.02,
+			Timestamp: "2026-08-03T12:00:00Z",
+		}); err != nil {
+			t.Fatalf("SealAndAppend: %v", err)
+		}
+	}
+
+	env, err := newEnvelope(msgChainResponse, otherChain.Blocks())
+	if err != nil {
+		t.Fatalf("newEnvelope: %v", err)
+	}
+	node.dispatch(newInProcessPeer(t), env)
+
+	if primaryChain.Len() != 1 {
+		t.Fatalf("primary chain len = %d, want unchanged 1 (genesis only); a primary must never replace its own chain via gossip", primaryChain.Len())
+	}
+}
+
+// TestPrimaryIgnoresIncomingBlockGossip proves a primary also ignores a
+// "block" envelope from a peer outright (it only ever appends blocks it
+// itself seals), exercised via the same in-process dispatch path.
+func TestPrimaryIgnoresIncomingBlockGossip(t *testing.T) {
+	pub, priv := genKeyPair(t)
+
+	primaryChain := chain.NewBlockchain(pub, priv)
+	node := NewNode("unused", "primary", primaryChain)
+
+	otherChain := chain.NewBlockchain(pub, priv)
+	block, err := otherChain.SealAndAppend(chain.Transaction{
+		Type:      "event",
+		UserID:    "bob",
+		Provider:  "anthropic",
+		CostUSD:   0.02,
+		Timestamp: "2026-08-03T12:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("SealAndAppend: %v", err)
+	}
+
+	env, err := newEnvelope(msgBlock, block)
+	if err != nil {
+		t.Fatalf("newEnvelope: %v", err)
+	}
+	node.dispatch(newInProcessPeer(t), env)
+
+	if primaryChain.Len() != 1 {
+		t.Fatalf("primary chain len = %d, want unchanged 1 (genesis only); a primary must ignore incoming block gossip", primaryChain.Len())
+	}
 }

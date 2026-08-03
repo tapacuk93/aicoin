@@ -1,10 +1,20 @@
 package store
 
 import (
+	"crypto/ed25519"
 	"testing"
 
 	"aicoin/internal/chain"
 )
+
+func genKeyPair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	return pub, priv
+}
 
 // TestInMemoryEmptyStoreMeansGenesis proves the chain.ChainStore contract's
 // "nothing persisted yet" case: an InMemory store that has never been Saved
@@ -21,7 +31,8 @@ func TestInMemoryEmptyStoreMeansGenesis(t *testing.T) {
 		t.Fatalf("Load on never-saved store = %v, want nil", blocks)
 	}
 
-	bc, err := chain.NewBlockchainWithStore(1, fake)
+	pub, priv := genKeyPair(t)
+	bc, err := chain.NewBlockchainWithStore(pub, priv, fake)
 	if err != nil {
 		t.Fatalf("NewBlockchainWithStore: %v", err)
 	}
@@ -43,7 +54,7 @@ func TestInMemoryLoadThenSaveRoundTrip(t *testing.T) {
 	tx := chain.Transaction{Type: "event", UserID: "alice", Provider: "openai", CostUSD: 0.01, Timestamp: "2026-08-03T12:00:00Z"}
 	original := []chain.Block{
 		chain.Genesis(),
-		{Index: 1, Timestamp: "2026-08-03T12:00:00Z", PrevHash: chain.Genesis().Hash, Hash: "deadbeef", Nonce: 42, Transactions: []chain.Transaction{tx}},
+		{Index: 1, Timestamp: "2026-08-03T12:00:00Z", PrevHash: chain.Genesis().Hash, Hash: "deadbeef", Signature: "sig", Transactions: []chain.Transaction{tx}},
 	}
 
 	if err := fake.Save(original); err != nil {
@@ -80,29 +91,30 @@ func TestInMemoryLoadThenSaveRoundTrip(t *testing.T) {
 }
 
 // TestBlockchainWithStorePersistsAppendedBlocks proves the integration end
-// to end: a Blockchain backed by an InMemory store persists every mined
+// to end: a Blockchain backed by an InMemory store persists every sealed
 // block, and a second Blockchain constructed against the same store
 // afterwards picks up right where the first left off (simulating a
 // restart), per CONTRACT.md's "on startup, GET ... if present, load it"
 // behavior.
 func TestBlockchainWithStorePersistsAppendedBlocks(t *testing.T) {
 	fake := &InMemory{}
+	pub, priv := genKeyPair(t)
 
-	bc, err := chain.NewBlockchainWithStore(1, fake)
+	bc, err := chain.NewBlockchainWithStore(pub, priv, fake)
 	if err != nil {
 		t.Fatalf("NewBlockchainWithStore: %v", err)
 	}
-	if _, err := bc.MineAndAppend(chain.Transaction{Type: "event", UserID: "alice", Provider: "openai", CostUSD: 0.01, Timestamp: "2026-08-03T12:00:00Z"}); err != nil {
-		t.Fatalf("MineAndAppend: %v", err)
+	if _, err := bc.SealAndAppend(chain.Transaction{Type: "event", UserID: "alice", Provider: "openai", CostUSD: 0.01, Timestamp: "2026-08-03T12:00:00Z"}); err != nil {
+		t.Fatalf("SealAndAppend: %v", err)
 	}
-	if _, err := bc.MineAndAppend(chain.Transaction{Type: "free_claim", UserID: "alice", Timestamp: "2026-08-03T12:00:00Z"}); err != nil {
-		t.Fatalf("MineAndAppend: %v", err)
+	if _, err := bc.SealAndAppend(chain.Transaction{Type: "free_claim", UserID: "alice", Timestamp: "2026-08-03T12:00:00Z"}); err != nil {
+		t.Fatalf("SealAndAppend: %v", err)
 	}
 
 	// Simulate a restart: a brand new Blockchain against the same store
 	// should load the 3-block chain (genesis + 2), not start over at
 	// genesis-only.
-	restarted, err := chain.NewBlockchainWithStore(1, fake)
+	restarted, err := chain.NewBlockchainWithStore(pub, priv, fake)
 	if err != nil {
 		t.Fatalf("NewBlockchainWithStore (restart): %v", err)
 	}

@@ -1,6 +1,8 @@
 package chain
 
 import (
+	"crypto/ed25519"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -9,18 +11,28 @@ import (
 // Blockchain is a thread-safe, in-memory chain of blocks, starting from the
 // canonical genesis block (or, when a ChainStore is configured and has a
 // prior chain saved, from that chain instead — see NewBlockchainWithStore).
+//
+// Every block (other than genesis) is validated against trustedPubKey, per
+// CONTRACT.md's "Roles & signing" section: on a primary, trustedPubKey is
+// derived from signer (its own Ed25519 keypair); on a follower, signer is
+// nil and trustedPubKey is the configured -trusted-pubkey. Only a
+// Blockchain with a non-nil signer can SealAndAppend new blocks — that is
+// what makes a node a primary rather than a read-only follower.
 type Blockchain struct {
-	mu         sync.RWMutex
-	blocks     []Block
-	difficulty int
-	store      ChainStore
+	mu            sync.RWMutex
+	blocks        []Block
+	trustedPubKey ed25519.PublicKey
+	signer        ed25519.PrivateKey
+	store         ChainStore
 }
 
 // NewBlockchain creates a new chain containing only the genesis block, with
 // no persistence (pure in-memory, per CONTRACT.md's default when -redis is
-// unset).
-func NewBlockchain(difficulty int) *Blockchain {
-	bc, _ := NewBlockchainWithStore(difficulty, nil)
+// unset). signer is the node's own Ed25519 private key on a primary (used
+// by SealAndAppend), or nil on a follower (which can only Append/
+// ReplaceIfLonger blocks validated against trustedPubKey).
+func NewBlockchain(trustedPubKey ed25519.PublicKey, signer ed25519.PrivateKey) *Blockchain {
+	bc, _ := NewBlockchainWithStore(trustedPubKey, signer, nil)
 	return bc
 }
 
@@ -28,13 +40,14 @@ func NewBlockchain(difficulty int) *Blockchain {
 // this is identical to NewBlockchain (pure in-memory). Otherwise, per
 // CONTRACT.md's "Persistence" section: on startup it calls store.Load(); if
 // that returns a non-empty chain, it is used as the starting chain instead
-// of genesis-only. After every successful append (MineAndAppend, Append, or
+// of genesis-only. After every successful append (SealAndAppend, Append, or
 // ReplaceIfLonger), the full current chain is written back via store.Save.
-func NewBlockchainWithStore(difficulty int, store ChainStore) (*Blockchain, error) {
+func NewBlockchainWithStore(trustedPubKey ed25519.PublicKey, signer ed25519.PrivateKey, store ChainStore) (*Blockchain, error) {
 	bc := &Blockchain{
-		blocks:     []Block{Genesis()},
-		difficulty: difficulty,
-		store:      store,
+		blocks:        []Block{Genesis()},
+		trustedPubKey: trustedPubKey,
+		signer:        signer,
+		store:         store,
 	}
 	if store != nil {
 		loaded, err := store.Load()
@@ -61,9 +74,11 @@ func (bc *Blockchain) persistLocked() {
 	}
 }
 
-// Difficulty returns the configured PoW difficulty.
-func (bc *Blockchain) Difficulty() int {
-	return bc.difficulty
+// TrustedPubKey returns the Ed25519 public key every non-genesis block is
+// validated against (the primary's own public key on a primary; the
+// configured -trusted-pubkey on a follower).
+func (bc *Blockchain) TrustedPubKey() ed25519.PublicKey {
+	return bc.trustedPubKey
 }
 
 // Tip returns the current last block.
@@ -89,18 +104,25 @@ func (bc *Blockchain) Blocks() []Block {
 	return out
 }
 
-// MineAndAppend builds a new block on top of the current tip carrying tx as
-// its sole transaction, mines it (proof-of-work against the configured
-// difficulty), appends it to the chain, and returns it.
-func (bc *Blockchain) MineAndAppend(tx Transaction) (Block, error) {
+// SealAndAppend builds a new block on top of the current tip carrying tx as
+// its sole transaction, computes its Hash and Ed25519 Signature (Seal —
+// one-shot, no search/delay; this replaces the old PoW mining step
+// one-for-one), appends it to the chain, and returns it. It fails if this
+// Blockchain has no signing key configured (i.e. this node is a follower,
+// not a primary).
+func (bc *Blockchain) SealAndAppend(tx Transaction) (Block, error) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
+
+	if bc.signer == nil {
+		return Block{}, errors.New("chain: cannot seal a block without a signing key (this node is not a primary)")
+	}
 
 	tip := bc.blocks[len(bc.blocks)-1]
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 	txs := []Transaction{tx}
 
-	hash, nonce, err := Mine(tip.Index+1, tip.Hash, timestamp, txs, bc.difficulty)
+	hash, signature, err := Seal(tip.Index+1, tip.Hash, timestamp, txs, bc.signer)
 	if err != nil {
 		return Block{}, err
 	}
@@ -110,7 +132,7 @@ func (bc *Blockchain) MineAndAppend(tx Transaction) (Block, error) {
 		Timestamp:    timestamp,
 		PrevHash:     tip.Hash,
 		Hash:         hash,
-		Nonce:        nonce,
+		Signature:    signature,
 		Transactions: txs,
 	}
 	bc.blocks = append(bc.blocks, newBlock)
@@ -118,14 +140,14 @@ func (bc *Blockchain) MineAndAppend(tx Transaction) (Block, error) {
 	return newBlock, nil
 }
 
-// Append validates candidate against the current tip and, if valid, appends
-// it to the chain.
+// Append validates candidate against the current tip (and trustedPubKey)
+// and, if valid, appends it to the chain.
 func (bc *Blockchain) Append(candidate Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
 	tip := bc.blocks[len(bc.blocks)-1]
-	if err := ValidateBlock(tip, candidate, bc.difficulty); err != nil {
+	if err := ValidateBlock(candidate, tip, bc.trustedPubKey); err != nil {
 		return err
 	}
 	bc.blocks = append(bc.blocks, candidate)
@@ -133,10 +155,16 @@ func (bc *Blockchain) Append(candidate Block) error {
 	return nil
 }
 
-// ReplaceIfLonger validates candidate as a full chain and, if it is both
-// valid and strictly longer than the current local chain, replaces the
-// local chain with it (longest-valid-chain rule). It reports whether the
-// replacement happened.
+// ReplaceIfLonger validates candidate as a full chain (against
+// trustedPubKey) and, if it is both valid and strictly longer than the
+// current local chain, replaces the local chain with it
+// (longest-valid-chain rule). It reports whether the replacement happened.
+//
+// Per CONTRACT.md's "Chain-replacement asymmetry": this method exists on
+// every Blockchain, but callers must only invoke it on a follower's chain
+// — a primary is authoritative by construction and must never replace its
+// own chain via this path. That gating lives in the p2p layer (see
+// p2p.Node.Role), not here.
 func (bc *Blockchain) ReplaceIfLonger(candidate []Block) (bool, error) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -144,7 +172,7 @@ func (bc *Blockchain) ReplaceIfLonger(candidate []Block) (bool, error) {
 	if len(candidate) <= len(bc.blocks) {
 		return false, nil
 	}
-	if err := ValidateChain(candidate, bc.difficulty); err != nil {
+	if err := ValidateChain(candidate, bc.trustedPubKey); err != nil {
 		return false, err
 	}
 	newBlocks := make([]Block, len(candidate))

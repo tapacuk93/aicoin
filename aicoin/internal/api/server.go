@@ -12,17 +12,25 @@ import (
 )
 
 // Server holds the dependencies shared by all HTTP handlers.
+//
+// Role and PubKeyHex back GET /health's "role"/"pubkey" fields and the
+// write-endpoint 403 gate on followers, per CONTRACT.md's "Roles &
+// signing" section: on a primary, PubKeyHex is its own signing key's
+// public half; on a follower, it's the configured -trusted-pubkey.
 type Server struct {
 	Chain        *chain.Blockchain
 	Node         *p2p.Node
 	DecayWeights state.DecayWeights
+	Role         string
+	PubKeyHex    string
 }
 
 // NewServer creates an API server backed by bc, gossiping any locally
-// mined block via node (node may be nil in tests that don't need P2P), and
-// using weights for the /price recency-decay formula.
-func NewServer(bc *chain.Blockchain, node *p2p.Node, weights state.DecayWeights) *Server {
-	return &Server{Chain: bc, Node: node, DecayWeights: weights}
+// sealed block via node (node may be nil in tests that don't need P2P),
+// using weights for the /price recency-decay formula, and role/pubKeyHex
+// for GET /health and the follower write-rejection gate.
+func NewServer(bc *chain.Blockchain, node *p2p.Node, weights state.DecayWeights, role, pubKeyHex string) *Server {
+	return &Server{Chain: bc, Node: node, DecayWeights: weights, Role: role, PubKeyHex: pubKeyHex}
 }
 
 // Router builds the http.Handler exposing all endpoints from CONTRACT.md.
@@ -49,6 +57,20 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// rejectIfFollower implements CONTRACT.md's write-endpoint rejection rule:
+// on a -role=follower node, every write endpoint (POST /events, /transfer,
+// /free-coins/claim) refuses with 403, since a follower holds no signing
+// key and cannot legitimately append a block. It reports whether the
+// request was rejected (in which case the caller must return immediately
+// without touching the chain).
+func (s *Server) rejectIfFollower(w http.ResponseWriter) bool {
+	if s.Role != "follower" {
+		return false
+	}
+	writeError(w, http.StatusForbidden, "this node is a read-only replica; write to the primary")
+	return true
+}
+
 type eventRequest struct {
 	UserID    string  `json:"user_id"`
 	Provider  string  `json:"provider"`
@@ -56,10 +78,15 @@ type eventRequest struct {
 	Timestamp string  `json:"timestamp"`
 }
 
-// handlePostEvents implements POST /events: build the Transaction, mine a
-// new block on top of the local tip, append it locally, broadcast it to
-// all connected peers, and return the new block info.
+// handlePostEvents implements POST /events: build the Transaction, seal
+// and sign a new block on top of the local tip (primary only — see
+// rejectIfFollower), append it locally, broadcast it to all connected
+// peers, and return the new block info.
 func (s *Server) handlePostEvents(w http.ResponseWriter, r *http.Request) {
+	if s.rejectIfFollower(w) {
+		return
+	}
+
 	var req eventRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -83,7 +110,7 @@ func (s *Server) handlePostEvents(w http.ResponseWriter, r *http.Request) {
 		Timestamp: ts,
 	}
 
-	block, err := s.Chain.MineAndAppend(tx)
+	block, err := s.Chain.SealAndAppend(tx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -106,10 +133,15 @@ type freeCoinsClaimRequest struct {
 // handlePostFreeCoinsClaim implements POST /free-coins/claim per
 // CONTRACT.md's "Free-coin faucet" section: look at the chain for the most
 // recent free_claim tx for this user; if there is none, or its Timestamp is
-// >= 1 hour in the past, mine a new free_claim tx (mined/gossiped exactly
-// like an event tx) and grant it. Otherwise, reject with 429 and report
+// >= 1 hour in the past, seal+sign a new free_claim tx (through the exact
+// same sealing/gossip pipeline as an event tx, primary only — see
+// rejectIfFollower) and grant it. Otherwise, reject with 429 and report
 // when the user becomes eligible again.
 func (s *Server) handlePostFreeCoinsClaim(w http.ResponseWriter, r *http.Request) {
+	if s.rejectIfFollower(w) {
+		return
+	}
+
 	var req freeCoinsClaimRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -138,7 +170,7 @@ func (s *Server) handlePostFreeCoinsClaim(w http.ResponseWriter, r *http.Request
 		Timestamp: now.Format(time.RFC3339),
 	}
 
-	block, err := s.Chain.MineAndAppend(tx)
+	block, err := s.Chain.SealAndAppend(tx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -181,10 +213,14 @@ type transferRequest struct {
 // handlePostTransfer implements POST /transfer per CONTRACT.md's "Peer
 // transfer (buy/sell)" section: validate amount > 0 and the sender's
 // current derived balance >= amount; if either fails, reject with 400
-// without mutating the chain. Otherwise mine a "transfer" tx (through the
-// same PoW/gossip pipeline as any other transaction) and return its
-// height/hash.
+// without mutating the chain. Otherwise seal+sign a "transfer" tx (through
+// the same signing/gossip pipeline as any other transaction, primary only
+// — see rejectIfFollower) and return its height/hash.
 func (s *Server) handlePostTransfer(w http.ResponseWriter, r *http.Request) {
+	if s.rejectIfFollower(w) {
+		return
+	}
+
 	var req transferRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -209,7 +245,7 @@ func (s *Server) handlePostTransfer(w http.ResponseWriter, r *http.Request) {
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 	}
 
-	block, err := s.Chain.MineAndAppend(tx)
+	block, err := s.Chain.SealAndAppend(tx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -250,10 +286,15 @@ func (s *Server) handleGetBalance(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGetHealth implements GET /health.
+// handleGetHealth implements GET /health, per CONTRACT.md's "Roles &
+// signing" section: role is "primary" or "follower"; pubkey is this
+// node's own signing key's public half on a primary, or the configured
+// -trusted-pubkey on a follower.
 func (s *Server) handleGetHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "ok",
 		"height": s.Chain.Tip().Index,
+		"role":   s.Role,
+		"pubkey": s.PubKeyHex,
 	})
 }

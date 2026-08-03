@@ -28,11 +28,20 @@ cleanup() {
 trap cleanup EXIT
 
 wait_for() {
-  local url="$1" tries=0
-  until curl -s -o /dev/null -m 1 "$url"; do
+  local url="$1" tries=0 body
+  while true; do
+    body=$(curl -s -m 1 "$url" 2>/dev/null || true)
+    # This sandbox mediates all loopback HTTP through a local proxy that
+    # returns a synthetic {"error":{"type":"proxy_error",...}} body (a
+    # real, curl-success HTTP response) when it can't/won't reach the
+    # real destination — so a plain curl-exit-code check isn't enough;
+    # reject that specific synthetic body and require real content.
+    if [ -n "$body" ] && [[ "$body" != *proxy_error* ]]; then
+      return 0
+    fi
     tries=$((tries + 1))
     if [ "$tries" -gt 30 ]; then
-      log "timed out waiting for $url"
+      log "timed out waiting for $url (last response: $body)"
       return 1
     fi
     sleep 0.3
@@ -61,16 +70,20 @@ log "starting mock AI provider on :$MOCK_PORT"
 python3 "$REPO_ROOT/e2e/mock_provider.py" "$MOCK_PORT" > "$WORKDIR/mock.log" 2>&1 &
 PIDS+=($!)
 
-log "starting aicoin node A on :$NODE_A_HTTP (p2p :$NODE_A_P2P)"
-"$WORKDIR/aicoind" -http=":$NODE_A_HTTP" -p2p=":$NODE_A_P2P" -difficulty=1 > "$WORKDIR/nodeA.log" 2>&1 &
+log "starting aicoin node A as primary on :$NODE_A_HTTP (p2p :$NODE_A_P2P)"
+"$WORKDIR/aicoind" -http=":$NODE_A_HTTP" -p2p=":$NODE_A_P2P" -role=primary -keyfile="$WORKDIR/nodeA.key" > "$WORKDIR/nodeA.log" 2>&1 &
 PIDS+=($!)
 
-log "starting aicoin node B on :$NODE_B_HTTP (p2p :$NODE_B_P2P, peer of A)"
-"$WORKDIR/aicoind" -http=":$NODE_B_HTTP" -p2p=":$NODE_B_P2P" -peers="127.0.0.1:$NODE_A_P2P" -difficulty=1 > "$WORKDIR/nodeB.log" 2>&1 &
+wait_for "http://127.0.0.1:$NODE_A_HTTP/health" || { log "node A never came up"; exit 1; }
+PRIMARY_PUBKEY=$(grep -oE 'pubkey=[0-9a-f]{64}' "$WORKDIR/nodeA.log" | head -1 | cut -d= -f2)
+if [ -z "$PRIMARY_PUBKEY" ]; then log "could not read primary's pubkey from its startup log"; cat "$WORKDIR/nodeA.log"; exit 1; fi
+log "primary pubkey: $PRIMARY_PUBKEY"
+
+log "starting aicoin node B as a follower of A on :$NODE_B_HTTP (p2p :$NODE_B_P2P)"
+"$WORKDIR/aicoind" -http=":$NODE_B_HTTP" -p2p=":$NODE_B_P2P" -role=follower -trusted-pubkey="$PRIMARY_PUBKEY" -peers="127.0.0.1:$NODE_A_P2P" > "$WORKDIR/nodeB.log" 2>&1 &
 PIDS+=($!)
 
 wait_for "http://127.0.0.1:$MOCK_PORT/" || true
-wait_for "http://127.0.0.1:$NODE_A_HTTP/health" || { log "node A never came up"; exit 1; }
 wait_for "http://127.0.0.1:$NODE_B_HTTP/health" || { log "node B never came up"; exit 1; }
 
 echo "3" > "$WORKDIR/free-coins-counter.txt"
@@ -144,11 +157,15 @@ log "--- test 10: overdraft transfer is rejected ---"
 code=$(curl -s -o "$WORKDIR/t10.json" -w "%{http_code}" -X POST "http://127.0.0.1:$NODE_A_HTTP/transfer" -d '{"from_user_id":"bob","to_user_id":"alice","amount":999}')
 [ "$code" = "400" ] && pass "400 insufficient balance" || fail "expected 400, got $code: $(cat "$WORKDIR/t10.json")"
 
-log "--- test 11: P2P gossip replicates the chain from node A to node B ---"
+log "--- test 11: P2P replication — follower B mirrors primary A's signed chain ---"
 sleep 1
 height_a=$(curl -s "http://127.0.0.1:$NODE_A_HTTP/chain" | python3 -c "import json,sys;print(len(json.load(sys.stdin)))")
 height_b=$(curl -s "http://127.0.0.1:$NODE_B_HTTP/chain" | python3 -c "import json,sys;print(len(json.load(sys.stdin)))")
-if [ "$height_a" = "$height_b" ] && [ "$height_a" -gt 1 ]; then pass "node B replicated node A's chain (height $height_a)"; else fail "chain mismatch: A=$height_a B=$height_b"; fi
+if [ "$height_a" = "$height_b" ] && [ "$height_a" -gt 1 ]; then pass "follower B replicated primary A's chain (height $height_a)"; else fail "chain mismatch: A=$height_a B=$height_b"; fi
+
+log "--- test 12: follower rejects writes (no signing key) ---"
+code=$(curl -s -o "$WORKDIR/t12.json" -w "%{http_code}" -X POST "http://127.0.0.1:$NODE_B_HTTP/events" -d '{"user_id":"eve","provider":"openai","cost_usd":0.01}')
+[ "$code" = "403" ] && pass "403 read-only replica" || fail "expected 403, got $code: $(cat "$WORKDIR/t12.json")"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

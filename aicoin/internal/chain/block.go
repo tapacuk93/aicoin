@@ -1,6 +1,6 @@
 // Package chain implements the aicoin block/chain model: block and
-// transaction types, proof-of-work mining, and chain validation, per
-// CONTRACT.md.
+// transaction types, Ed25519 signing/verification, and chain validation,
+// per CONTRACT.md.
 package chain
 
 // Transaction is a single transaction recorded on chain. It is a tagged
@@ -31,11 +31,16 @@ type Transaction struct {
 //
 // Transactions is always length 0 (genesis only) or length 1 (every other
 // block), per CONTRACT.md's "one transaction per block" rule.
+//
+// Signature is hex-encoded and empty for genesis (index 0). For every
+// other block, it is the primary's Ed25519 signature (over the block's raw
+// 32-byte SHA-256 digest, not its hex Hash string) — that signature, not
+// proof-of-work, is what makes the block valid; see ValidateBlock.
 type Block struct {
 	Index        int           `json:"index"`
 	Timestamp    string        `json:"timestamp"`
 	PrevHash     string        `json:"prev_hash"`
 	Hash         string        `json:"hash"`
-	Nonce        int           `json:"nonce"`
+	Signature    string        `json:"signature"`
 	Transactions []Transaction `json:"transactions"`
 }

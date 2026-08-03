@@ -6,7 +6,7 @@ services:
 
   aicoin-node:
     build: ./aicoin
-    command: ["-http=:9944", "-p2p=:9945", "-redis=redis:6379"]
+    command: ["-http=:9944", "-p2p=:9945", "-role=primary", "-redis=redis:6379"]
     ports:
       - "9944:9944"
       - "9945:9945"

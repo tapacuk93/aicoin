@@ -2,6 +2,8 @@ package api
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,9 +13,31 @@ import (
 	"aicoin/internal/state"
 )
 
-func newTestServer() *Server {
-	bc := chain.NewBlockchain(1)
-	return NewServer(bc, nil, state.DefaultDecayWeights())
+// testKeyPair generates a fresh Ed25519 keypair for test servers.
+func testKeyPair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	return pub, priv
+}
+
+// newTestServer builds a Server with role "primary" or "follower": a
+// primary gets its own signing key (so it can seal blocks); a follower
+// gets only a trusted public key (no signer), mirroring how a real
+// follower node is configured.
+func newTestServer(t *testing.T, role string) *Server {
+	t.Helper()
+	pub, priv := testKeyPair(t)
+
+	var bc *chain.Blockchain
+	if role == "follower" {
+		bc = chain.NewBlockchain(pub, nil)
+	} else {
+		bc = chain.NewBlockchain(pub, priv)
+	}
+	return NewServer(bc, nil, state.DefaultDecayWeights(), role, hex.EncodeToString(pub))
 }
 
 func postJSON(t *testing.T, srv *Server, path string, body interface{}) *httptest.ResponseRecorder {
@@ -48,7 +72,7 @@ func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
 // both balances exactly as CONTRACT.md's "Peer transfer (buy/sell)"
 // section specifies, and mines exactly one new block for the transfer.
 func TestTransferMovesBalanceCorrectly(t *testing.T) {
-	srv := newTestServer()
+	srv := newTestServer(t, "primary")
 
 	claimRec := postJSON(t, srv, "/free-coins/claim", map[string]string{"user_id": "alice"})
 	if claimRec.Code != http.StatusOK {
@@ -99,7 +123,7 @@ func TestTransferMovesBalanceCorrectly(t *testing.T) {
 // the chain (no block mined) — the height and full chain contents must be
 // identical before and after the rejected attempt.
 func TestTransferInsufficientBalanceRejectedNoMutation(t *testing.T) {
-	srv := newTestServer()
+	srv := newTestServer(t, "primary")
 
 	// alice has never claimed or received anything: balance is 0.
 	heightBefore := srv.Chain.Tip().Index
@@ -143,7 +167,7 @@ func TestTransferInsufficientBalanceRejectedNoMutation(t *testing.T) {
 // and balance>=amount with the same 400/insufficient-balance response),
 // and does not mutate the chain.
 func TestTransferZeroOrNegativeAmountRejected(t *testing.T) {
-	srv := newTestServer()
+	srv := newTestServer(t, "primary")
 	// Give alice a balance so the only failing condition is amount<=0.
 	postJSON(t, srv, "/free-coins/claim", map[string]string{"user_id": "alice"})
 	heightBefore := srv.Chain.Tip().Index
@@ -160,6 +184,114 @@ func TestTransferZeroOrNegativeAmountRejected(t *testing.T) {
 	}
 	if got := srv.Chain.Tip().Index; got != heightBefore {
 		t.Errorf("height changed after rejected zero/negative transfers: %d -> %d", heightBefore, got)
+	}
+}
+
+// TestPostEventsSealsAndAppendsOnPrimary proves the primary end-to-end
+// write path still works with the new sealing scheme: POST /events builds
+// a Transaction, seals+signs a new block on top of the tip, and grows the
+// chain by exactly one block carrying a non-empty Signature.
+func TestPostEventsSealsAndAppendsOnPrimary(t *testing.T) {
+	srv := newTestServer(t, "primary")
+	heightBefore := srv.Chain.Tip().Index
+
+	rec := postJSON(t, srv, "/events", map[string]interface{}{
+		"user_id":  "alice",
+		"provider": "openai",
+		"cost_usd": 0.001,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /events status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Height int    `json:"height"`
+		Hash   string `json:"hash"`
+	}
+	decodeBody(t, rec, &resp)
+	if resp.Height != heightBefore+1 {
+		t.Errorf("events height = %d, want %d (exactly one new block)", resp.Height, heightBefore+1)
+	}
+	if resp.Hash == "" {
+		t.Error("events hash is empty")
+	}
+
+	tip := srv.Chain.Tip()
+	if tip.Signature == "" {
+		t.Error("expected the newly sealed block to carry a non-empty signature")
+	}
+}
+
+// TestWriteEndpointsRejectedOnFollower proves CONTRACT.md's "Roles &
+// signing" write-rejection rule: every write endpoint on a follower
+// returns 403 with the exact documented error body, and none of them
+// mutate the chain.
+func TestWriteEndpointsRejectedOnFollower(t *testing.T) {
+	srv := newTestServer(t, "follower")
+
+	cases := []struct {
+		path string
+		body interface{}
+	}{
+		{"/events", map[string]interface{}{"user_id": "alice", "provider": "openai", "cost_usd": 0.01}},
+		{"/transfer", map[string]interface{}{"from_user_id": "alice", "to_user_id": "bob", "amount": 0.1}},
+		{"/free-coins/claim", map[string]string{"user_id": "alice"}},
+	}
+
+	for _, c := range cases {
+		rec := postJSON(t, srv, c.path, c.body)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("POST %s: status = %d, want 403; body = %s", c.path, rec.Code, rec.Body.String())
+			continue
+		}
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		decodeBody(t, rec, &errResp)
+		const want = "this node is a read-only replica; write to the primary"
+		if errResp.Error != want {
+			t.Errorf("POST %s: error = %q, want %q", c.path, errResp.Error, want)
+		}
+	}
+
+	if srv.Chain.Len() != 1 {
+		t.Errorf("follower chain mutated despite all writes being rejected: len = %d, want 1 (genesis only)", srv.Chain.Len())
+	}
+}
+
+// TestHealthReportsRoleAndPubkey proves GET /health's new role/pubkey
+// fields: a primary reports its own signing key's public half; a follower
+// reports its configured trusted pubkey. Both must be non-empty.
+func TestHealthReportsRoleAndPubkey(t *testing.T) {
+	var health struct {
+		Status string `json:"status"`
+		Height int    `json:"height"`
+		Role   string `json:"role"`
+		PubKey string `json:"pubkey"`
+	}
+
+	primary := newTestServer(t, "primary")
+	decodeBody(t, getJSON(t, primary, "/health"), &health)
+	if health.Role != "primary" {
+		t.Errorf("primary health role = %q, want %q", health.Role, "primary")
+	}
+	if health.PubKey != primary.PubKeyHex {
+		t.Errorf("primary health pubkey = %q, want %q", health.PubKey, primary.PubKeyHex)
+	}
+	if health.PubKey == "" {
+		t.Error("primary health pubkey is empty")
+	}
+
+	follower := newTestServer(t, "follower")
+	decodeBody(t, getJSON(t, follower, "/health"), &health)
+	if health.Role != "follower" {
+		t.Errorf("follower health role = %q, want %q", health.Role, "follower")
+	}
+	if health.PubKey != follower.PubKeyHex {
+		t.Errorf("follower health pubkey = %q, want %q", health.PubKey, follower.PubKeyHex)
+	}
+	if health.PubKey == "" {
+		t.Error("follower health pubkey is empty")
 	}
 }
 

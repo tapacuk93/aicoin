@@ -7,11 +7,15 @@
 // replies with its full chain ("chain_response") and the two nodes
 // converge to the same (longest-valid) chain on startup.
 //
-// When a node mines or receives a new block, it gossips a "block" envelope
-// to its other connected peers. If a received block doesn't link to the
-// local tip, the node asks the sender for its full chain via
-// "chain_request" and applies the longest-valid-chain rule upon the
-// resulting "chain_response".
+// When a node seals (primary) or receives (follower) a new block, it
+// gossips a "block" envelope to its other connected peers. Per
+// CONTRACT.md's "Roles & signing" and "Chain-replacement asymmetry"
+// sections, chain replacement is asymmetric by Role: a follower that
+// receives a block that doesn't link to its local tip asks the sender for
+// its full chain via "chain_request" and applies the longest-valid-chain
+// rule upon the resulting "chain_response"; a primary never does either —
+// it is authoritative by construction and only ever appends blocks it
+// itself seals and signs.
 package p2p
 
 import (
@@ -25,10 +29,13 @@ import (
 	"aicoin/internal/chain"
 )
 
-// Node is a P2P gossip node bound to a single chain.Blockchain.
+// Node is a P2P gossip node bound to a single chain.Blockchain. Role is
+// "primary" or "follower" (per CONTRACT.md's "Roles & signing" section)
+// and gates whether this node ever accepts a block or a longer chain from
+// a peer — see handleBlock and dispatch's msgChainResponse case.
 type Node struct {
 	ListenAddr string
-	Difficulty int
+	Role       string
 	Chain      *chain.Blockchain
 
 	ln net.Listener
@@ -39,10 +46,10 @@ type Node struct {
 
 // NewNode creates a new P2P node. Listen must be called (and Serve run)
 // before it will accept inbound connections.
-func NewNode(listenAddr string, difficulty int, bc *chain.Blockchain) *Node {
+func NewNode(listenAddr, role string, bc *chain.Blockchain) *Node {
 	return &Node{
 		ListenAddr: listenAddr,
-		Difficulty: difficulty,
+		Role:       role,
 		Chain:      bc,
 		peers:      make(map[*Peer]struct{}),
 	}
@@ -135,6 +142,12 @@ func (n *Node) dispatch(peer *Peer, env Envelope) {
 		}
 
 	case msgChainResponse:
+		if n.Role != "follower" {
+			// Per CONTRACT.md: a primary is authoritative by construction
+			// and never replaces its own chain based on incoming gossip/
+			// sync, under any circumstances.
+			return
+		}
 		var blocks []chain.Block
 		if err := json.Unmarshal(env.Payload, &blocks); err != nil {
 			log.Printf("p2p: bad chain_response payload: %v", err)
@@ -159,13 +172,21 @@ func (n *Node) dispatch(peer *Peer, env Envelope) {
 	}
 }
 
-// handleBlock implements CONTRACT.md's block-receipt rule: if it links to
-// the local tip and validates, append + re-gossip to other peers.
-// Otherwise, if it's stale (we're already past it), ignore it. Otherwise
-// (it's ahead of us but doesn't link, i.e. we may be behind on a longer
-// chain), ask the sender for its full chain so the longest-valid-chain
-// rule can be applied once chain_response arrives.
+// handleBlock implements CONTRACT.md's block-receipt rule for a follower:
+// if it links to the local tip and validates, append + re-gossip to other
+// peers. Otherwise, if it's stale (we're already past it), ignore it.
+// Otherwise (it's ahead of us but doesn't link, i.e. we may be behind on a
+// longer chain), ask the sender for its full chain so the
+// longest-valid-chain rule can be applied once chain_response arrives.
+//
+// A primary ignores any incoming "block" gossip entirely: it is
+// authoritative by construction and only ever appends blocks it itself
+// seals and signs.
 func (n *Node) handleBlock(source *Peer, b chain.Block) {
+	if n.Role != "follower" {
+		return
+	}
+
 	tip := n.Chain.Tip()
 
 	if b.Index == tip.Index+1 && b.PrevHash == tip.Hash {

@@ -20,18 +20,28 @@ CLI flags:
 - `-http=:9944`   HTTP API listen address
 - `-p2p=:9945`    P2P TCP listen address
 - `-peers=host:port,...`  comma-separated bootstrap peer P2P addresses (optional)
-- `-difficulty=1` number of required leading hex '0' chars in block hash (keep small so PoW is near-instant in tests)
+- `-role=primary|follower` (default `primary`) — see "Roles & signing" below
+- `-keyfile=aicoin-node.key` (primary only) — path to the node's persistent Ed25519 private key; generated on first run if the file doesn't exist
+- `-trusted-pubkey=<hex>` (required when `-role=follower`) — the primary's Ed25519 public key, hex-encoded; a primary logs its own pubkey hex on startup for copy-paste into followers
 - `-redis=host:port` (optional) — when set, persist/reload the chain via Redis (see "Persistence" below); unset = in-memory only (unchanged from before)
 - `-decay-hour=1.0 -decay-day=0.5 -decay-week=0.25 -decay-month=0.125 -decay-year=0.0625 -decay-older=0.03125` — price recency-bucket weights (see "Derived state — price" below); defaults shown are a documented judgment call, not user-specified exact numbers
 
+### Roles & signing — single source of truth, no PoW
+There is exactly one legitimate writer: the **primary**. It holds an Ed25519 keypair and *signs* every block it appends — that signature (not proof-of-work) is what makes a block valid. **Followers** hold only the primary's public key (`-trusted-pubkey`), replicate the primary's signed chain via P2P, and reject all writes — there is no mining, no difficulty, no nonce, and no "longest valid chain from competing miners" scenario, because nobody but the primary can produce a chain whose blocks verify against the trusted pubkey.
+- Write endpoints (`POST /events`, `/transfer`, `/free-coins/claim`) on a **follower** → `403 {"error":"this node is a read-only replica; write to the primary"}`. On a **primary**, they work as before, minus any mining step.
+- A **primary** never replaces its own chain based on incoming P2P gossip/sync — it is authoritative by definition. A **follower** adopts a peer's chain if every block validates (see below) and it's longer than its own.
+- `GET /health` now also reports `{"status":"ok","height":N,"role":"primary"|"follower","pubkey":"<hex>"}` — for a primary, `pubkey` is its own signing key's public half; for a follower, it's the `-trusted-pubkey` it's configured to verify against.
+
 ### Chain model
-- `Block{Index int, Timestamp string(RFC3339), PrevHash string, Hash string, Nonce int, Transactions []Transaction}`
+- `Block{Index int, Timestamp string(RFC3339), PrevHash string, Hash string, Signature string, Transactions []Transaction}` (no `Nonce` — that was PoW-only and is gone)
 - `Transaction{Type:"event", UserID string, Provider string, CostUSD float64, Timestamp string(RFC3339)}`
-- Genesis: index 0, `PrevHash` = 64 zero chars, no transactions, fixed nonce so all nodes derive the same genesis hash independently (no genesis broadcast needed).
-- One transaction per block (no mempool batching) — simplest correct model.
-- PoW: hash = hex(SHA256(index|prevHash|timestamp|txJSON|nonce)); valid iff it has >= `difficulty` leading '0' hex chars.
-- On `POST /events`: build the Transaction, mine a new block on top of local tip, append locally, broadcast to all connected peers, return the new block info.
-- On receiving a block from a peer: validate hash+PoW+`PrevHash` links to current tip → append + re-gossip to other peers. If it doesn't link but the peer's full chain (fetched via `chain_request`) is longer and every block validates, replace local chain (longest-valid-chain rule).
+- Genesis: index 0, `PrevHash` = 64 zero chars, no transactions, fixed timestamp, empty `Signature` — a well-known deterministic constant every node computes independently and accepts without signature checking (index 0 is always special-cased as valid).
+- One transaction per block (no mempool batching) — simplest correct model, unchanged.
+- `Hash = hex(SHA256(index|prevHash|timestamp|txJSON))` — a content hash, not a puzzle (no nonce search).
+- For index >= 1: the primary computes `Hash`, then `Signature = hex(Ed25519.Sign(privateKey, sha256Digest))` (signs the raw 32-byte digest, not its hex string), and appends immediately — no search/delay.
+- On `POST /events` (primary only): build the Transaction, seal+sign a new block on top of the local tip, append locally, broadcast to all connected peers, return the new block info.
+- `ValidateBlock(block, prevBlock, trustedPubKey)`: index 0 → must exactly match the well-known genesis constant, always valid. index >= 1 → recompute `Hash` from the block's own fields and confirm it matches the stored value; confirm `PrevHash == prevBlock.Hash`; confirm `Ed25519.Verify(trustedPubKey, sha256Digest, signatureBytes)`. No difficulty/PoW check exists anymore.
+- On a **follower** receiving a block from a peer: if it validates and links to the current tip → append + re-gossip. If it doesn't link but the peer's full chain (fetched via `chain_request`) is longer and every block validates against `trustedPubKey` → replace local chain. A **primary** ignores incoming chain-replacement attempts entirely (it only ever appends blocks it itself signs).
 
 ### P2P transport
 Plain TCP, newline-delimited JSON envelopes: `{"type": "hello"|"block"|"chain_request"|"chain_response", "payload": ...}`.
@@ -60,7 +70,7 @@ On establishing a connection (outbound to a `-peers` entry, or inbound accept): 
 - `GET /health` → `{"status":"ok","height":N}`
 
 ### Free-coin faucet
-- New transaction type: `Transaction{Type:"free_claim", UserID string, Timestamp string(RFC3339)}` — mints 1.0 aicoin to `UserID`, mined into a block exactly like an `event` tx (goes through the same PoW/gossip pipeline). `free_claim` transactions do **not** feed `/price` (only `event` transactions do, per the price formula above).
+- New transaction type: `Transaction{Type:"free_claim", UserID string, Timestamp string(RFC3339)}` — mints 1.0 aicoin to `UserID`, sealed+signed into a block exactly like an `event` tx (same signing/gossip pipeline, primary-only). `free_claim` transactions do **not** feed `/price` (only `event` transactions do, per the price formula above).
 - `POST /free-coins/claim` — body `{"user_id":"..."}`. Look at the chain for the most recent `free_claim` tx with this `UserID`. If there is none, or its `Timestamp` is >= 1 hour in the past, mint a new `free_claim` tx (as above) and return `200 {"granted":true,"height":N,"hash":"...","next_eligible_at":"RFC3339"}`. Otherwise return `429 {"granted":false,"next_eligible_at":"RFC3339"}` (no more than 1 free coin per user per rolling hour).
 
 ### Peer transfer (buy/sell)
@@ -156,4 +166,4 @@ Before forwarding, the proxy validates the wallet over plain HTTP (no subprocess
 ## Docker / docker-compose
 - `aicoin/Dockerfile` — multi-stage: build `aicoind` (and `wallet`) with the Go toolchain, copy the static binary/binaries into a minimal runtime base (e.g. `gcr.io/distroless/static` or `alpine`). Entrypoint runs `aicoind`, flags/ports configurable via `CMD`/env at `docker run` time.
 - `aicoin-proxy/Dockerfile` — multi-stage: `./gradlew build` in a JDK-11 build stage, copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a JRE-11 runtime image. Entrypoint runs the generated start script.
-- Repo-root `docker-compose.yml` (written after both Dockerfiles exist — not part of either project's own task): `redis` (official `redis:alpine` image), `aicoin-node` (built from `aicoin/Dockerfile`, `-redis=redis:6379`), `aicoin-proxy` (built from `aicoin-proxy/Dockerfile`, pointed at `aicoin-node`).
+- Repo-root `docker-compose.yml` (written after both Dockerfiles exist — not part of either project's own task): `redis` (official `redis:alpine` image), `aicoin-node` (built from `aicoin/Dockerfile`, `-role=primary -redis=redis:6379`), `aicoin-proxy` (built from `aicoin-proxy/Dockerfile`, pointed at `aicoin-node`).
