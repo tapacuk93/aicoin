@@ -35,24 +35,10 @@ func main() {
 	trustedPubKeyHex := flag.String("trusted-pubkey", "", "required when -role=follower: the primary's Ed25519 public key, hex-encoded")
 	redisAddr := flag.String("redis", "", "optional Redis host:port for chain persistence (unset = in-memory only)")
 
-	defaults := state.DefaultDecayWeights()
-	decayHour := flag.Float64("decay-hour", defaults.Hour, "price weight for events in the same UTC hour as now")
-	decayDay := flag.Float64("decay-day", defaults.Day, "price weight for events in the same UTC day as now")
-	decayWeek := flag.Float64("decay-week", defaults.Week, "price weight for events in the same ISO week as now")
-	decayMonth := flag.Float64("decay-month", defaults.Month, "price weight for events in the same UTC month as now")
-	decayYear := flag.Float64("decay-year", defaults.Year, "price weight for events in the same UTC year as now")
-	decayOlder := flag.Float64("decay-older", defaults.Older, "price weight for events from a prior UTC year")
+	halfLifeDays := flag.Float64("decay-halflife-days", state.DefaultHalfLifeDays, "price decay half-life in days: weight(age)=2^(-age_days/halflife); default derived from a real, documented ~10x-per-year AI pricing decline rate")
 	flag.Parse()
 
 	peerAddrs := parsePeers(*peersFlag)
-	weights := state.DecayWeights{
-		Hour:  *decayHour,
-		Day:   *decayDay,
-		Week:  *decayWeek,
-		Month: *decayMonth,
-		Year:  *decayYear,
-		Older: *decayOlder,
-	}
 
 	var chainStore chain.ChainStore
 	if strings.TrimSpace(*redisAddr) != "" {
@@ -115,7 +101,7 @@ func main() {
 		node.ConnectToPeers(peerAddrs)
 	}
 
-	srv := api.NewServer(bc, node, weights, roleVal, pubKeyHex)
+	srv := api.NewServer(bc, node, *halfLifeDays, roleVal, pubKeyHex)
 
 	log.Printf("aicoind: http=%s p2p=%s role=%s peers=%v redis=%q genesis=%s",
 		*httpAddr, *p2pAddr, roleVal, peerAddrs, *redisAddr, chain.Genesis().Hash)

@@ -24,7 +24,7 @@ CLI flags:
 - `-keyfile=aicoin-node.key` (primary only) — path to the node's persistent Ed25519 private key; generated on first run if the file doesn't exist
 - `-trusted-pubkey=<hex>` (required when `-role=follower`) — the primary's Ed25519 public key, hex-encoded; a primary logs its own pubkey hex on startup for copy-paste into followers
 - `-redis=host:port` (optional) — when set, persist/reload the chain via Redis (see "Persistence" below); unset = in-memory only (unchanged from before)
-- `-decay-hour=1.0 -decay-day=0.5 -decay-week=0.25 -decay-month=0.125 -decay-year=0.0625 -decay-older=0.03125` — price recency-bucket weights (see "Derived state — price" below); defaults shown are a documented judgment call, not user-specified exact numbers
+- `-decay-halflife-days=110.0` — price decay half-life in days (see "Derived state — price" below); default derived from a real, documented ~10x-per-year AI pricing decline rate, not an arbitrary guess
 
 ### Roles & signing — single source of truth, no PoW
 There is exactly one legitimate writer: the **primary**. It holds an Ed25519 keypair and *signs* every block it appends — that signature (not proof-of-work) is what makes a block valid. **Followers** hold only the primary's public key (`-trusted-pubkey`), replicate the primary's signed chain via P2P, and reject all writes — there is no mining, no difficulty, no nonce, and no "longest valid chain from competing miners" scenario, because nobody but the primary can produce a chain whose blocks verify against the trusted pubkey.
@@ -50,20 +50,34 @@ On establishing a connection (outbound to a `-peers` entry, or inbound accept): 
 ### Derived state (recomputed from chain, not stored separately)
 - **Coin acquisition is closed-set: free faucet claim, or peer transfer ("buy/sell") — that's it.** An `event` transaction (a priced AI-provider call) does **not** mint any aicoin by itself; it exists purely to feed the price formula below.
 
-### Derived state — price (final formula)
-**1 aicoin's price = a recency-weighted average of `CostUSD` across all `event` transactions ever — NOT divided by number of users.** Every event contributes `cost_usd * weight`, where `weight` depends on which UTC calendar bucket the event's `Timestamp` falls into, relative to "now" (wall-clock at query time). Buckets are evaluated top-to-bottom, first match wins, comparing calendar fields (year/month/ISO-week/day/hour) of the event's timestamp against "now"'s:
-1. same UTC year+month+day+hour as now → weight `decay.hour` (default **1.0**)
-2. else same UTC year+month+day as now → weight `decay.day` (default **0.5**)
-3. else same UTC year + ISO calendar week as now → weight `decay.week` (default **0.25**)
-4. else same UTC year+month as now → weight `decay.month` (default **0.125**)
-5. else same UTC year as now → weight `decay.year` (default **0.0625**)
-6. else (a prior year) → weight `decay.older` (default **0.03125**)
+### Derived state — price (final formula, v2: smooth exponential decay)
+**1 aicoin's price = a recency-weighted average of `CostUSD` across all `event` transactions ever — NOT divided by number of users.** Every event contributes `cost_usd * weight(age)`, where `age` = `now - event.Timestamp` (wall-clock "now" at query time; a negative age from clock skew/future timestamps clamps to `0`, giving `weight = 1.0`), and:
 
-`price_usd = Σ(weight_i * cost_usd_i) / Σ(weight_i)` over all event transactions. Zero events → `price_usd = 0`. These six weights are the exact CLI flags above — the specific numbers are a documented default (monotonically halving per bucket), not dictated by the user beyond "older matters less"; tune later via flags if the decay curve needs adjusting.
+```
+weight(age) = 2 ^ (-age_days / halfLifeDays)
+```
+
+a single continuous, smoothly-decreasing curve — no calendar buckets, no step-function jumps at hour/day/week/month boundaries. `halfLifeDays` is the CLI flag `-decay-halflife-days` (default **110.0**).
+
+**Why 110 days**: calibrated from a real, well-documented industry data point — AI inference/API pricing has fallen roughly **10x per year** across major providers (e.g. OpenAI's public per-token pricing dropped roughly 10x from the GPT-3.5-turbo era (early 2023) to GPT-4o-mini-class pricing (mid-2024)). A 10x-per-year decline implies a half-life of `365.25 * ln(2)/ln(10) ≈ 110 days`. This is a documented industry rule-of-thumb, not a precise proprietary dataset — see `aicoin/README.md`'s "Assumptions" for the full reasoning. The economic intuition: an old cost figure shouldn't count as much toward *today's* price precisely because AI got cheaper by roughly that much since it was recorded.
+
+Named checkpoints (informational only — computed from the one formula above, not independently configurable), under the default half-life:
+
+| age | weight |
+|---|---|
+| 1 hour | ≈ 1.000 |
+| 1 day | ≈ 0.994 |
+| 1 week | ≈ 0.957 |
+| 1 month (30.44d) | ≈ 0.825 |
+| 1 quarter (91.31d) | ≈ 0.563 |
+| 1 year (365.25d) | ≈ 0.100 (by construction) |
+| 5 years | ≈ 0.00001 |
+
+`price_usd = Σ(weight(age_i) * cost_usd_i) / Σ(weight(age_i))` over all event transactions. Zero events → `price_usd = 0`.
 
 ### HTTP API (JSON)
 - `POST /events` — body `{"user_id":"...","provider":"...","cost_usd":0.001,"timestamp":"...""}` (`timestamp` optional, server fills `now` if absent) → `200 {"height":N,"hash":"..."}`
-- `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"height":N}` — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification)
+- `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"height":N,"half_life_days":110}` — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life (for transparency/verification of the smooth-decay formula above)
 - `GET /chain` → full chain as a JSON array of blocks
 - `GET /peers` → list of connected peer P2P addresses
 - `GET /balance/{user_id}` → `{"user_id":"...","balance":N}` — sum of `free_claim` mints (+1.0 each) and `transfer` txs (-Amount as sender, +Amount as recipient); `event` txs contribute 0

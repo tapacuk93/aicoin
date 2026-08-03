@@ -44,12 +44,7 @@ docker run -p 9944:9944 -p 9945:9945 aicoin
 | `-keyfile`         | `aicoin-node.key`  | Primary only: path to this node's persistent Ed25519 private key (generated on first run if it doesn't exist) |
 | `-trusted-pubkey`  | `""`               | Required when `-role=follower`: the primary's Ed25519 public key, hex-encoded |
 | `-redis`           | `""`               | Optional `host:port` of a Redis server for chain persistence (see "Persistence" below); unset = pure in-memory |
-| `-decay-hour`      | `1.0`              | `/price` weight for events in the same UTC hour as "now"                |
-| `-decay-day`       | `0.5`              | `/price` weight for events in the same UTC day as "now"                 |
-| `-decay-week`      | `0.25`             | `/price` weight for events in the same ISO calendar week as "now"       |
-| `-decay-month`     | `0.125`            | `/price` weight for events in the same UTC month as "now"               |
-| `-decay-year`      | `0.0625`           | `/price` weight for events in the same UTC year as "now"                |
-| `-decay-older`     | `0.03125`          | `/price` weight for events from a prior UTC year                        |
+| `-decay-halflife-days` | `110.0`        | `/price` decay half-life in days: `weight(age) = 2^(-age_days/halfLifeDays)` (see "Derived state" below); default derived from a real, documented ~10x-per-year AI pricing decline rate |
 
 Primary + follower example (the follower bootstraps off the primary and
 verifies its signed chain against the primary's pubkey):
@@ -174,28 +169,51 @@ in-memory (or Redis-loaded) block list:
   transfer (buy/sell)" below) — summed over the whole chain.
 - **Price is a recency-weighted average of `cost_usd` across every
   `"event"` transaction ever recorded — not divided by number of users.**
-  Each event's `cost_usd` is weighted by which UTC calendar bucket its
-  `timestamp` falls into relative to "now" (wall-clock at query time).
-  Buckets are checked top-to-bottom, first match wins, comparing UTC
-  calendar fields of the event's timestamp against "now"'s:
-
-  1. same UTC year+month+day+hour as now → `decay.hour` (default **1.0**)
-  2. else same UTC year+month+day as now → `decay.day` (default **0.5**)
-  3. else same UTC year + ISO calendar week as now → `decay.week` (default **0.25**)
-  4. else same UTC year+month as now → `decay.month` (default **0.125**)
-  5. else same UTC year as now → `decay.year` (default **0.0625**)
-  6. else (a prior year) → `decay.older` (default **0.03125**)
+  Each event's `cost_usd` is weighted by a single smooth, continuous
+  exponential decay curve over its age (no calendar buckets, no
+  step-function jumps at hour/day/week/month/year boundaries):
 
   ```
-  price_usd = Σ(weight_i * cost_usd_i) / Σ(weight_i)
+  age_days   = (now - event.timestamp) in days   -- negative (clock skew or a
+                                                      future timestamp) clamps to 0
+  weight(age) = 2 ^ (-age_days / halfLifeDays)
+  ```
+
+  `halfLifeDays` is the `-decay-halflife-days` CLI flag, default **110.0**.
+
+  **Why 110 days**: calibrated from a real, well-documented industry data
+  point — AI inference/API pricing has fallen roughly **10x per year**
+  across major providers (e.g. OpenAI's public per-token pricing dropped
+  roughly 10x from the GPT-3.5-turbo era (early 2023) to GPT-4o-mini-class
+  pricing (mid-2024)). A 10x-per-year decline implies a half-life of
+  `365.25 * ln(2)/ln(10) ≈ 110 days` — see "Assumptions" below for how
+  literally to take that figure. The economic intuition: an old cost figure
+  shouldn't count as much toward *today's* price precisely because AI got
+  cheaper by roughly that much since it was recorded.
+
+  Named checkpoints (informational only — computed from the one formula
+  above, not independently configurable), under the default half-life:
+
+  | age | weight |
+  |---|---|
+  | 1 hour | ≈ 1.000 |
+  | 1 day | ≈ 0.994 |
+  | 1 week | ≈ 0.957 |
+  | 1 month (30.44d) | ≈ 0.825 |
+  | 1 quarter (91.31d) | ≈ 0.563 |
+  | 1 year (365.25d) | ≈ 0.100 (by construction) |
+  | 5 years | ≈ 0.00001 |
+
+  ```
+  price_usd = Σ(weight(age_i) * cost_usd_i) / Σ(weight(age_i))
   ```
 
   over all event transactions ever. `total_spend_usd` is the plain
   unweighted all-time sum of `cost_usd` (visibility only); `weighted_total`
-  is `Σweight_i`, the formula's denominator (for debugging/verification).
-  Zero events (or, degenerately, a `weighted_total` of exactly 0 because
-  every configured weight for the buckets actually hit happens to be 0)
-  yields `price_usd = 0` rather than dividing by zero.
+  is `Σweight_i`, the formula's denominator (for debugging/verification);
+  `half_life_days` is the configured decay half-life, echoed back for
+  transparency. Zero events yields `price_usd = 0` rather than dividing by
+  zero.
 
 ## Peer transfer (buy/sell)
 
@@ -266,13 +284,16 @@ Response `200` (primary only):
 ### `GET /price`
 
 ```json
-{"price_usd": 0.00206060606, "total_spend_usd": 0.006, "weighted_total": 1.03125, "height": 2}
+{"price_usd": 0.00206060606, "total_spend_usd": 0.006, "weighted_total": 1.03125, "height": 2, "half_life_days": 110}
 ```
 
 `price_usd` is the recency-weighted average from the "Derived state"
 section above; `total_spend_usd` is the plain unweighted all-time sum of
-`cost_usd`; `weighted_total` is the formula's denominator (`Σweight_i`).
-All three are `0` when there are zero event transactions.
+`cost_usd`; `weighted_total` is the formula's denominator (`Σweight_i`);
+`half_life_days` is the configured decay half-life (the `-decay-halflife-days`
+flag's value), echoed back for transparency/verification of the smooth-decay
+formula. `price_usd`/`total_spend_usd`/`weighted_total` are all `0` when
+there are zero event transactions.
 
 ### `GET /chain`
 
@@ -479,7 +500,7 @@ same as every other flag.
   — gating chain replacement and block acceptance on `Role` per
   "Roles & signing" above.
 - `internal/state` — derived-state computation (`Balance`, `Price`,
-  `FaucetEligibility`, `DecayWeights`) over a snapshot of the chain's
+  `FaucetEligibility`, `Weight`) over a snapshot of the chain's
   blocks.
 - `internal/api` — HTTP handlers implementing the endpoints above,
   including the follower write-rejection gate and `/health`'s role/pubkey
@@ -504,18 +525,22 @@ on a primary-shaped one; and the follower side of the longest-valid-chain
 rule (`ReplaceIfLonger`) adopts a longer valid chain and rejects a
 shorter-or-equal one.
 
-`internal/state` has unit tests covering: the recency-weighted price
-formula, using synthetic events with controlled timestamps constructed to
-land in each of the 6 decay buckets (hour/day/week/month/year/older)
-relative to a fixed, test-controlled "now", checked against a
-hand-computed `Σ(weight_i * cost_usd_i) / Σ(weight_i)` using the exact same
-weights (plus a test proving custom (non-default) weights actually flow
-through, and an explicit zero-event case); balance computation proving
-`"event"` transactions contribute 0, `"free_claim"` transactions contribute
-+1.0 each, and `"transfer"` transactions move `amount` from sender to
-recipient (including several transfers netting out correctly for the same
-user); and faucet eligibility (`FaucetEligibility`) against synthetic
-`free_claim` transactions with controlled timestamps, covering
+`internal/state` has unit tests covering: the smooth exponential recency
+decay formula (`Weight`), checked at controlled ages (0 days, 1 day, 7
+days, 30.44 days, 91.31 days, 365.25 days, plus a negative/future-dated age)
+against a hand-computed `2^(-age_days/halfLifeDays)`, and cross-checked
+against the named-checkpoint table above under the default 110-day
+half-life; a multi-event `Price` aggregate checked against a hand-computed
+`Σ(weight(age_i) * cost_usd_i) / Σ(weight(age_i))`; a test proving a
+non-default `-decay-halflife-days` value actually changes the computed
+weights/price (proving the flag flows through); a test proving a negative
+age (clock skew or a future timestamp) clamps to weight exactly `1.0`; and
+an explicit zero-event case (`price_usd = 0`). Also: balance computation
+proving `"event"` transactions contribute 0, `"free_claim"` transactions
+contribute +1.0 each, and `"transfer"` transactions move `amount` from
+sender to recipient (including several transfers netting out correctly for
+the same user); and faucet eligibility (`FaucetEligibility`) against
+synthetic `free_claim` transactions with controlled timestamps, covering
 never-claimed-before, granted-after-1h, not-yet-eligible, and
 most-recent-claim-wins-among-several cases.
 
@@ -596,7 +621,7 @@ curl -s -X POST http://127.0.0.1:19944/transfer \
 curl -s http://127.0.0.1:19944/balance/alice   # {"user_id":"alice","balance":0.6}
 curl -s http://127.0.0.1:19944/balance/bob     # {"user_id":"bob","balance":0.4}
 
-curl -s http://127.0.0.1:19944/price   # {"price_usd":...,"total_spend_usd":0.0042,"weighted_total":...,"height":4}
+curl -s http://127.0.0.1:19944/price   # {"price_usd":...,"total_spend_usd":0.0042,"weighted_total":...,"height":4,"half_life_days":110}
 
 curl -s http://127.0.0.1:19946/chain   # should show all the new blocks, propagated from the primary
 
@@ -670,16 +695,20 @@ the literal reading taken here:
    given. This check runs regardless of role, but is moot on a follower
    since the write is rejected with `403` before it's reached.
 
-8. **"Same UTC year + ISO calendar week" uses the ISO week-year, not the
-   calendar year.** Go's `time.Time.ISOWeek()` returns `(isoYear, week)`,
-   where `isoYear` can differ from `.Year()` for a handful of dates right
-   around New Year's (the ISO week containing Jan 1st can belong to the
-   previous year, or the last few days of December can belong to next
-   year's week 1). The "week" bucket compares `ISOWeek()`'s pair directly
-   against "now"'s, which is the precise, boundary-correct reading of
-   "same ISO calendar week" — the alternative (comparing `.Year()` and
-   week-number separately) would misclassify events right at a
-   year/week boundary.
+8. **The "10x per year" AI-pricing-decline figure behind the 110-day
+   default half-life is a widely-cited industry rule of thumb, not a
+   dataset with exact primary-source numbers I have in hand.** It's
+   supported by real, observable data points — e.g. OpenAI's public
+   per-token pricing fell roughly an order of magnitude from the
+   GPT-3.5-turbo era (early 2023) to GPT-4o-mini-class pricing (mid-2024) —
+   but "roughly 10x per year across major providers" is a rounded
+   characterization repeated across industry commentary, not a number
+   derived here from a first-party pricing time series I've independently
+   verified provider-by-provider. `365.25 * ln(2)/ln(10) ≈ 110 days` is an
+   exact derivation *given* that 10x/year premise; the premise itself is the
+   part that's a documented approximation. The half-life is a single CLI
+   flag (`-decay-halflife-days`) precisely so this calibration can be
+   revised without any code change if better data becomes available.
 
 9. **`github.com/redis/go-redis/v9` pinned at `v9.5.1`**, not the newest
    release. Newer `v9.x` releases pull in `go.uber.org/atomic` as a real

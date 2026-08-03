@@ -20,17 +20,19 @@ import (
 type Server struct {
 	Chain        *chain.Blockchain
 	Node         *p2p.Node
-	DecayWeights state.DecayWeights
+	HalfLifeDays float64
 	Role         string
 	PubKeyHex    string
 }
 
 // NewServer creates an API server backed by bc, gossiping any locally
 // sealed block via node (node may be nil in tests that don't need P2P),
-// using weights for the /price recency-decay formula, and role/pubKeyHex
-// for GET /health and the follower write-rejection gate.
-func NewServer(bc *chain.Blockchain, node *p2p.Node, weights state.DecayWeights, role, pubKeyHex string) *Server {
-	return &Server{Chain: bc, Node: node, DecayWeights: weights, Role: role, PubKeyHex: pubKeyHex}
+// using halfLifeDays for the /price recency-decay formula (see
+// CONTRACT.md's "Derived state — price (final formula, v2: smooth
+// exponential decay)" section), and role/pubKeyHex for GET /health and the
+// follower write-rejection gate.
+func NewServer(bc *chain.Blockchain, node *p2p.Node, halfLifeDays float64, role, pubKeyHex string) *Server {
+	return &Server{Chain: bc, Node: node, HalfLifeDays: halfLifeDays, Role: role, PubKeyHex: pubKeyHex}
 }
 
 // Router builds the http.Handler exposing all endpoints from CONTRACT.md.
@@ -189,18 +191,20 @@ func (s *Server) handlePostFreeCoinsClaim(w http.ResponseWriter, r *http.Request
 }
 
 // handleGetPrice implements GET /price: the recency-weighted average price
-// described in CONTRACT.md's "Derived state — price (final formula)"
-// section, recomputed from the chain against "now" (wall-clock time at
-// query time) and the server's configured decay weights.
+// described in CONTRACT.md's "Derived state — price (final formula, v2:
+// smooth exponential decay)" section, recomputed from the chain against
+// "now" (wall-clock time at query time) and the server's configured decay
+// half-life.
 func (s *Server) handleGetPrice(w http.ResponseWriter, r *http.Request) {
 	blocks := s.Chain.Blocks()
-	stats := state.Price(blocks, time.Now().UTC(), s.DecayWeights)
+	stats := state.Price(blocks, time.Now().UTC(), s.HalfLifeDays)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"price_usd":       stats.PriceUSD,
 		"total_spend_usd": stats.TotalSpendUSD,
 		"weighted_total":  stats.WeightedTotal,
 		"height":          s.Chain.Tip().Index,
+		"half_life_days":  s.HalfLifeDays,
 	})
 }
 

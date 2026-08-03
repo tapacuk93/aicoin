@@ -1,6 +1,7 @@
 package state
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -39,108 +40,145 @@ func transferAt(from, to string, amount float64, ts time.Time) chain.Transaction
 	}
 }
 
-// TestPriceWeightedAcrossAllSixBuckets builds one synthetic event per
-// recency bucket from CONTRACT.md's "Derived state — price (final
-// formula)" section, relative to a fixed "now" this test fully controls,
-// and checks price_usd/total_spend_usd/weighted_total against a
-// hand-computed weighted average using the exact same (default) weights.
-//
-// "now" is deliberately a Thursday (2026-08-20) so that dates a couple of
-// days apart land in the same ISO week without crossing a Monday boundary,
-// and August 3rd (a Monday) lands in a different ISO week but the same
-// month, giving every bucket a distinct, unambiguous representative
-// timestamp:
-//
-//   - hour:  now itself                                  -> decay.hour
-//   - day:   same Y/M/D, different hour                  -> decay.day
-//   - week:  2026-08-18 (same ISO year+week, diff day)    -> decay.week
-//   - month: 2026-08-03 (same Y/M, diff ISO week)          -> decay.month
-//   - year:  2026-01-15 (same year, diff month)            -> decay.year
-//   - older: 2025-12-31 (prior year)                       -> decay.older
-func TestPriceWeightedAcrossAllSixBuckets(t *testing.T) {
-	now := time.Date(2026, 8, 20, 15, 0, 0, 0, time.UTC)
+// TestWeightMatchesSmoothExponentialFormula constructs synthetic events at
+// controlled ages (relative to a fixed test "now") and checks each one's
+// individual weight against a hand-computed 2^(-age_days/halfLifeDays),
+// per CONTRACT.md's "Derived state — price (final formula, v2: smooth
+// exponential decay)" section. It also cross-checks the default half-life
+// (110 days) against CONTRACT.md's own named-checkpoint table (1h, 1d, 1w,
+// 1mo, 1q, 1y, 5y), which was itself computed from this exact formula.
+func TestWeightMatchesSmoothExponentialFormula(t *testing.T) {
+	const halfLife = DefaultHalfLifeDays // 110.0
 
-	hourTS := now
-	dayTS := now.Add(-3 * time.Hour)                         // 2026-08-20T12:00:00Z: same day, different hour
-	weekTS := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)  // same ISO week (Aug 17-23), different day
-	monthTS := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)   // same month, different ISO week
-	yearTS := time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC)   // same year, different month
-	olderTS := time.Date(2025, 12, 31, 9, 0, 0, 0, time.UTC) // prior year
-
-	// Sanity-check the calendar assumptions the bucket assignment above
-	// depends on, so a future change to these constants fails loudly here
-	// rather than silently miscomputing the "hand-computed" expectation.
-	if wy, ww := weekTS.ISOWeek(); true {
-		if ny, nw := now.ISOWeek(); wy != ny || ww != nw {
-			t.Fatalf("test invariant broken: weekTS ISOWeek=(%d,%d) does not match now's ISOWeek=(%d,%d)", wy, ww, ny, nw)
-		}
+	cases := []struct {
+		name    string
+		ageDays float64
+	}{
+		{"0 days", 0},
+		{"1 day", 1},
+		{"7 days", 7},
+		{"30.44 days (~1 month)", 30.44},
+		{"91.31 days (~1 quarter)", 91.31},
+		{"365.25 days (~1 year)", 365.25},
 	}
-	if monthTS.Year() != now.Year() || monthTS.Month() != now.Month() {
-		t.Fatalf("test invariant broken: monthTS is not in the same year+month as now")
-	}
-	if my, mw := monthTS.ISOWeek(); true {
-		if ny, nw := now.ISOWeek(); my == ny && mw == nw {
-			t.Fatalf("test invariant broken: monthTS must NOT be in the same ISO week as now")
+	for _, c := range cases {
+		got := Weight(c.ageDays, halfLife)
+		want := math.Pow(2, -c.ageDays/halfLife)
+		if diff := math.Abs(got - want); diff > 1e-9 {
+			t.Errorf("%s: Weight(%v, %v) = %v, want %v (diff %v)", c.name, c.ageDays, halfLife, got, want, diff)
 		}
 	}
 
-	const hourCost, dayCost, weekCost, monthCost, yearCost, olderCost = 1.0, 2.0, 3.0, 4.0, 5.0, 6.0
-
-	blocks := []chain.Block{
-		chain.Genesis(),
-		blockWith(1, txAt("alice", "openai", hourCost, hourTS)),
-		blockWith(2, txAt("bob", "anthropic", dayCost, dayTS)),
-		blockWith(3, txAt("carol", "google", weekCost, weekTS)),
-		blockWith(4, txAt("dave", "mistral", monthCost, monthTS)),
-		blockWith(5, txAt("eve", "cohere", yearCost, yearTS)),
-		blockWith(6, txAt("frank", "openai", olderCost, olderTS)),
+	// Cross-check against CONTRACT.md's named-checkpoint table under the
+	// default half-life (generous tolerance since the table is rounded to
+	// 3 significant figures).
+	checkpoints := []struct {
+		name    string
+		ageDays float64
+		want    float64
+		tol     float64
+	}{
+		{"1 hour", 1.0 / 24, 1.000, 0.001},
+		{"1 day", 1, 0.994, 0.001},
+		{"1 week", 7, 0.957, 0.001},
+		{"1 month (30.44d)", 30.44, 0.825, 0.001},
+		{"1 quarter (91.31d)", 91.31, 0.563, 0.002},
+		{"1 year (365.25d)", 365.25, 0.100, 0.0005},
+		{"5 years", 5 * 365.25, 0.00001, 0.000005},
 	}
-
-	weights := DefaultDecayWeights()
-	stats := Price(blocks, now, weights)
-
-	wantTotal := hourCost + dayCost + weekCost + monthCost + yearCost + olderCost
-	wantWeightedTotal := weights.Hour + weights.Day + weights.Week + weights.Month + weights.Year + weights.Older
-	wantWeightedSum := weights.Hour*hourCost + weights.Day*dayCost + weights.Week*weekCost +
-		weights.Month*monthCost + weights.Year*yearCost + weights.Older*olderCost
-	wantPrice := wantWeightedSum / wantWeightedTotal
-
-	if !floatEquals(stats.TotalSpendUSD, wantTotal) {
-		t.Errorf("total_spend_usd = %v, want %v", stats.TotalSpendUSD, wantTotal)
-	}
-	if !floatEquals(stats.WeightedTotal, wantWeightedTotal) {
-		t.Errorf("weighted_total = %v, want %v", stats.WeightedTotal, wantWeightedTotal)
-	}
-	if !floatEquals(stats.PriceUSD, wantPrice) {
-		t.Errorf("price_usd = %v, want %v", stats.PriceUSD, wantPrice)
+	for _, c := range checkpoints {
+		got := Weight(c.ageDays, halfLife)
+		if diff := math.Abs(got - c.want); diff > c.tol {
+			t.Errorf("checkpoint %s: Weight(%v, %v) = %v, want ~%v (tol %v)", c.name, c.ageDays, halfLife, got, c.want, c.tol)
+		}
 	}
 }
 
-// TestPriceCustomWeightsFlowThrough proves the weights parameter actually
-// drives the computation (not just the defaults): with all events pinned
-// to the "hour" bucket, price_usd must equal the plain unweighted average
-// regardless of what the other five weights are set to (their bucket has
-// zero events, so they must not influence the result at all).
-func TestPriceCustomWeightsFlowThrough(t *testing.T) {
+// TestWeightFutureTimestampClampsToOne proves a negative age (clock skew,
+// or an event timestamped in the future) clamps to age=0, giving weight
+// exactly 1.0, per CONTRACT.md's clamp rule.
+func TestWeightFutureTimestampClampsToOne(t *testing.T) {
+	for _, ageDays := range []float64{-0.001, -1, -365} {
+		if got := Weight(ageDays, DefaultHalfLifeDays); got != 1.0 {
+			t.Errorf("Weight(%v, %v) = %v, want exactly 1.0 (negative age clamps to 0)", ageDays, DefaultHalfLifeDays, got)
+		}
+	}
+}
+
+// TestPriceAggregateMatchesHandComputedSmoothDecay builds a small
+// multi-event scenario at exact multiples of the default half-life (so the
+// per-event weights are round numbers: 1.0, 0.5, 0.25) and checks
+// price_usd/total_spend_usd/weighted_total against a hand-computed
+// Σ(weight_i*cost_usd_i)/Σ(weight_i).
+func TestPriceAggregateMatchesHandComputedSmoothDecay(t *testing.T) {
 	now := time.Date(2026, 8, 20, 15, 0, 0, 0, time.UTC)
+
+	const halfLife = DefaultHalfLifeDays
+	tsNow := now                                                         // age 0   -> weight 1.0
+	tsOneHalfLife := now.Add(-time.Duration(halfLife*24) * time.Hour)    // age 110 -> weight 0.5
+	tsTwoHalfLives := now.Add(-time.Duration(2*halfLife*24) * time.Hour) // age 220 -> weight 0.25
+
+	const costA, costB, costC = 0.10, 0.20, 0.30
+
 	blocks := []chain.Block{
 		chain.Genesis(),
-		blockWith(1, txAt("alice", "openai", 0.10, now)),
-		blockWith(2, txAt("bob", "anthropic", 0.30, now)),
+		blockWith(1, txAt("alice", "openai", costA, tsNow)),
+		blockWith(2, txAt("bob", "anthropic", costB, tsOneHalfLife)),
+		blockWith(3, txAt("carol", "google", costC, tsTwoHalfLives)),
 	}
 
-	weights := DecayWeights{Hour: 7.0, Day: 999, Week: 999, Month: 999, Year: 999, Older: 999}
-	stats := Price(blocks, now, weights)
+	stats := Price(blocks, now, halfLife)
 
-	// Both events share the same "hour" weight, so it cancels out of the
-	// weighted average entirely: price_usd = plain mean of cost_usd.
-	wantPrice := (0.10 + 0.30) / 2.0
-	if !floatEquals(stats.PriceUSD, wantPrice) {
-		t.Errorf("price_usd = %v, want %v (weight should cancel when all events share one bucket)", stats.PriceUSD, wantPrice)
+	const wA, wB, wC = 1.0, 0.5, 0.25
+	wantWeightedTotal := wA + wB + wC
+	wantWeightedSum := wA*costA + wB*costB + wC*costC
+	wantPrice := wantWeightedSum / wantWeightedTotal
+	wantTotalSpend := costA + costB + costC
+
+	if !floatEquals(stats.TotalSpendUSD, wantTotalSpend) {
+		t.Errorf("total_spend_usd = %v, want %v", stats.TotalSpendUSD, wantTotalSpend)
 	}
-	wantWeightedTotal := 2 * weights.Hour
-	if !floatEquals(stats.WeightedTotal, wantWeightedTotal) {
-		t.Errorf("weighted_total = %v, want %v", stats.WeightedTotal, wantWeightedTotal)
+	if diff := math.Abs(stats.WeightedTotal - wantWeightedTotal); diff > 1e-6 {
+		t.Errorf("weighted_total = %v, want %v (diff %v)", stats.WeightedTotal, wantWeightedTotal, diff)
+	}
+	if diff := math.Abs(stats.PriceUSD - wantPrice); diff > 1e-6 {
+		t.Errorf("price_usd = %v, want %v (diff %v)", stats.PriceUSD, wantPrice, diff)
+	}
+}
+
+// TestPriceCustomHalfLifeFlowsThrough proves the halfLifeDays parameter
+// actually drives the computation (not just the default 110): the same
+// fixed-age event produces a different weight (and hence a different
+// price_usd, when mixed with a same-instant event) under a short half-life
+// than under the default one.
+func TestPriceCustomHalfLifeFlowsThrough(t *testing.T) {
+	now := time.Date(2026, 8, 20, 15, 0, 0, 0, time.UTC)
+	agedTS := now.Add(-10 * 24 * time.Hour) // 10 days old
+
+	blocks := []chain.Block{
+		chain.Genesis(),
+		blockWith(1, txAt("alice", "openai", 0.10, now)),     // age 0   -> weight 1.0 regardless of half-life
+		blockWith(2, txAt("bob", "anthropic", 0.30, agedTS)), // age 10  -> weight depends on half-life
+	}
+
+	const customHalfLife = 10.0 // much shorter than the 110-day default
+	statsCustom := Price(blocks, now, customHalfLife)
+	statsDefault := Price(blocks, now, DefaultHalfLifeDays)
+
+	if floatEquals(statsCustom.PriceUSD, statsDefault.PriceUSD) {
+		t.Fatalf("price_usd identical (%v) under custom half-life %v and default half-life %v; the flag isn't flowing through",
+			statsCustom.PriceUSD, customHalfLife, DefaultHalfLifeDays)
+	}
+
+	// Hand-compute the custom-half-life expectation directly.
+	wNow := 1.0
+	wAged := math.Pow(2, -10.0/customHalfLife)
+	wantWeightedTotal := wNow + wAged
+	wantWeightedSum := wNow*0.10 + wAged*0.30
+	wantPrice := wantWeightedSum / wantWeightedTotal
+
+	if diff := math.Abs(statsCustom.PriceUSD - wantPrice); diff > 1e-9 {
+		t.Errorf("price_usd (custom half-life) = %v, want %v (diff %v)", statsCustom.PriceUSD, wantPrice, diff)
 	}
 }
 
@@ -150,7 +188,7 @@ func TestPriceZeroEvents(t *testing.T) {
 	blocks := []chain.Block{chain.Genesis()}
 	now := time.Date(2026, 8, 20, 15, 0, 0, 0, time.UTC)
 
-	stats := Price(blocks, now, DefaultDecayWeights())
+	stats := Price(blocks, now, DefaultHalfLifeDays)
 
 	if stats.TotalSpendUSD != 0 {
 		t.Errorf("total_spend_usd = %v, want 0", stats.TotalSpendUSD)

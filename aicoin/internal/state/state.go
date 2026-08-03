@@ -1,10 +1,12 @@
 // Package state computes derived state from the chain: per-user balances
 // and the recency-weighted price statistics described in CONTRACT.md's
-// "Derived state — price (final formula)" section. None of this is stored
-// separately — it is recomputed from the chain on every query.
+// "Derived state — price (final formula, v2: smooth exponential decay)"
+// section. None of this is stored separately — it is recomputed from the
+// chain on every query.
 package state
 
 import (
+	"math"
 	"time"
 
 	"aicoin/internal/chain"
@@ -73,63 +75,28 @@ func FaucetEligibility(blocks []chain.Block, userID string, now time.Time) (elig
 	return !now.Before(lastClaim.Add(time.Hour)), lastClaim, true
 }
 
-// DecayWeights holds the six recency-bucket weights from CONTRACT.md's
-// "Derived state — price (final formula)" section, one per bucket,
-// evaluated top-to-bottom with first-match-wins semantics in weightFor.
-// These map 1:1 to the -decay-hour/-decay-day/-decay-week/-decay-month/
-// -decay-year/-decay-older CLI flags.
-type DecayWeights struct {
-	Hour  float64
-	Day   float64
-	Week  float64
-	Month float64
-	Year  float64
-	Older float64
-}
+// DefaultHalfLifeDays is the default value of the -decay-halflife-days CLI
+// flag, per CONTRACT.md's "Derived state — price (final formula, v2: smooth
+// exponential decay)" section: calibrated from a real, documented industry
+// data point (AI inference/API pricing has fallen roughly 10x per year
+// across major providers), giving a half-life of
+// 365.25 * ln(2)/ln(10) ≈ 110 days.
+const DefaultHalfLifeDays = 110.0
 
-// DefaultDecayWeights returns the documented default weights (a
-// monotonically halving curve): Hour=1.0, Day=0.5, Week=0.25, Month=0.125,
-// Year=0.0625, Older=0.03125.
-func DefaultDecayWeights() DecayWeights {
-	return DecayWeights{
-		Hour:  1.0,
-		Day:   0.5,
-		Week:  0.25,
-		Month: 0.125,
-		Year:  0.0625,
-		Older: 0.03125,
+// Weight computes the smooth exponential recency weight for an event whose
+// age (in days, i.e. now - event.Timestamp expressed in days) is ageDays,
+// per CONTRACT.md's "Derived state — price (final formula, v2: smooth
+// exponential decay)" section:
+//
+//	weight(age) = 2 ^ (-age_days / halfLifeDays)
+//
+// A negative ageDays (clock skew or a future-dated event timestamp) is
+// clamped to 0, yielding weight = 1.0.
+func Weight(ageDays, halfLifeDays float64) float64 {
+	if ageDays < 0 {
+		ageDays = 0
 	}
-}
-
-// weightFor picks ts's weight relative to now, per CONTRACT.md: buckets are
-// evaluated top-to-bottom, first match wins, comparing UTC calendar fields.
-// Both ts and now are converted to UTC internally so callers may pass
-// either UTC or non-UTC (but well-formed) time.Time values.
-func weightFor(ts, now time.Time, w DecayWeights) float64 {
-	ts = ts.UTC()
-	now = now.UTC()
-
-	tYear, tMonth, tDay := ts.Date()
-	nYear, nMonth, nDay := now.Date()
-	tHour := ts.Hour()
-	nHour := now.Hour()
-	tIsoYear, tIsoWeek := ts.ISOWeek()
-	nIsoYear, nIsoWeek := now.ISOWeek()
-
-	switch {
-	case tYear == nYear && tMonth == nMonth && tDay == nDay && tHour == nHour:
-		return w.Hour
-	case tYear == nYear && tMonth == nMonth && tDay == nDay:
-		return w.Day
-	case tIsoYear == nIsoYear && tIsoWeek == nIsoWeek:
-		return w.Week
-	case tYear == nYear && tMonth == nMonth:
-		return w.Month
-	case tYear == nYear:
-		return w.Year
-	default:
-		return w.Older
-	}
+	return math.Pow(2, -ageDays/halfLifeDays)
 }
 
 // PriceStats holds the price statistics described in CONTRACT.md's
@@ -142,22 +109,22 @@ type PriceStats struct {
 
 // Price computes 1 aicoin's price as a recency-weighted average of CostUSD
 // across every "event" transaction ever recorded on chain, per
-// CONTRACT.md's "Derived state — price (final formula)" section:
+// CONTRACT.md's "Derived state — price (final formula, v2: smooth
+// exponential decay)" section:
 //
 //	price_usd = Σ(weight_i * cost_usd_i) / Σ(weight_i)
 //
-// where each event's weight is chosen by weightFor(event timestamp, now,
-// weights). now is the wall-clock time to weight against (callers pass
-// time.Now().UTC() in production; tests pass a fixed instant). Transactions
-// whose Timestamp cannot be parsed are ignored, same as event transactions
-// of any other type.
+// where each event's weight is Weight(ageDays, halfLifeDays), ageDays being
+// now.Sub(event timestamp) expressed in days (negative ageDays from clock
+// skew/future timestamps clamps to 0 inside Weight). now is the wall-clock
+// time to weight against (callers pass time.Now().UTC() in production;
+// tests pass a fixed instant). Transactions whose Timestamp cannot be
+// parsed are ignored, same as event transactions of any other type.
 //
 //   - total_spend_usd is the plain unweighted all-time sum of cost_usd.
 //   - weighted_total is Σweight_i, the formula's denominator.
-//   - Zero events (or a weighted_total of exactly 0, e.g. every observed
-//     event happens to land in a zero-weighted bucket) yields price_usd=0
-//     rather than dividing by zero.
-func Price(blocks []chain.Block, now time.Time, weights DecayWeights) PriceStats {
+//   - Zero events yields price_usd=0 rather than dividing by zero.
+func Price(blocks []chain.Block, now time.Time, halfLifeDays float64) PriceStats {
 	var totalSpendUSD, weightedSum, weightedTotal float64
 
 	for _, b := range blocks {
@@ -169,7 +136,8 @@ func Price(blocks []chain.Block, now time.Time, weights DecayWeights) PriceStats
 			if err != nil {
 				continue
 			}
-			w := weightFor(ts, now, weights)
+			ageDays := now.Sub(ts).Hours() / 24
+			w := Weight(ageDays, halfLifeDays)
 			totalSpendUSD += tx.CostUSD
 			weightedSum += w * tx.CostUSD
 			weightedTotal += w

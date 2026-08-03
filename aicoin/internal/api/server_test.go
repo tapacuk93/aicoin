@@ -37,7 +37,7 @@ func newTestServer(t *testing.T, role string) *Server {
 	} else {
 		bc = chain.NewBlockchain(pub, priv)
 	}
-	return NewServer(bc, nil, state.DefaultDecayWeights(), role, hex.EncodeToString(pub))
+	return NewServer(bc, nil, state.DefaultHalfLifeDays, role, hex.EncodeToString(pub))
 }
 
 func postJSON(t *testing.T, srv *Server, path string, body interface{}) *httptest.ResponseRecorder {
