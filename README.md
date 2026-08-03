@@ -8,6 +8,8 @@
 > README for exhaustive detail. This file is the practical "how do I run
 > this" guide.
 
+Live landing page: [aicoin.oeaio.com](https://aicoin.oeaio.com) (source in [`site/`](./site/), a static page on S3+CloudFront).
+
 Two things that work together:
 
 - **aicoin-proxy** — an HTTP reverse proxy you point your AI API calls at
