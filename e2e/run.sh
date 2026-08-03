@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end test wiring aicoin (Go P2P node) + aicoin-proxy (Java/Netty)
-# together against a throwaway mock AI provider. See CONTRACT.md for the
-# exact API/behavior this asserts against.
+# End-to-end test wiring aicoin (Go blockchain node) + aicoin-proxy
+# (Java/Netty) together against a throwaway mock AI provider. See
+# CONTRACT.md for the exact API/behavior this asserts against.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,6 +14,7 @@ cd "$REPO_ROOT"
 WORKDIR="$(mktemp -d /tmp/aicoin-e2e.XXXXXX)"
 FAIL=0
 PIDS=()
+REDIS_CONTAINER=""
 
 log() { echo "[e2e] $*"; }
 pass() { echo "  PASS: $*"; }
@@ -26,10 +27,11 @@ cleanup() {
   # scripts exec into a child (e.g. the generated Gradle "application" start
   # script forking the JVM) that can survive the parent's death — sweep any
   # listener still squatting on our ports as a backstop.
-  for p in "$NODE_A_HTTP" "$NODE_A_P2P" "$NODE_B_HTTP" "$NODE_B_P2P" "$MOCK_PORT" "$PROXY_PORT"; do
+  for p in "$NODE_A_HTTP" "$NODE_B_HTTP" "$MOCK_PORT" "$PROXY_PORT"; do
     pids_on_port=$(lsof -t -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null || true)
     [ -n "$pids_on_port" ] && kill -9 $pids_on_port 2>/dev/null || true
   done
+  [ -n "$REDIS_CONTAINER" ] && docker stop "$REDIS_CONTAINER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -55,11 +57,10 @@ wait_for() {
 }
 
 NODE_A_HTTP=19944
-NODE_A_P2P=19945
 NODE_B_HTTP=19946
-NODE_B_P2P=19947
 MOCK_PORT=18090
 PROXY_PORT=18080
+REDIS_PORT=16379
 
 log "building Go binaries"
 (cd "$REPO_ROOT/aicoin" && go build -o "$WORKDIR/aicoind" ./cmd/aicoind && go build -o "$WORKDIR/wallet" ./cmd/wallet) || { log "go build failed"; exit 1; }
@@ -72,12 +73,15 @@ else
   (cd "$REPO_ROOT/aicoin-proxy" && ./gradlew installDist -q --no-daemon) || { log "gradle build failed"; exit 1; }
 fi
 
+log "starting a throwaway Redis container on :$REDIS_PORT (replication between node A and node B now goes through Redis, not P2P)"
+REDIS_CONTAINER=$(docker run -d --rm -p "$REDIS_PORT:6379" redis:alpine) || { log "docker run redis failed"; exit 1; }
+
 log "starting mock AI provider on :$MOCK_PORT"
 python3 "$REPO_ROOT/e2e/mock_provider.py" "$MOCK_PORT" > "$WORKDIR/mock.log" 2>&1 &
 PIDS+=($!)
 
-log "starting aicoin node A as primary on :$NODE_A_HTTP (p2p :$NODE_A_P2P)"
-"$WORKDIR/aicoind" -http=":$NODE_A_HTTP" -p2p=":$NODE_A_P2P" -role=primary -keyfile="$WORKDIR/nodeA.key" > "$WORKDIR/nodeA.log" 2>&1 &
+log "starting aicoin node A as primary on :$NODE_A_HTTP (redis 127.0.0.1:$REDIS_PORT)"
+"$WORKDIR/aicoind" -http=":$NODE_A_HTTP" -role=primary -keyfile="$WORKDIR/nodeA.key" -redis="127.0.0.1:$REDIS_PORT" > "$WORKDIR/nodeA.log" 2>&1 &
 PIDS+=($!)
 
 wait_for "http://127.0.0.1:$NODE_A_HTTP/health" || { log "node A never came up"; exit 1; }
@@ -85,8 +89,8 @@ PRIMARY_PUBKEY=$(grep -oE 'pubkey=[0-9a-f]{64}' "$WORKDIR/nodeA.log" | head -1 |
 if [ -z "$PRIMARY_PUBKEY" ]; then log "could not read primary's pubkey from its startup log"; cat "$WORKDIR/nodeA.log"; exit 1; fi
 log "primary pubkey: $PRIMARY_PUBKEY"
 
-log "starting aicoin node B as a follower of A on :$NODE_B_HTTP (p2p :$NODE_B_P2P)"
-"$WORKDIR/aicoind" -http=":$NODE_B_HTTP" -p2p=":$NODE_B_P2P" -role=follower -trusted-pubkey="$PRIMARY_PUBKEY" -peers="127.0.0.1:$NODE_A_P2P" > "$WORKDIR/nodeB.log" 2>&1 &
+log "starting aicoin node B as a follower of A on :$NODE_B_HTTP (same redis, polling every 1s)"
+"$WORKDIR/aicoind" -http=":$NODE_B_HTTP" -role=follower -trusted-pubkey="$PRIMARY_PUBKEY" -redis="127.0.0.1:$REDIS_PORT" -follower-poll-interval=1s > "$WORKDIR/nodeB.log" 2>&1 &
 PIDS+=($!)
 
 wait_for "http://127.0.0.1:$MOCK_PORT/" || true
@@ -163,11 +167,11 @@ log "--- test 10: overdraft transfer is rejected ---"
 code=$(curl -s -o "$WORKDIR/t10.json" -w "%{http_code}" -X POST "http://127.0.0.1:$NODE_A_HTTP/transfer" -d '{"from_user_id":"bob","to_user_id":"alice","amount":999}')
 [ "$code" = "400" ] && pass "400 insufficient balance" || fail "expected 400, got $code: $(cat "$WORKDIR/t10.json")"
 
-log "--- test 11: P2P replication — follower B mirrors primary A's signed chain ---"
-sleep 1
+log "--- test 11: Redis replication — follower B polls and mirrors primary A's signed chain ---"
+sleep 2
 height_a=$(curl -s "http://127.0.0.1:$NODE_A_HTTP/chain" | python3 -c "import json,sys;print(len(json.load(sys.stdin)))")
 height_b=$(curl -s "http://127.0.0.1:$NODE_B_HTTP/chain" | python3 -c "import json,sys;print(len(json.load(sys.stdin)))")
-if [ "$height_a" = "$height_b" ] && [ "$height_a" -gt 1 ]; then pass "follower B replicated primary A's chain (height $height_a)"; else fail "chain mismatch: A=$height_a B=$height_b"; fi
+if [ "$height_a" = "$height_b" ] && [ "$height_a" -gt 1 ]; then pass "follower B replicated primary A's chain via Redis polling (height $height_a)"; else fail "chain mismatch: A=$height_a B=$height_b"; fi
 
 log "--- test 12: follower rejects writes (no signing key) ---"
 code=$(curl -s -o "$WORKDIR/t12.json" -w "%{http_code}" -X POST "http://127.0.0.1:$NODE_B_HTTP/events" -d '{"user_id":"eve","provider":"openai","cost_usd":0.01}')

@@ -12,25 +12,24 @@ aicoin/            (this repo root)
   e2e/              end-to-end test wiring both together
 ```
 
-## aicoin (Go) — P2P blockchain node
+## aicoin (Go) — blockchain node (single primary + DynamoDB-replicated followers)
 
 Binary: `go run ./cmd/aicoind` (or built via `go build ./cmd/aicoind`).
 
 CLI flags:
 - `-http=:9944`   HTTP API listen address
-- `-p2p=:9945`    P2P TCP listen address
-- `-peers=host:port,...`  comma-separated bootstrap peer P2P addresses (optional)
 - `-role=primary|follower` (default `primary`) — see "Roles & signing" below
 - `-keyfile=aicoin-node.key` (primary only) — path to the node's persistent Ed25519 private key; generated on first run if the file doesn't exist
 - `-trusted-pubkey=<hex>` (required when `-role=follower`) — the primary's Ed25519 public key, hex-encoded; a primary logs its own pubkey hex on startup for copy-paste into followers
-- `-redis=host:port` (optional) — when set, persist/reload the chain via Redis (see "Persistence" below); unset = in-memory only (unchanged from before)
+- `-dynamodb-table=<name>` — persist/reload the chain via DynamoDB (see "Persistence" below). Optional for a primary (unset = in-memory only, resets on restart); **required** for a follower, since DynamoDB is now the only replication mechanism (a follower with no `-dynamodb-table` has no way to learn the primary's chain and fails to start). AWS region/credentials come from the standard SDK environment (`AWS_REGION`, instance role, etc.) — no separate region flag.
+- `-follower-poll-interval=2s` (follower only) — how often to re-query the shared chain from DynamoDB and adopt it if it's grown
 - `-decay-halflife-days=110.0` — price decay half-life in days (see "Derived state — price" below); default derived from a real, documented ~10x-per-year AI pricing decline rate, not an arbitrary guess
 
-### Roles & signing — single source of truth, no PoW
-There is exactly one legitimate writer: the **primary**. It holds an Ed25519 keypair and *signs* every block it appends — that signature (not proof-of-work) is what makes a block valid. **Followers** hold only the primary's public key (`-trusted-pubkey`), replicate the primary's signed chain via P2P, and reject all writes — there is no mining, no difficulty, no nonce, and no "longest valid chain from competing miners" scenario, because nobody but the primary can produce a chain whose blocks verify against the trusted pubkey.
-- Write endpoints (`POST /events`, `/transfer`, `/free-coins/claim`) on a **follower** → `403 {"error":"this node is a read-only replica; write to the primary"}`. On a **primary**, they work as before, minus any mining step.
-- A **primary** never replaces its own chain based on incoming P2P gossip/sync — it is authoritative by definition. A **follower** adopts a peer's chain if every block validates (see below) and it's longer than its own.
-- `GET /health` now also reports `{"status":"ok","height":N,"role":"primary"|"follower","pubkey":"<hex>"}` — for a primary, `pubkey` is its own signing key's public half; for a follower, it's the `-trusted-pubkey` it's configured to verify against.
+### Roles & signing — single source of truth, no PoW, no P2P
+There is exactly one legitimate writer: the **primary**. It holds an Ed25519 keypair and *signs* every block it appends — that signature (not proof-of-work) is what makes a block valid. **Followers** hold only the primary's public key (`-trusted-pubkey`), replicate the primary's signed chain by polling the same DynamoDB table the primary writes to, and reject all writes. There is no mining, no difficulty, no nonce, no P2P networking, and no "longest valid chain from competing miners" scenario, because nobody but the primary can produce a chain whose blocks verify against the trusted pubkey — a decentralized gossip protocol has no problem to solve here that shared durable storage doesn't already solve more simply.
+- Write endpoints (`POST /events`, `/transfer`, `/free-coins/claim`) on a **follower** → `403 {"error":"this node is a read-only replica; write to the primary"}`. On a **primary**, they work as before.
+- A **follower**, every `-follower-poll-interval`, re-queries the shared chain from DynamoDB (see "Persistence" below) and, if the stored chain is longer than its local one and every block in it validates against `trustedPubKey`, adopts it wholesale (same validation as `ValidateChain` always used). A **primary** never re-reads/replaces its own chain from DynamoDB after startup — it is authoritative by definition; DynamoDB is where it writes, not where it takes direction from.
+- `GET /health` reports `{"status":"ok","height":N,"role":"primary"|"follower","pubkey":"<hex>"}` — for a primary, `pubkey` is its own signing key's public half; for a follower, it's the `-trusted-pubkey` it's configured to verify against.
 
 ### Chain model
 - `Block{Index int, Timestamp string(RFC3339), PrevHash string, Hash string, Signature string, Transactions []Transaction}` (no `Nonce` — that was PoW-only and is gone)
@@ -39,13 +38,8 @@ There is exactly one legitimate writer: the **primary**. It holds an Ed25519 key
 - One transaction per block (no mempool batching) — simplest correct model, unchanged.
 - `Hash = hex(SHA256(index|prevHash|timestamp|txJSON))` — a content hash, not a puzzle (no nonce search).
 - For index >= 1: the primary computes `Hash`, then `Signature = hex(Ed25519.Sign(privateKey, sha256Digest))` (signs the raw 32-byte digest, not its hex string), and appends immediately — no search/delay.
-- On `POST /events` (primary only): build the Transaction, seal+sign a new block on top of the local tip, append locally, broadcast to all connected peers, return the new block info.
+- On `POST /events` (primary only): build the Transaction, seal+sign a new block on top of the local tip, append locally, persist to DynamoDB if configured, return the new block info.
 - `ValidateBlock(block, prevBlock, trustedPubKey)`: index 0 → must exactly match the well-known genesis constant, always valid. index >= 1 → recompute `Hash` from the block's own fields and confirm it matches the stored value; confirm `PrevHash == prevBlock.Hash`; confirm `Ed25519.Verify(trustedPubKey, sha256Digest, signatureBytes)`. No difficulty/PoW check exists anymore.
-- On a **follower** receiving a block from a peer: if it validates and links to the current tip → append + re-gossip. If it doesn't link but the peer's full chain (fetched via `chain_request`) is longer and every block validates against `trustedPubKey` → replace local chain. A **primary** ignores incoming chain-replacement attempts entirely (it only ever appends blocks it itself signs).
-
-### P2P transport
-Plain TCP, newline-delimited JSON envelopes: `{"type": "hello"|"block"|"chain_request"|"chain_response", "payload": ...}`.
-On establishing a connection (outbound to a `-peers` entry, or inbound accept): send `hello` (payload = own p2p listen addr), then immediately request/respond with `chain_response` (payload = full chain) so nodes sync on startup.
 
 ### Derived state (recomputed from chain, not stored separately)
 - **Coin acquisition is closed-set: free faucet claim, or peer transfer ("buy/sell") — that's it.** An `event` transaction (a priced AI-provider call) does **not** mint any aicoin by itself; it exists purely to feed the price formula below.
@@ -79,7 +73,6 @@ Named checkpoints (informational only — computed from the one formula above, n
 - `POST /events` — body `{"user_id":"...","provider":"...","cost_usd":0.001,"timestamp":"...""}` (`timestamp` optional, server fills `now` if absent) → `200 {"height":N,"hash":"..."}`
 - `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"height":N,"half_life_days":110}` — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life (for transparency/verification of the smooth-decay formula above)
 - `GET /chain` → full chain as a JSON array of blocks
-- `GET /peers` → list of connected peer P2P addresses
 - `GET /balance/{user_id}` → `{"user_id":"...","balance":N}` — sum of `free_claim` mints (+1.0 each) and `transfer` txs (-Amount as sender, +Amount as recipient); `event` txs contribute 0
 - `GET /health` → `{"status":"ok","height":N}`
 
@@ -91,8 +84,12 @@ Named checkpoints (informational only — computed from the one formula above, n
 New transaction type `Transaction{Type:"transfer", FromUserID string, ToUserID string, Amount float64, Timestamp string(RFC3339)}` — mined like any other tx. Derived balance effect: `balances[FromUserID] -= Amount; balances[ToUserID] += Amount`. This is the *entire* buy/sell mechanism — no real money, no external payment rail: "buying" is just receiving a transfer, "selling" is sending one.
 `POST /transfer` — body `{"from_user_id":"...","to_user_id":"...","amount":N}`. Validate `amount > 0` and current derived balance of `from_user_id >= amount`; if not, `400 {"error":"insufficient balance"}`. Otherwise mine the tx and return `200 {"height":N,"hash":"..."}`.
 
-### Persistence (Redis stand-in for a real AWS in-memory store)
-When `-redis=host:port` is set: on startup, `GET` key `aicoin:chain` from Redis — if present (a JSON array of blocks, same shape as `GET /chain`'s response), load it as the local chain instead of starting from genesis. After successfully appending any block (whether mined locally via an API call, or accepted from a peer via gossip), `SET aicoin:chain` to the full current chain JSON. When `-redis` is unset, behavior is unchanged (pure in-memory, resets on restart). This is explicitly a stand-in for a real AWS in-memory datastore (e.g. ElastiCache/MemoryDB) — same read/write shape, swappable later without changing the chain logic itself.
+### Persistence (DynamoDB — genuinely durable, not a cache)
+This chain holds wallet balances and transaction history, so persistence needs a real durability guarantee, not a best-effort cache — a managed in-memory cache (e.g. Redis/ElastiCache) replicates for availability, not durability, and can lose data written since its last snapshot on failure. DynamoDB is synchronously replicated across 3 AZs per write and still single-digit-millisecond fast, which is why it's the store here instead.
+
+Table shape: partition key `chain_id` (string, always the literal `"aicoin"` — one chain, one partition), sort key `block_index` (number, the block's `Index`). One item per block: `chain_id`, `block_index`, `timestamp`, `prev_hash`, `hash`, `signature`, and `transactions_json` (the block's `Transactions`, JSON-encoded into a single string attribute — avoids ever needing to rewrite the whole chain as one item, which would eventually hit DynamoDB's 400KB per-item limit).
+
+When `-dynamodb-table=<name>` is set: on startup, `Query` all items for `chain_id = "aicoin"` ordered by `block_index` to reconstruct the chain (or start from genesis if empty). After a **primary** successfully seals a new block, `PutItem` just that one block's item (not the whole chain — an O(1) write regardless of chain length). A **follower** never writes; every `-follower-poll-interval` it re-runs the same `Query` and adopts the result if it's longer and fully valid. When `-dynamodb-table` is unset on a primary, behavior is unchanged (pure in-memory, resets on restart); it is not a valid configuration for a follower (see "Roles & signing" above).
 
 ### Wallet CLI
 Binary: `go run ./cmd/wallet -user=<id> [-node=http://localhost:9944] [-proxy=http://localhost:8080]` (defaults shown).
@@ -144,23 +141,35 @@ providers:
     apiKey: ""                               # AICOIN_PROXY_COHERE_APIKEY
     authHeader: Authorization                # AICOIN_PROXY_COHERE_AUTHHEADER
     authPrefix: "Bearer "                    # AICOIN_PROXY_COHERE_AUTHPREFIX
+  elevenlabs:
+    baseUrl: https://api.elevenlabs.io        # AICOIN_PROXY_ELEVENLABS_BASEURL
+    apiKey: ""                               # AICOIN_PROXY_ELEVENLABS_APIKEY
+    authHeader: xi-api-key                   # AICOIN_PROXY_ELEVENLABS_AUTHHEADER
+    authPrefix: ""                           # AICOIN_PROXY_ELEVENLABS_AUTHPREFIX
+  stability:
+    baseUrl: https://api.stability.ai        # AICOIN_PROXY_STABILITY_BASEURL
+    apiKey: ""                               # AICOIN_PROXY_STABILITY_APIKEY
+    authHeader: Authorization                # AICOIN_PROXY_STABILITY_AUTHHEADER
+    authPrefix: "Bearer "                    # AICOIN_PROXY_STABILITY_AUTHPREFIX
 pricing:
   costPerTokenUsd: 0.000002       # AICOIN_PROXY_COST_PER_TOKEN_USD
   defaultCostUsdPerCall: 0.001    # AICOIN_PROXY_DEFAULT_COST_USD
 freeCoins:
   counterFile: free-coins-counter.txt   # AICOIN_PROXY_FREE_COINS_COUNTER_FILE — bundled classpath/resource file, single integer, admin-managed via git push + CI redeploy
 ```
-`baseUrl` may be `http://` (plain, used by tests against a local mock) or `https://` (real providers, TLS client).
+`baseUrl` may be `http://` (plain, used by tests against a local mock) or `https://` (real providers, TLS client). `elevenlabs`/`stability` exist so client apps that call voice (ElevenLabs) or image (Stability) generation, not just text, can route through the wallet too — OpenAI's own image generation (DALL-E) already goes through the existing `openai` entry, since it's the same `api.openai.com` host.
 
 ### Routing — same path, header selects the provider, proxy owns the upstream key
-The client calls the proxy at **exactly the same path** the real provider would use (e.g. `POST /v1/chat/completions`) — only the domain changes to the proxy's. A request header `X-AI: <provider>` (one of `openai|anthropic|google|mistral|cohere`, case-insensitive) tells the proxy which upstream/config to use. The proxy:
+The client calls the proxy at **exactly the same path** the real provider would use (e.g. `POST /v1/chat/completions`) — only the domain changes to the proxy's. A request header `X-AI: <provider>` (one of `openai|anthropic|google|mistral|cohere|elevenlabs|stability`, case-insensitive) tells the proxy which upstream/config to use. The proxy:
 1. Reads `X-AI`, looks up the matching `providers.<name>` config. Missing/unknown value → `400 {"error":"missing or unknown X-AI header"}`.
 2. **Removes** the `X-AI` header (the upstream provider must never see it).
 3. Forwards the **same method + same path/query + same body** to `providers.<name>.baseUrl`, with all original client headers preserved *except*: `Host`/`Content-Length` (recomputed) and whatever the client sent in `authHeader` for this provider (or the raw `Authorization`) — the proxy **overwrites/injects its own `apiKey`** as that provider's paid credential (via `authHeader`+`authPrefix`, or as a `authQueryParamName` query param when `authAsQueryParam` is true, e.g. Google).
 
-### Auth — wallet id IS the API key
+### Auth — wallet id IS the API key, gated on a positive balance
 There is no separate provider key or API key concept for the client — **the caller's aicoin wallet id doubles as their API key.** Required header: `X-Api-Key: <walletId>` (replaces the old `X-User-Id`). Missing → `401 {"error":"missing X-Api-Key (wallet id)"}`.
-Before forwarding, the proxy validates the wallet over plain HTTP (no subprocess): `GET {aicoin.balanceUrlBase}/balance/{walletId}` (new config, default `http://localhost:9944`, env `AICOIN_PROXY_AICOIN_BALANCE_URL_BASE`). If that call fails/times out (aicoin node unreachable) → `503 {"error":"could not validate wallet"}`. If it succeeds, proceed — note the aicoin node returns a balance (possibly 0) for *any* syntactically-valid id, even one never used before, so this call is a liveness/reachability check on the aicoin node, not a cryptographic identity check; that's a documented assumption, not a security guarantee. The validated `walletId` becomes the `user_id` in the `/events` POST — the old `X-User-Id` header is gone.
+Before forwarding, the proxy validates the wallet over plain HTTP (no subprocess): `GET {aicoin.balanceUrlBase}/balance/{walletId}` (new config, default `http://localhost:9944`, env `AICOIN_PROXY_AICOIN_BALANCE_URL_BASE`). If that call fails/times out (aicoin node unreachable) → `503 {"error":"could not validate wallet"}`. If it succeeds, read the returned `balance`:
+- `balance <= 0` → `402 {"error":"insufficient aicoin balance","balance":<value>}` — do not forward to the AI provider, do not emit an event. This is deliberately a simple binary gate, not per-call metering: a call doesn't debit anything from the balance (an `event` transaction still contributes 0 to balance, unchanged); "insufficient" just means the wallet has never received a faucet claim/transfer, or has sent away everything it had. Client apps integrating the wallet should treat `402` from this proxy as the one and only signal to fall back to the user's own provider key for that request (see each app's own integration notes for exactly how).
+- `balance > 0` → proceed, exactly as before. Note the aicoin node returns a balance (possibly 0) for *any* syntactically-valid id, even one never used before, so the underlying validation call is a liveness/reachability check on the aicoin node, not a cryptographic identity check; that's a documented assumption, not a security guarantee. The validated `walletId` becomes the `user_id` in the `/events` POST — the old `X-User-Id` header is gone.
 
 ### Forwarding (non-streaming, full aggregation is fine)
 1. Inbound: `HttpServerCodec` + `HttpObjectAggregator` → routing handler.
@@ -180,4 +189,4 @@ Before forwarding, the proxy validates the wallet over plain HTTP (no subprocess
 ## Docker / docker-compose
 - `aicoin/Dockerfile` — multi-stage: build `aicoind` (and `wallet`) with the Go toolchain, copy the static binary/binaries into a minimal runtime base (e.g. `gcr.io/distroless/static` or `alpine`). Entrypoint runs `aicoind`, flags/ports configurable via `CMD`/env at `docker run` time.
 - `aicoin-proxy/Dockerfile` — multi-stage: `./gradlew build` in a JDK-11 build stage, copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a JRE-11 runtime image. Entrypoint runs the generated start script.
-- Repo-root `docker-compose.yml` (written after both Dockerfiles exist — not part of either project's own task): `redis` (official `redis:alpine` image), `aicoin-node` (built from `aicoin/Dockerfile`, `-role=primary -redis=redis:6379`), `aicoin-proxy` (built from `aicoin-proxy/Dockerfile`, pointed at `aicoin-node`).
+- Repo-root `docker-compose.yml`: `aicoin-node` (built from `aicoin/Dockerfile`, `-role=primary`, `-dynamodb-table=...` pointed at a real DynamoDB table via AWS credentials/region in the environment — there is no local stand-in for DynamoDB the way `redis:alpine` stood in for a managed cache), `aicoin-proxy` (built from `aicoin-proxy/Dockerfile`, pointed at `aicoin-node`).

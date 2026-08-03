@@ -27,10 +27,10 @@ type Blockchain struct {
 }
 
 // NewBlockchain creates a new chain containing only the genesis block, with
-// no persistence (pure in-memory, per CONTRACT.md's default when -redis is
-// unset). signer is the node's own Ed25519 private key on a primary (used
-// by SealAndAppend), or nil on a follower (which can only Append/
-// ReplaceIfLonger blocks validated against trustedPubKey).
+// no persistence (pure in-memory, per CONTRACT.md's default when
+// -dynamodb-table is unset). signer is the node's own Ed25519 private key on
+// a primary (used by SealAndAppend), or nil on a follower (which can only
+// Append/ReplaceIfLonger blocks validated against trustedPubKey).
 func NewBlockchain(trustedPubKey ed25519.PublicKey, signer ed25519.PrivateKey) *Blockchain {
 	bc, _ := NewBlockchainWithStore(trustedPubKey, signer, nil)
 	return bc
@@ -38,10 +38,15 @@ func NewBlockchain(trustedPubKey ed25519.PublicKey, signer ed25519.PrivateKey) *
 
 // NewBlockchainWithStore creates a chain backed by store. If store is nil,
 // this is identical to NewBlockchain (pure in-memory). Otherwise, per
-// CONTRACT.md's "Persistence" section: on startup it calls store.Load(); if
-// that returns a non-empty chain, it is used as the starting chain instead
-// of genesis-only. After every successful append (SealAndAppend, Append, or
-// ReplaceIfLonger), the full current chain is written back via store.Save.
+// CONTRACT.md's "Persistence" section: on startup it calls store.Load() to
+// reconstruct every block after genesis (genesis itself is never written to
+// the store — every node, primary or follower, computes the well-known
+// genesis constant independently — so Load's result, if any, is prepended
+// with Genesis() to form the full chain). After every successful local
+// append (SealAndAppend or Append), exactly the one new block is written
+// via store.AppendBlock — a follower's ReplaceIfLonger (adopting a chain it
+// read from the store) never writes back to the store, per CONTRACT.md's "a
+// follower never writes".
 func NewBlockchainWithStore(trustedPubKey ed25519.PublicKey, signer ed25519.PrivateKey, store ChainStore) (*Blockchain, error) {
 	bc := &Blockchain{
 		blocks:        []Block{Genesis()},
@@ -55,22 +60,23 @@ func NewBlockchainWithStore(trustedPubKey ed25519.PublicKey, signer ed25519.Priv
 			return nil, err
 		}
 		if len(loaded) > 0 {
-			bc.blocks = loaded
+			bc.blocks = append([]Block{Genesis()}, loaded...)
 		}
 	}
 	return bc, nil
 }
 
-// persistLocked saves the current chain to the configured store, if any.
-// Must be called with bc.mu already held (for writing). Save errors are
-// logged, not returned/propagated: persistence is best-effort and must
-// never cause an otherwise-valid local chain mutation to fail or roll back.
-func (bc *Blockchain) persistLocked() {
+// persistBlockLocked writes exactly the one new block to the configured
+// store, if any. Must be called with bc.mu already held (for writing).
+// AppendBlock errors are logged, not returned/propagated: persistence is
+// best-effort and must never cause an otherwise-valid local chain mutation
+// to fail or roll back.
+func (bc *Blockchain) persistBlockLocked(b Block) {
 	if bc.store == nil {
 		return
 	}
-	if err := bc.store.Save(bc.blocks); err != nil {
-		log.Printf("chain: persisting chain to store failed: %v", err)
+	if err := bc.store.AppendBlock(b); err != nil {
+		log.Printf("chain: persisting block %d to store failed: %v", b.Index, err)
 	}
 }
 
@@ -136,12 +142,12 @@ func (bc *Blockchain) SealAndAppend(tx Transaction) (Block, error) {
 		Transactions: txs,
 	}
 	bc.blocks = append(bc.blocks, newBlock)
-	bc.persistLocked()
+	bc.persistBlockLocked(newBlock)
 	return newBlock, nil
 }
 
 // Append validates candidate against the current tip (and trustedPubKey)
-// and, if valid, appends it to the chain.
+// and, if valid, appends it to the chain, persisting just that one block.
 func (bc *Blockchain) Append(candidate Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -151,7 +157,7 @@ func (bc *Blockchain) Append(candidate Block) error {
 		return err
 	}
 	bc.blocks = append(bc.blocks, candidate)
-	bc.persistLocked()
+	bc.persistBlockLocked(candidate)
 	return nil
 }
 
@@ -160,11 +166,17 @@ func (bc *Blockchain) Append(candidate Block) error {
 // current local chain, replaces the local chain with it
 // (longest-valid-chain rule). It reports whether the replacement happened.
 //
-// Per CONTRACT.md's "Chain-replacement asymmetry": this method exists on
-// every Blockchain, but callers must only invoke it on a follower's chain
-// — a primary is authoritative by construction and must never replace its
-// own chain via this path. That gating lives in the p2p layer (see
-// p2p.Node.Role), not here.
+// Per CONTRACT.md's "Roles & signing" section: this method exists on every
+// Blockchain, but callers must only invoke it on a follower's chain — a
+// primary is authoritative by construction and must never replace its own
+// chain via this path. That gating lives in PollAndAdopt (see follower.go)
+// and in cmd/aicoind/main.go (which only starts the follower poll loop for
+// -role=follower), not here.
+//
+// This never writes back to the store: candidate came from the store in the
+// first place (via PollAndAdopt's store.Load()), and per CONTRACT.md's
+// "Persistence" section "a follower never writes" — only SealAndAppend
+// (the primary's block-sealing path) and Append persist new blocks.
 func (bc *Blockchain) ReplaceIfLonger(candidate []Block) (bool, error) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -178,6 +190,5 @@ func (bc *Blockchain) ReplaceIfLonger(candidate []Block) (bool, error) {
 	newBlocks := make([]Block, len(candidate))
 	copy(newBlocks, candidate)
 	bc.blocks = newBlocks
-	bc.persistLocked()
 	return true, nil
 }

@@ -44,26 +44,27 @@ func TestInMemoryEmptyStoreMeansGenesis(t *testing.T) {
 	}
 }
 
-// TestInMemoryLoadThenSaveRoundTrip proves Save followed by Load returns
-// exactly what was saved, and that mutating the slice passed to Save (or
-// the slice returned by Load) afterwards does not corrupt the store's
-// internal state (defensive copies both ways).
-func TestInMemoryLoadThenSaveRoundTrip(t *testing.T) {
+// TestInMemoryLoadThenAppendRoundTrip proves AppendBlock followed by Load
+// returns exactly what was appended, in order, and that mutating the block
+// passed to AppendBlock (or the slice returned by Load) afterwards does not
+// corrupt the store's internal state (defensive copies both ways).
+func TestInMemoryLoadThenAppendRoundTrip(t *testing.T) {
 	fake := &InMemory{}
 
 	tx := chain.Transaction{Type: "event", UserID: "alice", Provider: "openai", CostUSD: 0.01, Timestamp: "2026-08-03T12:00:00Z"}
-	original := []chain.Block{
-		chain.Genesis(),
-		{Index: 1, Timestamp: "2026-08-03T12:00:00Z", PrevHash: chain.Genesis().Hash, Hash: "deadbeef", Signature: "sig", Transactions: []chain.Transaction{tx}},
+	genesis := chain.Genesis()
+	b1 := chain.Block{Index: 1, Timestamp: "2026-08-03T12:00:00Z", PrevHash: genesis.Hash, Hash: "deadbeef", Signature: "sig", Transactions: []chain.Transaction{tx}}
+
+	if err := fake.AppendBlock(genesis); err != nil {
+		t.Fatalf("AppendBlock(genesis): %v", err)
+	}
+	if err := fake.AppendBlock(b1); err != nil {
+		t.Fatalf("AppendBlock(b1): %v", err)
 	}
 
-	if err := fake.Save(original); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	// Mutate the caller's slice after Save returns; must not affect what
-	// was stored.
-	original[1].Hash = "corrupted"
+	// Mutate the caller's block after AppendBlock returns; must not affect
+	// what was stored.
+	b1.Hash = "corrupted"
 
 	got, err := fake.Load()
 	if err != nil {
@@ -73,7 +74,7 @@ func TestInMemoryLoadThenSaveRoundTrip(t *testing.T) {
 		t.Fatalf("Load returned %d blocks, want 2", len(got))
 	}
 	if got[1].Hash != "deadbeef" {
-		t.Fatalf("Load()[1].Hash = %q, want %q (unaffected by later mutation of the saved slice)", got[1].Hash, "deadbeef")
+		t.Fatalf("Load()[1].Hash = %q, want %q (unaffected by later mutation of the appended block)", got[1].Hash, "deadbeef")
 	}
 	if got[1].Transactions[0].UserID != "alice" {
 		t.Fatalf("Load()[1].Transactions[0].UserID = %q, want alice", got[1].Transactions[0].UserID)

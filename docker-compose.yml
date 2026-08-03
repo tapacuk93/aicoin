@@ -1,17 +1,21 @@
 services:
-  redis:
-    image: redis:alpine
-    ports:
-      - "6379:6379"
-
   aicoin-node:
     build: ./aicoin
-    command: ["-http=:9944", "-p2p=:9945", "-role=primary", "-redis=redis:6379"]
+    # -dynamodb-table points at a real AWS DynamoDB table; there is no local
+    # stand-in for DynamoDB the way redis:alpine stood in for a managed
+    # cache (see CONTRACT.md's "Docker / docker-compose" section). AWS
+    # region/credentials come from the standard SDK environment below —
+    # set them (or mount a real AWS credentials file / use an instance
+    # role in production) before bringing this up, or leave
+    # AICOIN_DYNAMODB_TABLE unset to run the primary pure in-memory.
+    command: ["-http=:9944", "-role=primary", "-dynamodb-table=${AICOIN_DYNAMODB_TABLE:-}"]
+    environment:
+      AWS_REGION: "${AWS_REGION:-eu-west-1}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
     ports:
       - "9944:9944"
-      - "9945:9945"
-    depends_on:
-      - redis
 
   aicoin-proxy:
     build: ./aicoin-proxy

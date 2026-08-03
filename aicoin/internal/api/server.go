@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"aicoin/internal/chain"
-	"aicoin/internal/p2p"
 	"aicoin/internal/state"
 )
 
@@ -19,20 +18,20 @@ import (
 // public half; on a follower, it's the configured -trusted-pubkey.
 type Server struct {
 	Chain        *chain.Blockchain
-	Node         *p2p.Node
 	HalfLifeDays float64
 	Role         string
 	PubKeyHex    string
 }
 
-// NewServer creates an API server backed by bc, gossiping any locally
-// sealed block via node (node may be nil in tests that don't need P2P),
-// using halfLifeDays for the /price recency-decay formula (see
-// CONTRACT.md's "Derived state — price (final formula, v2: smooth
-// exponential decay)" section), and role/pubKeyHex for GET /health and the
-// follower write-rejection gate.
-func NewServer(bc *chain.Blockchain, node *p2p.Node, halfLifeDays float64, role, pubKeyHex string) *Server {
-	return &Server{Chain: bc, Node: node, HalfLifeDays: halfLifeDays, Role: role, PubKeyHex: pubKeyHex}
+// NewServer creates an API server backed by bc, using halfLifeDays for the
+// /price recency-decay formula (see CONTRACT.md's "Derived state — price
+// (final formula, v2: smooth exponential decay)" section), and
+// role/pubKeyHex for GET /health and the follower write-rejection gate.
+// Replication is no longer this package's concern: a follower's chain is
+// kept up to date out-of-band by polling DynamoDB (see cmd/aicoind/main.go
+// and internal/chain.PollAndAdopt), not by anything the API layer does.
+func NewServer(bc *chain.Blockchain, halfLifeDays float64, role, pubKeyHex string) *Server {
+	return &Server{Chain: bc, HalfLifeDays: halfLifeDays, Role: role, PubKeyHex: pubKeyHex}
 }
 
 // Router builds the http.Handler exposing all endpoints from CONTRACT.md.
@@ -43,7 +42,6 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("POST /transfer", s.handlePostTransfer)
 	mux.HandleFunc("GET /price", s.handleGetPrice)
 	mux.HandleFunc("GET /chain", s.handleGetChain)
-	mux.HandleFunc("GET /peers", s.handleGetPeers)
 	mux.HandleFunc("GET /balance/{user_id}", s.handleGetBalance)
 	mux.HandleFunc("GET /health", s.handleGetHealth)
 	return mux
@@ -82,8 +80,9 @@ type eventRequest struct {
 
 // handlePostEvents implements POST /events: build the Transaction, seal
 // and sign a new block on top of the local tip (primary only — see
-// rejectIfFollower), append it locally, broadcast it to all connected
-// peers, and return the new block info.
+// rejectIfFollower), append it locally, persist it to DynamoDB if
+// configured (so followers pick it up on their next poll tick — see
+// cmd/aicoind/main.go), and return the new block info.
 func (s *Server) handlePostEvents(w http.ResponseWriter, r *http.Request) {
 	if s.rejectIfFollower(w) {
 		return
@@ -118,10 +117,6 @@ func (s *Server) handlePostEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.Node != nil {
-		s.Node.BroadcastBlock(block, nil)
-	}
-
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"height": block.Index,
 		"hash":   block.Hash,
@@ -136,7 +131,7 @@ type freeCoinsClaimRequest struct {
 // CONTRACT.md's "Free-coin faucet" section: look at the chain for the most
 // recent free_claim tx for this user; if there is none, or its Timestamp is
 // >= 1 hour in the past, seal+sign a new free_claim tx (through the exact
-// same sealing/gossip pipeline as an event tx, primary only — see
+// same sealing pipeline as an event tx, primary only — see
 // rejectIfFollower) and grant it. Otherwise, reject with 429 and report
 // when the user becomes eligible again.
 func (s *Server) handlePostFreeCoinsClaim(w http.ResponseWriter, r *http.Request) {
@@ -178,10 +173,6 @@ func (s *Server) handlePostFreeCoinsClaim(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if s.Node != nil {
-		s.Node.BroadcastBlock(block, nil)
-	}
-
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"granted":          true,
 		"height":           block.Index,
@@ -218,8 +209,8 @@ type transferRequest struct {
 // transfer (buy/sell)" section: validate amount > 0 and the sender's
 // current derived balance >= amount; if either fails, reject with 400
 // without mutating the chain. Otherwise seal+sign a "transfer" tx (through
-// the same signing/gossip pipeline as any other transaction, primary only
-// — see rejectIfFollower) and return its height/hash.
+// the same signing pipeline as any other transaction, primary only — see
+// rejectIfFollower) and return its height/hash.
 func (s *Server) handlePostTransfer(w http.ResponseWriter, r *http.Request) {
 	if s.rejectIfFollower(w) {
 		return
@@ -255,10 +246,6 @@ func (s *Server) handlePostTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.Node != nil {
-		s.Node.BroadcastBlock(block, nil)
-	}
-
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"height": block.Index,
 		"hash":   block.Hash,
@@ -269,15 +256,6 @@ func (s *Server) handlePostTransfer(w http.ResponseWriter, r *http.Request) {
 // blocks.
 func (s *Server) handleGetChain(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.Chain.Blocks())
-}
-
-// handleGetPeers implements GET /peers: connected peer P2P addresses.
-func (s *Server) handleGetPeers(w http.ResponseWriter, r *http.Request) {
-	peers := []string{}
-	if s.Node != nil {
-		peers = s.Node.Peers()
-	}
-	writeJSON(w, http.StatusOK, peers)
 }
 
 // handleGetBalance implements GET /balance/{user_id}.

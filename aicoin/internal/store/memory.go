@@ -1,8 +1,8 @@
 // Package store provides ChainStore implementations for aicoin's optional
-// chain persistence (CONTRACT.md's "Persistence" section): a Redis-backed
+// chain persistence (CONTRACT.md's "Persistence" section): a DynamoDB-backed
 // implementation (the real deal, and the only file in this package that
-// imports a Redis client) and an in-memory fake (for unit tests, including
-// tests run in sandboxes with no reachable Redis).
+// imports an AWS SDK client) and an in-memory fake (for unit tests,
+// including tests run in sandboxes/CI with no reachable AWS credentials).
 package store
 
 import (
@@ -13,18 +13,19 @@ import (
 
 // InMemory is an in-memory chain.ChainStore fake, safe for concurrent use.
 // It exists so callers (and this package's own tests) can exercise the
-// load/save contract deterministically without a live Redis server.
+// load/append contract deterministically without a live DynamoDB table.
 //
-// The zero value is a valid, empty store: Load returns (nil, nil) until
-// the first Save.
+// The zero value is a valid, empty store: Load returns (nil, nil) until the
+// first AppendBlock.
 type InMemory struct {
 	mu     sync.Mutex
 	blocks []chain.Block
 	saved  bool
 }
 
-// Load returns a defensive copy of the most recently Saved chain, or
-// (nil, nil) if Save has never been called (i.e. "nothing persisted yet").
+// Load returns a defensive copy of every block AppendBlock-ed so far, in the
+// order they were appended, or (nil, nil) if AppendBlock has never been
+// called (i.e. "nothing persisted yet").
 func (m *InMemory) Load() ([]chain.Block, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -36,14 +37,15 @@ func (m *InMemory) Load() ([]chain.Block, error) {
 	return out, nil
 }
 
-// Save stores a defensive copy of blocks, replacing whatever was
-// previously saved.
-func (m *InMemory) Save(blocks []chain.Block) error {
+// AppendBlock stores a defensive copy of b (including its Transactions
+// slice), appending it after whatever was previously stored.
+func (m *InMemory) AppendBlock(b chain.Block) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]chain.Block, len(blocks))
-	copy(out, blocks)
-	m.blocks = out
+	cp := b
+	cp.Transactions = make([]chain.Transaction, len(b.Transactions))
+	copy(cp.Transactions, b.Transactions)
+	m.blocks = append(m.blocks, cp)
 	m.saved = true
 	return nil
 }

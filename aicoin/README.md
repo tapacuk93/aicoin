@@ -1,14 +1,13 @@
 # aicoin
 
-A minimal but real peer-to-peer blockchain node: a single signing
-**primary** plus any number of read-only **follower** replicas, actual TCP
-networking between independently-running node processes, and
-longest-valid-chain replication (follower-side only — see "Roles &
-signing" below). No wallet signatures on transactions themselves (user IDs
-are plain strings), no BFT/advanced consensus, no proof-of-work.
-Persistence is optional and Redis-backed (see "Persistence" below); with
-no `-redis` flag it's pure in-memory, resetting on restart, exactly as
-before.
+A minimal but real blockchain node: a single signing **primary** plus any
+number of read-only **follower** replicas, replicating via a shared Redis
+key rather than any custom networking protocol — see "Roles & signing" and
+"Persistence" below. No wallet signatures on transactions themselves (user
+IDs are plain strings), no BFT/advanced consensus, no proof-of-work, no
+P2P networking. Persistence is Redis-backed: optional for a primary (unset
+`-redis` = in-memory only, resetting on restart), **required** for a
+follower (Redis is the only replication mechanism there is).
 
 This document mirrors the shared contract at `../CONTRACT.md` but is
 written to stand alone.
@@ -17,20 +16,20 @@ written to stand alone.
 
 ```
 go build ./cmd/aicoind
-./aicoind -http=:9944 -p2p=:9945 -role=primary
+./aicoind -http=:9944 -role=primary
 ```
 
 or directly:
 
 ```
-go run ./cmd/aicoind -http=:9944 -p2p=:9945 -role=primary
+go run ./cmd/aicoind -http=:9944 -role=primary
 ```
 
 or via Docker (see "Docker" below):
 
 ```
 docker build -t aicoin .
-docker run -p 9944:9944 -p 9945:9945 aicoin
+docker run -p 9944:9944 aicoin
 ```
 
 ### CLI flags
@@ -38,25 +37,24 @@ docker run -p 9944:9944 -p 9945:9945 aicoin
 | Flag               | Default            | Meaning                                                                 |
 |--------------------|--------------------|--------------------------------------------------------------------------|
 | `-http`            | `:9944`            | HTTP API listen address                                                 |
-| `-p2p`             | `:9945`            | P2P TCP listen address                                                  |
-| `-peers`           | `""`               | Comma-separated bootstrap peer P2P addresses (`host:port,host:port,...`)|
 | `-role`            | `primary`          | Node role: `primary` or `follower` (see "Roles & signing" below)       |
 | `-keyfile`         | `aicoin-node.key`  | Primary only: path to this node's persistent Ed25519 private key (generated on first run if it doesn't exist) |
 | `-trusted-pubkey`  | `""`               | Required when `-role=follower`: the primary's Ed25519 public key, hex-encoded |
-| `-redis`           | `""`               | Optional `host:port` of a Redis server for chain persistence (see "Persistence" below); unset = pure in-memory |
+| `-redis`           | `""`               | `host:port` of a Redis server for chain persistence (see "Persistence" below); optional for a primary (unset = pure in-memory), **required** for a follower |
+| `-follower-poll-interval` | `2s`        | Follower only: how often to re-read the shared chain from Redis and adopt it if it's grown |
 | `-decay-halflife-days` | `110.0`        | `/price` decay half-life in days: `weight(age) = 2^(-age_days/halfLifeDays)` (see "Derived state" below); default derived from a real, documented ~10x-per-year AI pricing decline rate |
 
-Primary + follower example (the follower bootstraps off the primary and
-verifies its signed chain against the primary's pubkey):
+Primary + follower example (the follower polls the primary's Redis-backed
+chain and verifies it against the primary's pubkey):
 
 ```
-./aicoind -http=:9944 -p2p=:9945 -role=primary -keyfile=aicoin-node.key
+./aicoind -http=:9944 -role=primary -keyfile=aicoin-node.key -redis=localhost:6379
 # stdout logs a line like:
 #   aicoind: role=primary pubkey=93bbf305...fb5e (copy this into a follower's -trusted-pubkey)
 
-./aicoind -http=:9946 -p2p=:9947 -role=follower \
+./aicoind -http=:9946 -role=follower \
   -trusted-pubkey=93bbf305...fb5e \
-  -peers=127.0.0.1:9945
+  -redis=localhost:6379 -follower-poll-interval=2s
 ```
 
 ## Roles & signing
@@ -65,29 +63,35 @@ There is exactly one legitimate writer in this system: the **primary**.
 It holds an Ed25519 keypair and *signs* every block it appends — that
 signature (not proof-of-work, not a competing-miners race) is what makes a
 block valid. **Followers** hold only the primary's public key
-(`-trusted-pubkey`), replicate the primary's signed chain via P2P, and
-reject all writes: there is no mining, no difficulty, no nonce, and no
-"longest chain from competing miners" scenario, because nobody but the
-primary can produce a chain whose blocks verify against the trusted
-pubkey.
+(`-trusted-pubkey`), replicate the primary's signed chain by polling the
+same Redis key the primary writes to, and reject all writes: there is no
+mining, no difficulty, no nonce, no P2P networking, and no "longest chain
+from competing miners" scenario, because nobody but the primary can
+produce a chain whose blocks verify against the trusted pubkey — a
+decentralized gossip protocol has no problem to solve here that shared
+storage doesn't already solve more simply.
 
 - **Primary** (`-role=primary`, the default): loads its Ed25519 private
   key from `-keyfile` (generating and saving a new one on first run if the
   file doesn't exist — raw 64-byte `crypto/ed25519.PrivateKey` bytes), logs
   its own public key hex to stdout on startup (for copy-pasting into a
-  follower's `-trusted-pubkey`), seals+signs every new block itself, and
-  **never** replaces its own chain based on incoming P2P gossip/sync —
-  it's authoritative by construction.
+  follower's `-trusted-pubkey`), seals+signs every new block itself,
+  persists the full chain to Redis after every append if `-redis` is
+  configured, and **never** re-reads/replaces its own chain from Redis
+  after startup — it is authoritative by construction; Redis is where it
+  writes, not where it takes direction from.
 - **Follower** (`-role=follower -trusted-pubkey=<hex>`): refuses to start
-  if `-trusted-pubkey` is missing. Holds no private key, so it cannot
-  seal/append any block on its own. All three write endpoints
-  (`POST /events`, `/transfer`, `/free-coins/claim`) return
+  if `-trusted-pubkey` is missing, or if `-redis` is missing — with no
+  Redis there is no replication mechanism at all, so a follower with no
+  `-redis` has no way to ever learn the primary's chain. Holds no private
+  key, so it cannot seal/append any block on its own. All three write
+  endpoints (`POST /events`, `/transfer`, `/free-coins/claim`) return
   `403 {"error":"this node is a read-only replica; write to the primary"}`.
-  It replicates the primary's chain via P2P: a block that links to its
-  local tip and validates is appended and re-gossiped; if its full local
-  chain turns out to be shorter than a peer's, and every block in the
-  peer's chain validates against the configured trusted pubkey, it adopts
-  the peer's chain (longest-valid-chain rule).
+  Every `-follower-poll-interval`, it re-reads the `aicoin:chain` key from
+  Redis and, if the stored chain is longer than its local one and every
+  block in it validates against the configured trusted pubkey, adopts it
+  wholesale (longest-valid-chain rule — the same `ValidateChain` logic used
+  everywhere else in this codebase).
 
 ## Chain model
 
@@ -102,7 +106,8 @@ pubkey.
 - Genesis is block index 0, `prev_hash` is 64 `'0'` chars, no transactions,
   empty `signature`, and a fixed timestamp (`1970-01-01T00:00:00Z`) —
   every node derives byte-identical genesis independently, so it's never
-  gossiped, and it's always accepted as valid without any signature check.
+  transmitted anywhere, and it's always accepted as valid without any
+  signature check.
 - Exactly one transaction per block (no mempool batching), unchanged.
 - `hash = hex(SHA256(index|prevHash|timestamp|txJSON))` — a plain content
   hash, not a puzzle. There is no nonce search: the hash is computed once.
@@ -113,46 +118,20 @@ pubkey.
   the old proof-of-work mining step one-for-one: the block is *sealed and
   signed*, then appended immediately.
 - `POST /events` (primary only): builds the transaction, seals+signs a new
-  block on top of the local tip, appends it locally, broadcasts it to all
-  connected peers, and returns the new block's height/hash.
+  block on top of the local tip, appends it locally, persists to Redis if
+  configured, and returns the new block's height/hash.
 - `ValidateBlock(block, prev, trustedPubKey)`: index 0 must exactly match
   the well-known genesis constant (always valid, no signature check).
   Index >= 1: recompute `hash` from the block's own fields and confirm it
   matches the stored value; confirm `prev_hash == prev.hash`; confirm
   `ed25519.Verify(trustedPubKey, sha256Digest, signatureBytes)`. There is
   no difficulty/PoW check — that mechanism no longer exists.
-- On receiving a `block` from a peer: a **follower** appends+re-gossips it
-  if it links to the local tip (right index + `prev_hash`) and its
-  hash/signature validate against the configured trusted pubkey; if it
-  doesn't link (e.g. it's behind, or there's a fork), it requests the
-  sender's full chain (`chain_request`) and, if that's longer and every
-  block in it validates, replaces its local chain
-  (longest-valid-chain rule). A **primary** ignores incoming `block`
-  gossip and `chain_response` chain-replacement attempts entirely — see
-  "Roles & signing" above.
-
-## P2P transport
-
-Plain TCP, newline-delimited JSON envelopes:
-
-```json
-{"type": "hello" | "block" | "chain_request" | "chain_response", "payload": ...}
-```
-
-- `hello` — payload is the sender's own P2P listen address (string), i.e.
-  exactly the value passed to that node's `-p2p` flag.
-- `chain_request` — payload is `null`; asks the recipient to send back its
-  full chain.
-- `chain_response` — payload is the sender's full chain (JSON array of
-  blocks).
-- `block` — payload is a single sealed+signed/gossiped block.
-
-On establishing a connection — whether outbound (dialing a `-peers` entry)
-or inbound (accepting a connection) — a node sends `hello` immediately
-followed by `chain_request`. The remote side replies to `chain_request`
-with its own `chain_response`, so both nodes converge on startup (subject
-to the role-based asymmetry above: only a follower ever actually adopts a
-peer's chain from that response).
+- Chain replacement is asymmetric by role: a **follower**, on every poll
+  tick, re-reads the shared chain from Redis and, if it's longer than its
+  local chain and every block in it validates, replaces its local chain
+  wholesale (longest-valid-chain rule). A **primary** never does this: it
+  is authoritative by construction and only ever appends blocks it itself
+  seals and signs.
 
 ## Derived state
 
@@ -226,8 +205,8 @@ external payment rail involved. "Buying" is just receiving a transfer,
 {"type": "transfer", "from_user_id": "alice", "to_user_id": "bob", "amount": 0.4, "timestamp": "2026-08-03T12:00:00Z"}
 ```
 
-It's sealed+signed and gossiped through the exact same pipeline as any
-other transaction, on the primary only. Its derived-balance effect:
+It's sealed+signed through the exact same pipeline as any other
+transaction, on the primary only. Its derived-balance effect:
 `balances[from_user_id] -= amount; balances[to_user_id] += amount`.
 
 ### `POST /transfer`
@@ -306,15 +285,6 @@ Full chain as a JSON array of blocks:
 ]
 ```
 
-### `GET /peers`
-
-```json
-["127.0.0.1:9947"]
-```
-
-List of currently-connected peers' self-reported P2P listen addresses (see
-"Assumptions" below for a caveat on this).
-
 ### `GET /balance/{user_id}`
 
 ```json
@@ -346,10 +316,10 @@ formula:
 {"type": "free_claim", "user_id": "alice", "timestamp": "2026-08-03T12:00:00Z"}
 ```
 
-It's sealed and signed into a block and gossiped through the exact same
-pipeline as an `"event"` transaction (primary only), mints 1.0 aicoin to
-`user_id`, and is ignored entirely by `/price` (no `cost_usd`, doesn't
-count toward `total_spend_usd` or `weighted_total`).
+It's sealed and signed into a block through the exact same pipeline as an
+`"event"` transaction (primary only), mints 1.0 aicoin to `user_id`, and
+is ignored entirely by `/price` (no `cost_usd`, doesn't count toward
+`total_spend_usd` or `weighted_total`).
 
 ### `POST /free-coins/claim`
 
@@ -418,22 +388,28 @@ top-level `e2e` test that wires both projects together. The wallet talks
 to whichever node it's pointed at via `-node` — pointing it at a follower
 would make its faucet claim fail with `403`; point it at the primary.
 
-## Persistence (optional, Redis-backed)
+## Persistence (Redis — required for follower replication, optional for a primary)
 
-By default aicoind is pure in-memory: the chain resets on every restart.
-Passing `-redis=host:port` enables persistence as a stand-in for a real
-AWS in-memory datastore (e.g. ElastiCache/MemoryDB) — same read/write
-shape, swappable later without touching the chain logic itself:
+By default (no `-redis`) a primary is pure in-memory: the chain resets on
+every restart. A follower, however, **requires** `-redis` to be set —
+Redis is the only replication mechanism there is, so a follower started
+without it fails immediately (`log.Fatalf`) rather than silently running
+with no way to ever learn the primary's chain.
 
 - On startup, the node `GET`s key `aicoin:chain` from Redis. If present
   (a JSON array of blocks, same shape as `GET /chain`'s response), it's
   loaded as the starting chain instead of genesis-only.
-- After every successfully appended block — whether sealed locally via an
-  API call (`/events`, `/free-coins/claim`, `/transfer`, primary only) or
-  accepted from a peer via P2P gossip (follower only) — the node `SET`s
-  `aicoin:chain` to the full current chain JSON.
-- With `-redis` unset, none of this runs; behavior is unchanged (in-memory
-  only).
+- After a **primary** successfully appends any block (via `/events`,
+  `/free-coins/claim`, or `/transfer`), it `SET`s `aicoin:chain` to the
+  full current chain JSON. A primary never re-reads this key after its own
+  startup load — it only ever writes to it.
+- A **follower** never writes this key. Every `-follower-poll-interval`,
+  it `GET`s `aicoin:chain` and, if the stored chain is longer than its
+  local one and every block in it validates against the configured
+  trusted pubkey, replaces its local chain with it wholesale.
+- With `-redis` unset on a primary, none of this runs; behavior is
+  unchanged (in-memory only). It is not a valid configuration for a
+  follower.
 
 This is implemented behind a small `chain.ChainStore` interface
 (`Load() ([]Block, error)`, `Save([]Block) error`) in `internal/chain`, so
@@ -441,22 +417,37 @@ the Redis dependency (`github.com/redis/go-redis/v9`) is confined to a
 single file, `internal/store/redis.go`. `internal/store/memory.go` provides
 an in-memory fake implementing the same interface, used by
 `internal/store/store_test.go`'s unit tests (load-then-save round-trip,
-empty-store-means-genesis, and a full `Blockchain` restart simulation) —
+empty-store-means-genesis, and a full `Blockchain` restart simulation) and
+by `internal/chain`'s own follower-poll tests (see "Testing" below) —
 useful in sandboxes where a live Redis server isn't reachable, since the
-`Blockchain` code path that talks to `ChainStore` is exercised identically
-either way.
+`Blockchain`/`PollAndAdopt` code paths that talk to `ChainStore` are
+exercised identically either way. In production this points at a real
+managed in-memory store (e.g. AWS ElastiCache for Redis); the same code
+path works against a local `redis-server` for development.
+
+The follower side of replication is `chain.PollAndAdopt(bc, store)`
+(`internal/chain/follower.go`): on each `-follower-poll-interval` tick,
+`cmd/aicoind/main.go` calls it once. It re-reads the store and, if the
+result is both longer than `bc`'s current chain and fully valid against
+`bc`'s trusted pubkey, replaces `bc`'s chain (via the same `ReplaceIfLonger`
+every other longest-valid-chain check in this codebase uses). It is a
+structural no-op on a primary-shaped `Blockchain` (one with a signing key)
+even if called directly — belt-and-suspenders on top of the fact that
+`main.go` only ever starts the poll-tick goroutine for `-role=follower` in
+the first place.
 
 Example:
 
 ```
-./aicoind -http=:9944 -p2p=:9945 -role=primary -redis=localhost:6379
+./aicoind -http=:9944 -role=primary -redis=localhost:6379
+./aicoind -http=:9946 -role=follower -trusted-pubkey=<hex> -redis=localhost:6379
 ```
 
 ## Docker
 
 ```
 docker build -t aicoin .
-docker run -p 9944:9944 -p 9945:9945 aicoin
+docker run -p 9944:9944 aicoin
 ```
 
 The `Dockerfile` is a multi-stage build: a `golang:1.22-alpine` stage
@@ -464,47 +455,48 @@ compiles static (`CGO_ENABLED=0`) `aicoind` and `wallet` binaries from
 `./cmd/aicoind` and `./cmd/wallet`, which are then copied into a minimal
 `gcr.io/distroless/static-debian12` runtime image. The entrypoint runs
 `aicoind`; every CLI flag above is overridable at `docker run` time by
-passing extra arguments (they replace the default `CMD`, e.g.
-`-http=:9944 -p2p=:9945`) or, for host/port mapping, via `-p`:
+passing extra arguments (they replace the default `CMD`, e.g. `-http=:9944`)
+or, for host/port mapping, via `-p`:
 
 ```
-docker run -p 19944:19944 -p 19945:19945 aicoin \
-  -http=:19944 -p2p=:19945 -role=primary -keyfile=/data/aicoin-node.key -redis=redis:6379
+docker run -p 19944:19944 aicoin \
+  -http=:19944 -role=primary -keyfile=/data/aicoin-node.key -redis=redis:6379
 ```
 
 Nothing about ports, roles, or keys is hardcoded in the image beyond the
 `CMD` defaults, which merely mirror aicoind's own flag defaults — `-role`,
 `-keyfile`, and `-trusted-pubkey` are all plain CLI args/env at run time,
-same as every other flag.
+same as every other flag. Only the HTTP port is exposed; there is no P2P
+port anymore.
 
 ## Package layout
 
 - `cmd/aicoind` — CLI entrypoint; wires flags (including `-role`/
-  `-keyfile`/`-trusted-pubkey`) to a `chain.Blockchain` (optionally backed
-  by a `chain.ChainStore`), a `p2p.Node`, and an `api.Server`, then runs
-  the P2P accept loop and the HTTP server. On a primary, loads or
-  generates its Ed25519 signing key and logs its public half to stdout.
+  `-keyfile`/`-trusted-pubkey`/`-follower-poll-interval`) to a
+  `chain.Blockchain` (optionally backed by a `chain.ChainStore`) and an
+  `api.Server`, then runs the HTTP server. On a primary, loads or
+  generates its Ed25519 signing key and logs its public half to stdout. On
+  a follower, requires `-redis` and starts a goroutine that calls
+  `chain.PollAndAdopt` on every `-follower-poll-interval` tick.
 - `cmd/wallet` — standalone CLI client for the free-coin faucet and balance
   query (see "Wallet CLI" above).
 - `internal/chain` — `Block`/`Transaction` types, Ed25519 signing
   (`Seal`, `ComputeHash`), the deterministic `Genesis`, chain validation
   (`ValidateBlock`, `ValidateChain`) against a trusted public key, the
-  `ChainStore` persistence interface, and the thread-safe `Blockchain`
-  (seal+append, append-from-peer, replace-if-longer, each persisting to
-  the configured store if any).
+  `ChainStore` persistence interface, the follower poll-tick logic
+  (`PollAndAdopt`), and the thread-safe `Blockchain` (seal+append,
+  append, replace-if-longer, each persisting to the configured store if
+  any).
 - `internal/store` — `ChainStore` implementations: `Redis` (the only file
   importing a Redis client) and `InMemory` (a fake for tests).
-- `internal/p2p` — the gossip protocol: envelope encoding, per-connection
-  `Peer`, and the `Node` (role-aware) that accepts/dials connections,
-  handshakes, dispatches incoming envelopes, and gossips/broadcasts blocks
-  — gating chain replacement and block acceptance on `Role` per
-  "Roles & signing" above.
 - `internal/state` — derived-state computation (`Balance`, `Price`,
   `FaucetEligibility`, `Weight`) over a snapshot of the chain's
   blocks.
 - `internal/api` — HTTP handlers implementing the endpoints above,
   including the follower write-rejection gate and `/health`'s role/pubkey
-  fields.
+  fields. This package no longer has any networking/replication concerns
+  of its own — replication is entirely `cmd/aicoind`'s and
+  `internal/chain`'s job now.
 
 ## Testing
 
@@ -521,9 +513,16 @@ validation (`ValidateBlock`/`ValidateChain`) rejects a block with a wrong
 the wrong key; genesis is always valid regardless of its `Signature`
 field; `Blockchain.SealAndAppend` requires a signing key (i.e. fails on a
 follower-shaped chain with no signer) and produces a non-empty signature
-on a primary-shaped one; and the follower side of the longest-valid-chain
-rule (`ReplaceIfLonger`) adopts a longer valid chain and rejects a
-shorter-or-equal one.
+on a primary-shaped one; the follower side of the longest-valid-chain rule
+(`ReplaceIfLonger`) adopts a longer valid chain and rejects a
+shorter-or-equal one; and the follower poll-tick logic (`PollAndAdopt`,
+`internal/chain/follower_test.go`) — a follower-shaped `Blockchain` polling
+a `ChainStore` that a primary-shaped `Blockchain` has written a longer
+valid chain into adopts it wholesale on a single call (no real timer
+involved), a second tick with no store change is a harmless no-op, a `nil`
+store is a harmless no-op, and — the other half of the asymmetry — calling
+`PollAndAdopt` on a primary-shaped `Blockchain` is always a no-op, even
+when the store holds a longer, validly-signed chain.
 
 `internal/state` has unit tests covering: the smooth exponential recency
 decay formula (`Weight`), checked at controlled ages (0 days, 1 day, 7
@@ -567,36 +566,23 @@ off).
 (`shouldAttemptClaim`, `parseAvailable`, `parseClaim`, `parseBalance`) with
 no network access required.
 
-`internal/p2p` has two kinds of tests:
-
-- Two real-TCP integration tests (a primary and a follower `Node` on real
-  loopback sockets: one gossiping a freshly-sealed block end-to-end from
-  primary to follower, one syncing a 3-block head start purely via the
-  startup `hello`/`chain_request`/`chain_response` handshake). Some
-  sandboxed CI hosts deny raw `bind`/`listen` syscalls outright (even on
-  loopback); on such hosts these two tests detect that specific failure
-  and `t.Skip()` rather than fail, since it isn't something this package's
-  code controls. On any host where socket binding is actually permitted
-  they run for real and verify genuine cross-process-style TCP gossip and
-  sync.
-- Three in-process tests exercising the role-based chain-replacement
-  asymmetry directly via `Node.dispatch` and an in-memory `net.Pipe()`
-  connection (no real sockets at all, so these always run regardless of
-  sandbox socket restrictions): a follower adopts a longer valid chain
-  offered via a simulated `chain_response`; a primary does **not** adopt
-  one under any circumstances, even a longer chain validly signed by its
-  own trusted key; and a primary ignores incoming `block` gossip outright.
-
 ## Manual two-node smoke test
+
+This project's replication now runs over Redis rather than any bespoke
+protocol, so both nodes just need to be pointed at the same Redis
+instance:
 
 ```
 go build -o /tmp/aicoind ./cmd/aicoind
 
-/tmp/aicoind -http=:19944 -p2p=:19945 -role=primary -keyfile=/tmp/primary.key &
+# Requires a reachable Redis at localhost:6379, e.g. `redis-server` running
+# locally, or `docker run -p 6379:6379 redis:alpine`.
+
+/tmp/aicoind -http=:19944 -role=primary -keyfile=/tmp/primary.key -redis=localhost:6379 &
 # note the pubkey it logs, e.g. pubkey=93bbf305...fb5e
 
-/tmp/aicoind -http=:19946 -p2p=:19947 -role=follower \
-  -trusted-pubkey=<pubkey from above> -peers=127.0.0.1:19945 &
+/tmp/aicoind -http=:19946 -role=follower \
+  -trusted-pubkey=<pubkey from above> -redis=localhost:6379 -follower-poll-interval=1s &
 
 curl -s -X POST http://127.0.0.1:19944/events \
   -H 'Content-Type: application/json' \
@@ -623,7 +609,9 @@ curl -s http://127.0.0.1:19944/balance/bob     # {"user_id":"bob","balance":0.4}
 
 curl -s http://127.0.0.1:19944/price   # {"price_usd":...,"total_spend_usd":0.0042,"weighted_total":...,"height":4,"half_life_days":110}
 
-curl -s http://127.0.0.1:19946/chain   # should show all the new blocks, propagated from the primary
+sleep 2   # give the follower at least one poll tick
+
+curl -s http://127.0.0.1:19946/chain   # should show all the new blocks, picked up from Redis
 
 curl -s -X POST http://127.0.0.1:19946/events \
   -H 'Content-Type: application/json' \
@@ -631,6 +619,15 @@ curl -s -X POST http://127.0.0.1:19946/events \
 
 kill %1 %2
 ```
+
+If a real `redis-server` isn't reachable in your environment (no Redis
+installed, sandbox network/process restrictions, etc.), the equivalent
+flow is exercised in-process instead, against the `internal/chain.ChainStore`
+interface directly rather than a real Redis server — this is exactly what
+`internal/chain/follower_test.go` does, and is also how this repository's
+own automated test suite validates replication end-to-end in sandboxes
+with no live Redis (see "Testing" above and "Persistence" above for the
+same constraint noted there).
 
 ## Assumptions made for ambiguous parts of CONTRACT.md
 
@@ -660,42 +657,18 @@ the literal reading taken here:
    `0600`) and reads it back the same way — no PEM wrapping, since nothing
    else needs to interoperate with the file's format.
 
-4. **P2P handshake sequencing.** The contract says: send `hello`, "then
-   immediately request/respond with `chain_response`". Read literally
-   using both message types that the envelope's type enum actually lists
-   (`chain_request` *and* `chain_response`, as distinct types): each side
-   sends `hello` then `chain_request`; the recipient of a `chain_request`
-   always replies with `chain_response` (its full chain) — even a primary
-   responds to an inbound `chain_request` with its own chain (so followers
-   can sync), even though a primary never *acts* on a `chain_response` it
-   receives. This same `chain_request` → `chain_response` exchange is
-   reused later whenever a received `block` doesn't link to a follower's
-   local tip, per the contract's own "fetched via chain_request" phrasing
-   for that case.
-
-5. **`height` in `POST /events`'s response and `/health`.** Read as the
+4. **`height` in `POST /events`'s response and `/health`.** Read as the
    new/current block's `Index` (genesis = height 0), consistent with
    `Block.Index` being the natural notion of "height" here.
 
-6. **`GET /peers` address format.** Each node reports its *own*
-   `-p2p` flag value verbatim in its `hello` payload, and that's what
-   peers echo back for `/peers`. If a node is started with a host-less
-   bind address (e.g. `-p2p=:9945`, bind-all), peers will see that literal
-   string (e.g. `:9945`) rather than a resolved, dialable
-   `host:port` — since the contract specifies the `hello` payload as "own
-   p2p listen addr" (i.e. self-reported), not the observed remote address
-   of the TCP connection. Operators who want `/peers` to show a dialable
-   address should pass an explicit host in `-p2p` (e.g.
-   `-p2p=127.0.0.1:9945`).
-
-7. **Minimal request validation.** `POST /events` requires a non-empty
+5. **Minimal request validation.** `POST /events` requires a non-empty
    `user_id` (400 otherwise) but does not validate `provider` against the
    known provider list from the proxy's contract — the blockchain node
    itself is provider-agnostic and just records whatever string it's
    given. This check runs regardless of role, but is moot on a follower
    since the write is rejected with `403` before it's reached.
 
-8. **The "10x per year" AI-pricing-decline figure behind the 110-day
+6. **The "10x per year" AI-pricing-decline figure behind the 110-day
    default half-life is a widely-cited industry rule of thumb, not a
    dataset with exact primary-source numbers I have in hand.** It's
    supported by real, observable data points — e.g. OpenAI's public
@@ -710,7 +683,7 @@ the literal reading taken here:
    flag (`-decay-halflife-days`) precisely so this calibration can be
    revised without any code change if better data becomes available.
 
-9. **`github.com/redis/go-redis/v9` pinned at `v9.5.1`**, not the newest
+7. **`github.com/redis/go-redis/v9` pinned at `v9.5.1`**, not the newest
    release. Newer `v9.x` releases pull in `go.uber.org/atomic` as a real
    (non-test) dependency of the connection pool; that module's vanity
    import path (`go.uber.org/atomic`) isn't fetchable through this
@@ -720,13 +693,16 @@ the literal reading taken here:
    `redis.Client`/`redis.Options`/`Get`/`Set` surface used in
    `internal/store/redis.go` has been stable across the whole v9 line), so
    pinning it isn't a functionality compromise — see "Persistence" above
-   for why a live Redis server couldn't be exercised end-to-end in this
-   particular sandbox either (this repo's Redis usage is otherwise
+   for why a live Redis server couldn't always be exercised end-to-end in
+   this particular sandbox either (this repo's Redis usage is otherwise
    untouched by that constraint: it'll talk to any real Redis exactly the
    same way once one is reachable).
 
-10. **TCP socket binding in restricted environments.** Some environments
-    deny raw `bind`/`listen` syscalls for arbitrary processes. The
-    unit/integration test suite degrades gracefully either way (see
-    "Testing" above): a genuinely live end-to-end run (real sockets, real
-    multi-process P2P gossip, all checks passing) has also been verified.
+8. **Replacing P2P with Redis polling removes any notion of a dialable
+   peer address or a handshake.** There is no longer a `GET /peers`
+   endpoint, no per-connection bookkeeping, and no "peer address" concept
+   at all — a follower's only dependency is the same `-redis` address the
+   primary writes to, which it already needs to know to talk to the same
+   Redis instance in the first place. This is a strict simplification: the
+   old P2P layer solved a decentralized-consensus problem this system
+   never had, since there is exactly one legitimate writer by design.

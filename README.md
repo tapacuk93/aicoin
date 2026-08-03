@@ -53,7 +53,7 @@ You need Go and a JDK 11 available.
 
 ```
 cd aicoin
-go run ./cmd/aicoind -http=:9944 -p2p=:9945 -role=primary
+go run ./cmd/aicoind -http=:9944 -role=primary
 ```
 
 It logs its own public key on startup — ignore it for a single-node setup;
@@ -146,9 +146,9 @@ bash e2e/run.sh
 
 Builds both projects, boots a mock AI provider plus a primary+follower
 aicoin node pair plus the proxy, and exercises the full flow: auth,
-routing/key-injection, price, faucet, transfer, and P2P replication —
-verified with a genuine live run (real sockets, real processes), all 12
-checks passing.
+routing/key-injection, price, faucet, transfer, and Redis-based follower
+replication — verified with a genuine live run (real sockets, real
+processes), all 12 checks passing.
 
 ## Repo layout
 

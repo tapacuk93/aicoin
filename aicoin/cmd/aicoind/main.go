@@ -1,14 +1,16 @@
-// Command aicoind is the aicoin P2P blockchain node, per CONTRACT.md: it
-// starts both the HTTP API server and the P2P TCP gossip server against a
-// single chain (in-memory only, or Redis-backed when -redis is set).
+// Command aicoind is the aicoin blockchain node, per CONTRACT.md: it runs
+// the HTTP API server against a single chain (in-memory only, or
+// DynamoDB-backed when -dynamodb-table is set).
 //
 // There is exactly one legitimate writer, the primary, which holds an
 // Ed25519 keypair and signs every block it appends. Followers hold only
-// the primary's public key, replicate its signed chain via P2P, and
-// reject all writes. See CONTRACT.md's "Roles & signing" section.
+// the primary's public key, replicate its signed chain by polling the
+// same DynamoDB table the primary writes to, and reject all writes. See
+// CONTRACT.md's "Roles & signing" section.
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -18,34 +20,43 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"aicoin/internal/api"
 	"aicoin/internal/chain"
-	"aicoin/internal/p2p"
 	"aicoin/internal/state"
 	"aicoin/internal/store"
 )
 
 func main() {
 	httpAddr := flag.String("http", ":9944", "HTTP API listen address")
-	p2pAddr := flag.String("p2p", ":9945", "P2P TCP listen address")
-	peersFlag := flag.String("peers", "", "comma-separated bootstrap peer P2P addresses (host:port,...)")
 	role := flag.String("role", "primary", "node role: primary or follower")
 	keyfile := flag.String("keyfile", "aicoin-node.key", "primary only: path to this node's persistent Ed25519 private key (generated on first run if it doesn't exist)")
 	trustedPubKeyHex := flag.String("trusted-pubkey", "", "required when -role=follower: the primary's Ed25519 public key, hex-encoded")
-	redisAddr := flag.String("redis", "", "optional Redis host:port for chain persistence (unset = in-memory only)")
+	dynamoTable := flag.String("dynamodb-table", "", "DynamoDB table name for chain persistence; optional for a primary (unset = in-memory only), required for a follower (the only replication mechanism). AWS region/credentials come from the standard SDK environment (AWS_REGION, instance role, etc.)")
+	followerPollInterval := flag.Duration("follower-poll-interval", 2*time.Second, "follower only: how often to re-query the shared chain from DynamoDB and adopt it if it's grown")
 
 	halfLifeDays := flag.Float64("decay-halflife-days", state.DefaultHalfLifeDays, "price decay half-life in days: weight(age)=2^(-age_days/halflife); default derived from a real, documented ~10x-per-year AI pricing decline rate")
 	flag.Parse()
 
-	peerAddrs := parsePeers(*peersFlag)
+	roleVal := strings.ToLower(strings.TrimSpace(*role))
 
-	var chainStore chain.ChainStore
-	if strings.TrimSpace(*redisAddr) != "" {
-		chainStore = store.NewRedis(*redisAddr)
+	// Per CONTRACT.md's "Roles & signing"/"Persistence" sections: DynamoDB
+	// is now the only replication mechanism, so a follower with no
+	// -dynamodb-table has no way to ever learn the primary's chain. Fail
+	// fast, before doing anything else.
+	if roleVal == "follower" && strings.TrimSpace(*dynamoTable) == "" {
+		log.Fatalf("aicoind: -dynamodb-table is required when -role=follower (DynamoDB is the only replication mechanism; a follower with no -dynamodb-table has no way to learn the primary's chain)")
 	}
 
-	roleVal := strings.ToLower(strings.TrimSpace(*role))
+	var chainStore chain.ChainStore
+	if strings.TrimSpace(*dynamoTable) != "" {
+		ddb, err := store.NewDynamoDB(context.Background(), *dynamoTable)
+		if err != nil {
+			log.Fatalf("aicoind: creating DynamoDB client for table %s: %v", *dynamoTable, err)
+		}
+		chainStore = ddb
+	}
 
 	var (
 		trustedPubKey ed25519.PublicKey
@@ -83,31 +94,48 @@ func main() {
 
 	bc, err := chain.NewBlockchainWithStore(trustedPubKey, signer, chainStore)
 	if err != nil {
-		log.Fatalf("aicoind: loading chain from redis %s: %v", *redisAddr, err)
+		log.Fatalf("aicoind: loading chain from dynamodb table %s: %v", *dynamoTable, err)
 	}
 
-	node := p2p.NewNode(*p2pAddr, roleVal, bc)
-
-	if err := node.Listen(); err != nil {
-		log.Fatalf("aicoind: p2p listen on %s: %v", *p2pAddr, err)
-	}
-	go func() {
-		if err := node.Serve(); err != nil {
-			log.Printf("aicoind: p2p serve stopped: %v", err)
-		}
-	}()
-
-	if len(peerAddrs) > 0 {
-		node.ConnectToPeers(peerAddrs)
+	// Per CONTRACT.md's "Roles & signing" section: only a follower ever
+	// polls/replaces its chain from the store; a primary only ever writes
+	// to it (via bc's own persistBlockLocked, triggered by SealAndAppend)
+	// and never reads it again after this startup load. So this goroutine
+	// is only ever started for -role=follower — a primary simply never
+	// runs it (chain.PollAndAdopt is also a structural no-op on a
+	// primary-shaped Blockchain, as a second line of defense).
+	if roleVal == "follower" {
+		go runFollowerPollLoop(bc, chainStore, *followerPollInterval)
 	}
 
-	srv := api.NewServer(bc, node, *halfLifeDays, roleVal, pubKeyHex)
+	srv := api.NewServer(bc, *halfLifeDays, roleVal, pubKeyHex)
 
-	log.Printf("aicoind: http=%s p2p=%s role=%s peers=%v redis=%q genesis=%s",
-		*httpAddr, *p2pAddr, roleVal, peerAddrs, *redisAddr, chain.Genesis().Hash)
+	log.Printf("aicoind: http=%s role=%s dynamodb_table=%q follower_poll_interval=%s genesis=%s",
+		*httpAddr, roleVal, *dynamoTable, *followerPollInterval, chain.Genesis().Hash)
 
 	if err := http.ListenAndServe(*httpAddr, srv.Router()); err != nil {
 		log.Fatalf("aicoind: http listen on %s: %v", *httpAddr, err)
+	}
+}
+
+// runFollowerPollLoop runs a follower's replication loop: every interval,
+// it calls chain.PollAndAdopt(bc, chainStore) — the same
+// ValidateChain/ReplaceIfLonger logic used everywhere else in this
+// codebase, just triggered by a timer tick instead of an incoming P2P
+// message — and logs the outcome. It blocks; run it in its own goroutine.
+// It is never started for a primary (see main above).
+func runFollowerPollLoop(bc *chain.Blockchain, chainStore chain.ChainStore, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		replaced, err := chain.PollAndAdopt(bc, chainStore)
+		if err != nil {
+			log.Printf("aicoind: follower poll: querying chain from dynamodb: %v", err)
+			continue
+		}
+		if replaced {
+			log.Printf("aicoind: follower poll: adopted longer valid chain from dynamodb (height %d)", bc.Tip().Index)
+		}
 	}
 }
 
@@ -136,18 +164,4 @@ func loadOrCreateSigningKey(path string) (ed25519.PrivateKey, error) {
 	}
 	log.Printf("aicoind: no keyfile found at %s; generated a new Ed25519 signing key and saved it there", path)
 	return priv, nil
-}
-
-func parsePeers(flagVal string) []string {
-	if strings.TrimSpace(flagVal) == "" {
-		return nil
-	}
-	var out []string
-	for _, a := range strings.Split(flagVal, ",") {
-		a = strings.TrimSpace(a)
-		if a != "" {
-			out = append(out, a)
-		}
-	}
-	return out
 }
