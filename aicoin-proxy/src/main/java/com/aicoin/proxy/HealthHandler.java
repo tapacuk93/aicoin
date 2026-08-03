@@ -12,11 +12,11 @@ import io.netty.util.CharsetUtil;
 
 /**
  * Handles the proxy-side {@code GET /health} endpoint, per CONTRACT.md's
- * "Additional proxy-side endpoints" section: reports, for every one of the
- * 5 configured providers (always, in a stable order, even ones with zero
- * traffic so far), whether its rolling window of recent forwarded calls
- * (tracked by {@link ProviderHealthTracker}) has hit a rate-limit (429) or
- * budget (402/403) error.
+ * "Additional proxy-side endpoints" section: reports, for every configured
+ * provider (all of {@link ProxyConfig#PROVIDER_NAMES}, always, in a stable
+ * order, even ones with zero traffic so far), whether its rolling window of
+ * recent forwarded calls (tracked by {@link ProviderHealthTracker}) has hit
+ * a rate-limit (429) or budget (402/403) error.
  */
 final class HealthHandler {
 

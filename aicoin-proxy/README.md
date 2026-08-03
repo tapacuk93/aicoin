@@ -7,12 +7,12 @@ path** a real LLM provider would use; a request header (`X-AI`) picks which
 provider/upstream to use, and the proxy injects **its own** paid API key
 into the forwarded request — clients never hold or send provider
 credentials. The caller's aicoin wallet id doubles as their API key (sent
-as `X-Api-Key`), which the proxy validates against the aicoin node before
-forwarding. It relays the upstream response verbatim and asynchronously
-reports a cost event to the `aicoin` chain node for every successful call.
-It also exposes three small proxy-side endpoints: `GET /price`, `GET
-/free-coins/available`, and `GET /health` — none of which require
-`X-Api-Key`.
+as `X-Api-Key`), which the proxy validates against the aicoin node — and
+gates on a positive balance — before forwarding. It relays the upstream
+response verbatim and asynchronously reports a cost event to the `aicoin`
+chain node for every successful call. It also exposes three small
+proxy-side endpoints: `GET /price`, `GET /free-coins/available`, and `GET
+/health` — none of which require `X-Api-Key`.
 
 This document mirrors the shared `CONTRACT.md` at the repo root but is
 meant to stand on its own.
@@ -66,6 +66,16 @@ providers:
     apiKey: ""                               # AICOIN_PROXY_COHERE_APIKEY
     authHeader: Authorization                # AICOIN_PROXY_COHERE_AUTHHEADER
     authPrefix: "Bearer "                    # AICOIN_PROXY_COHERE_AUTHPREFIX
+  elevenlabs:
+    baseUrl: https://api.elevenlabs.io        # AICOIN_PROXY_ELEVENLABS_BASEURL
+    apiKey: ""                               # AICOIN_PROXY_ELEVENLABS_APIKEY
+    authHeader: xi-api-key                   # AICOIN_PROXY_ELEVENLABS_AUTHHEADER
+    authPrefix: ""                           # AICOIN_PROXY_ELEVENLABS_AUTHPREFIX
+  stability:
+    baseUrl: https://api.stability.ai        # AICOIN_PROXY_STABILITY_BASEURL
+    apiKey: ""                               # AICOIN_PROXY_STABILITY_APIKEY
+    authHeader: Authorization                # AICOIN_PROXY_STABILITY_AUTHHEADER
+    authPrefix: "Bearer "                    # AICOIN_PROXY_STABILITY_AUTHPREFIX
 pricing:
   costPerTokenUsd: 0.000002       # AICOIN_PROXY_COST_PER_TOKEN_USD
   defaultCostUsdPerCall: 0.001    # AICOIN_PROXY_DEFAULT_COST_USD
@@ -80,9 +90,15 @@ health:
 
 Each provider is configured with either `authHeader`+`authPrefix` (the
 common case: the apiKey goes into a request header, e.g. `Authorization:
-Bearer <key>` or Anthropic's `x-api-key: <key>`) **or**
-`authAsQueryParam`+`authQueryParamName` (Google: the apiKey goes into a URL
-query parameter, `?key=<key>`).
+Bearer <key>`, Anthropic's `x-api-key: <key>`, or ElevenLabs' `xi-api-key:
+<key>`) **or** `authAsQueryParam`+`authQueryParamName` (Google: the apiKey
+goes into a URL query parameter, `?key=<key>`).
+
+`elevenlabs` and `stability` exist so client apps that call voice
+(ElevenLabs) or image (Stability) generation, not just text, can route
+through the wallet too — OpenAI's own image generation (DALL-E) already
+goes through the existing `openai` entry, since it's the same
+`api.openai.com` host.
 
 ## Routing — same path, header selects the provider, proxy owns the upstream key
 
@@ -90,7 +106,8 @@ The client calls the proxy at **exactly the same path** a real provider
 would use (e.g. `POST /v1/chat/completions`) — only the domain changes to
 the proxy's. There is no path-prefix stripping. A request header `X-AI:
 <provider>` (one of `openai`, `anthropic`, `google`, `mistral`, `cohere`,
-case-insensitive) tells the proxy which upstream/config to use:
+`elevenlabs`, `stability`, case-insensitive) tells the proxy which
+upstream/config to use:
 
 1. The proxy reads `X-AI` and looks up the matching `providers.<name>`
    config. A missing or unknown value returns:
@@ -114,7 +131,7 @@ case-insensitive) tells the proxy which upstream/config to use:
    and wallet validation, see "Auth" below. Any key/credential the client
    did send for that provider is discarded, never forwarded.
 
-## Auth — wallet id IS the API key
+## Auth — wallet id IS the API key, gated on a positive balance
 
 There is no separate provider key or API key concept for the client — the
 caller's aicoin wallet id **doubles as their API key**. Every proxied
@@ -149,13 +166,34 @@ GET {aicoin.balanceUrlBase}/balance/{walletId}
 
   and does **not** forward the request to the AI provider — no upstream
   call is made and no cost event is ever emitted for it.
-- If it **succeeds** (any 2xx response, regardless of the reported balance
-  value — the aicoin node returns a balance, possibly `0`, for any
-  syntactically valid id even if it's never been used before, so this is a
-  reachability check on the aicoin node, not a cryptographic identity
-  check), the proxy proceeds with forwarding exactly as before. The
-  validated `walletId` becomes the `user_id` in the eventual `/events` POST
-  (see "Forwarding pipeline" below).
+- If it **succeeds** (any 2xx response), the proxy reads the `balance`
+  field from the response body and gates on it — this is deliberately a
+  simple binary gate, not per-call metering: a successful call still
+  doesn't debit anything from the balance (an `event` transaction still
+  contributes 0 to balance, unchanged; that's documented behavior, not a
+  bug):
+  - `balance <= 0` (including negative, which shouldn't normally occur
+    since a `/transfer` can't overdraw a wallet, but is treated the same
+    defensively) — the wallet has never received a faucet claim/transfer,
+    or has sent away everything it had:
+
+    ```
+    402 {"error":"insufficient aicoin balance","balance":<value>}
+    ```
+
+    and does **not** forward the request to the AI provider — no upstream
+    call is made and no cost event is ever emitted for it, same as the
+    401/503 cases above. Client apps integrating the wallet should treat
+    `402` from this proxy as the one and only signal to fall back to the
+    user's own provider key for that request.
+  - `balance > 0` — the proxy proceeds with forwarding exactly as before.
+    The aicoin node returns a balance (possibly `0`) for *any*
+    syntactically-valid id, even one never used before, so the underlying
+    validation call is a liveness/reachability check on the aicoin node,
+    not a cryptographic identity check — that's a documented assumption,
+    not a security guarantee. The validated `walletId` becomes the
+    `user_id` in the eventual `/events` POST (see "Forwarding pipeline"
+    below).
 
 The old `X-User-Id` header is gone — `X-Api-Key` is now the only identity
 mechanism, for both routing decisions (there are none left tied to it) and
@@ -196,14 +234,14 @@ billing.
   manually bumped by an operator via git push + CI redeploy) and returns
   `{"available": N}`. A missing or unparseable file resolves to
   `{"available": 0}`.
-- `GET /health` — for each of the 5 configured providers (`openai`,
-  `anthropic`, `google`, `mistral`, `cohere`), reports whether recent
-  upstream calls have hit rate-limiting or budget errors. The proxy keeps,
-  per provider, a rolling window of the last `health.windowSize` forwarded
-  calls' upstream HTTP status codes (recorded regardless of whether the
-  call was 2xx or not): `rateLimited` is `true` if any status in the
-  window was `429`; `overBudget` is `true` if any was `402` or `403`;
-  `healthy` is `!rateLimited && !overBudget`. Response:
+- `GET /health` — for each of the 7 configured providers (`openai`,
+  `anthropic`, `google`, `mistral`, `cohere`, `elevenlabs`, `stability`),
+  reports whether recent upstream calls have hit rate-limiting or budget
+  errors. The proxy keeps, per provider, a rolling window of the last
+  `health.windowSize` forwarded calls' upstream HTTP status codes (recorded
+  regardless of whether the call was 2xx or not): `rateLimited` is `true`
+  if any status in the window was `429`; `overBudget` is `true` if any was
+  `402` or `403`; `healthy` is `!rateLimited && !overBudget`. Response:
 
   ```json
   {"providers":[
@@ -211,11 +249,13 @@ billing.
     {"name":"anthropic","healthy":true,"rateLimited":false,"overBudget":false},
     {"name":"google","healthy":true,"rateLimited":false,"overBudget":false},
     {"name":"mistral","healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"cohere","healthy":true,"rateLimited":false,"overBudget":false}
+    {"name":"cohere","healthy":true,"rateLimited":false,"overBudget":false},
+    {"name":"elevenlabs","healthy":true,"rateLimited":false,"overBudget":false},
+    {"name":"stability","healthy":true,"rateLimited":false,"overBudget":false}
   ]}
   ```
 
-  All 5 providers are always listed, in this stable order, even ones with
+  All 7 providers are always listed, in this stable order, even ones with
   zero forwarded calls so far — those default to
   `healthy:true`/`rateLimited:false`/`overBudget:false`.
 
@@ -228,20 +268,24 @@ billing.
 JUnit5 pure-function tests, with no network/Netty server startup required:
 
 - `ProviderRoutingTest` — `X-AI` header → provider resolution, including
-  case-insensitivity and the missing/unknown case.
+  case-insensitivity and the missing/unknown case, across all 7 providers.
 - `WalletValidationTest` — `X-Api-Key` header → wallet id extraction
   (missing/blank/whitespace-trimmed), the `{balanceUrlBase}/balance/{walletId}`
   URL construction (trailing-slash tolerance, path-segment encoding of
-  special characters), and the success/failure/timeout decision (any 2xx
-  status code → reachable/proceed; any other status, or no response at all
-  — modeling a connect failure or read timeout — → not reachable/503).
+  special characters), the reachability decision (any 2xx status code →
+  reachable; any other status, or no response at all — modeling a connect
+  failure or read timeout → not reachable), parsing the `balance` field out
+  of the response body, and the combined balance-gating decision: positive
+  balance → proceed; zero, negative, or unparseable/missing balance on an
+  otherwise-reachable node → the appropriate `402`/`503` outcome.
 - `AuthInjectorTest` — auth-injection construction, both the header+prefix
-  form (OpenAI/Anthropic-style) and the query-param form (Google-style).
+  form (OpenAI/Anthropic/Mistral/Cohere/ElevenLabs/Stability-style) and the
+  query-param form (Google-style).
 - `CostCalculatorTest` — usage-JSON → `cost_usd` parsing, both OpenAI-style
   and Anthropic-style, plus the fallback-to-default case.
 - `ProxyConfigTest` — config precedence (env var > YAML > default),
   covering `port`/`eventsUrl`/`priceUrl`/`balanceUrlBase`/
-  `freeCoinsCounterFile` and each provider's
+  `freeCoinsCounterFile` and each of the 7 providers'
   `baseUrl`/`apiKey`/`authHeader`/`authPrefix`/`authAsQueryParam`/
   `authQueryParamName`.
 - `FreeCoinsCounterTest` — reading the free-coins counter fresh from a
@@ -252,11 +296,11 @@ JUnit5 pure-function tests, with no network/Netty server startup required:
   synthetic status codes, per-provider independence, and window-eviction
   behavior once more than `windowSize` calls have been recorded for a
   provider.
-- `HealthHandlerTest` — the `GET /health` JSON body always lists all 5
-  providers, in the stable `openai, anthropic, google, mistral, cohere`
-  order, defaulting to the all-clear state for providers with zero
-  recorded calls, and reflecting recorded rate-limit/budget statuses for
-  others.
+- `HealthHandlerTest` — the `GET /health` JSON body always lists all 7
+  providers, in the stable `openai, anthropic, google, mistral, cohere,
+  elevenlabs, stability` order, defaulting to the all-clear state for
+  providers with zero recorded calls, and reflecting recorded
+  rate-limit/budget statuses for others.
 
 ## Assumptions made where the contract is ambiguous
 
@@ -297,6 +341,20 @@ JUnit5 pure-function tests, with no network/Netty server startup required:
   5s Netty `ReadTimeoutHandler` so a connected-but-hanging aicoin node
   still resolves to `503` rather than hanging the client request
   indefinitely.
+- **A 2xx balance-check response with no parseable numeric `balance` field**
+  is treated the same as an unreachable aicoin node (`503`), not as
+  insufficient balance (`402`) — there's nothing to gate on in that case,
+  and the contract's `GET /balance/{user_id}` shape always includes
+  `balance`, so this should never happen against a compliant aicoin node;
+  it's purely a defensive fallback. `balance <= 0` (including negative,
+  which also shouldn't normally occur since `/transfer` can't overdraw a
+  wallet) is always `402`, per the contract's explicit "treat the same
+  defensively" instruction.
+- **The `balance` field in a `402` response body** is rendered from
+  whatever numeric type SnakeYAML parsed out of the upstream JSON
+  (`Integer`/`Long`/`Double`), formatted without a trailing `.0` when it's
+  a whole number — matching how Go's `encoding/json` would itself render a
+  whole-number `float64` balance (e.g. `0`, not `0.0`).
 - **`GET /health` only records real upstream responses.** The contract says
   to record "every forwarded call" into a provider's rolling window; a
   connect/write failure to the upstream never produces a real HTTP status

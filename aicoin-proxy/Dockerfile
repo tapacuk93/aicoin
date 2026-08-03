@@ -5,7 +5,7 @@
 ## field remains overridable via env vars at `docker run` time (see
 ## README.md's "Configuration" section for the full list).
 
-FROM eclipse-temurin:11-jdk AS build
+FROM eclipse-temurin:17-jdk AS build
 WORKDIR /workspace
 
 # Cache dependency downloads separately from source changes.
@@ -16,7 +16,7 @@ RUN ./gradlew --version
 COPY src ./src
 RUN ./gradlew installDist --no-daemon
 
-FROM eclipse-temurin:11-jre AS runtime
+FROM eclipse-temurin:17-jre AS runtime
 WORKDIR /opt/aicoin-proxy
 
 COPY --from=build /workspace/build/install/aicoin-proxy/ ./

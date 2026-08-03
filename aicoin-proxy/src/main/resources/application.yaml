@@ -30,6 +30,16 @@ providers:
     apiKey: ""
     authHeader: Authorization
     authPrefix: "Bearer "
+  elevenlabs:
+    baseUrl: https://api.elevenlabs.io
+    apiKey: ""
+    authHeader: xi-api-key
+    authPrefix: ""
+  stability:
+    baseUrl: https://api.stability.ai
+    apiKey: ""
+    authHeader: Authorization
+    authPrefix: "Bearer "
 pricing:
   costPerTokenUsd: 0.000002
   defaultCostUsdPerCall: 0.001

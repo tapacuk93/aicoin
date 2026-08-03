@@ -1,6 +1,7 @@
 package com.aicoin.proxy;
 
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
@@ -22,6 +23,7 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.timeout.ReadTimeoutHandler;
+import io.netty.util.CharsetUtil;
 import java.net.URI;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,14 +34,16 @@ import java.util.logging.Logger;
 /**
  * Performs the actual async Netty HTTP GET to {@code
  * {balanceUrlBase}/balance/{walletId}}, per CONTRACT.md's "Auth — wallet id
- * IS the API key" section. No subprocess — a plain outbound {@link
- * Bootstrap} exactly like {@link PriceForwarder}/{@link UpstreamForwarder}.
+ * IS the API key, gated on a positive balance" section. No subprocess — a
+ * plain outbound {@link Bootstrap} exactly like {@link
+ * PriceForwarder}/{@link UpstreamForwarder}.
  *
- * The decision of what a given outcome (success/failure/timeout) *means*
- * lives in {@link WalletValidation#isReachable}; this class is only
- * responsible for driving the network call and reporting exactly one
- * outcome — true (proceed with forwarding) or false (respond {@code 503})
- * — to {@code onResult}, exactly once.
+ * The decision of what a given outcome (success/failure/timeout, and the
+ * balance value in a successful body) *means* lives in {@link
+ * WalletValidation#decide}; this class is only responsible for driving the
+ * network call, parsing the response body's {@code balance} field, and
+ * reporting exactly one {@link WalletValidation.BalanceDecision} to {@code
+ * onResult}, exactly once.
  */
 final class WalletValidator {
 
@@ -51,27 +55,29 @@ final class WalletValidator {
     private WalletValidator() {
     }
 
-    static void validate(EventLoopGroup group, String balanceUrlBase, String walletId, Consumer<Boolean> onResult) {
+    static void validate(EventLoopGroup group, String balanceUrlBase, String walletId,
+                          Consumer<WalletValidation.BalanceDecision> onResult) {
         AtomicBoolean delivered = new AtomicBoolean(false);
-        Consumer<Boolean> deliverOnce = reachable -> {
+        Consumer<WalletValidation.BalanceDecision> deliverOnce = decision -> {
             if (delivered.compareAndSet(false, true)) {
-                onResult.accept(reachable);
+                onResult.accept(decision);
             }
         };
+        Runnable deliverUnreachable = () -> deliverOnce.accept(WalletValidation.BalanceDecision.unreachable());
 
         URI uri;
         try {
             uri = new URI(WalletValidation.balanceUrl(balanceUrlBase, walletId));
         } catch (Exception e) {
             LOG.log(Level.WARNING, "invalid aicoin.balanceUrlBase: " + balanceUrlBase, e);
-            deliverOnce.accept(false);
+            deliverUnreachable.run();
             return;
         }
 
         boolean tls = "https".equalsIgnoreCase(uri.getScheme());
         String host = uri.getHost();
         if (host == null) {
-            deliverOnce.accept(false);
+            deliverUnreachable.run();
             return;
         }
         int port = uri.getPort() != -1 ? uri.getPort() : (tls ? 443 : 80);
@@ -98,14 +104,17 @@ final class WalletValidator {
                         ch.pipeline().addLast(new SimpleChannelInboundHandler<FullHttpResponse>() {
                             @Override
                             protected void channelRead0(ChannelHandlerContext ctx, FullHttpResponse response) {
-                                deliverOnce.accept(WalletValidation.isReachable(Optional.of(response.status().code())));
+                                String body = new String(ByteBufUtil.getBytes(response.content()), CharsetUtil.UTF_8);
+                                Optional<Integer> statusCode = Optional.of(response.status().code());
+                                Optional<Number> balance = WalletValidation.parseBalance(body);
+                                deliverOnce.accept(WalletValidation.decide(statusCode, balance));
                                 ctx.close();
                             }
 
                             @Override
                             public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
                                 LOG.log(Level.WARNING, "wallet balance-check failed for " + balanceUrlBase, cause);
-                                deliverOnce.accept(false);
+                                deliverUnreachable.run();
                                 ctx.close();
                             }
                         });
@@ -115,7 +124,7 @@ final class WalletValidator {
         bootstrap.connect(host, port).addListener((ChannelFutureListener) future -> {
             if (!future.isSuccess()) {
                 LOG.log(Level.WARNING, "wallet balance-check connect failed: " + balanceUrlBase, future.cause());
-                deliverOnce.accept(false);
+                deliverUnreachable.run();
                 return;
             }
             Channel ch = future.channel();
@@ -125,10 +134,11 @@ final class WalletValidator {
             ch.writeAndFlush(req).addListener((ChannelFutureListener) writeFuture -> {
                 if (!writeFuture.isSuccess()) {
                     LOG.log(Level.WARNING, "wallet balance-check write failed: " + balanceUrlBase, writeFuture.cause());
-                    deliverOnce.accept(false);
+                    deliverUnreachable.run();
                     ch.close();
                 }
             });
         });
     }
 }
+

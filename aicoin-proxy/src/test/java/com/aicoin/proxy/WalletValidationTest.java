@@ -9,10 +9,11 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Pure-function wallet-id-as-API-key auth logic, per CONTRACT.md's "Auth —
- * wallet id IS the API key" section: header extraction, balance-check URL
- * construction, and the success/failure/timeout decision — all independent
- * of any live Netty server (the actual network call lives in {@link
- * WalletValidator}).
+ * wallet id IS the API key, gated on a positive balance" section: header
+ * extraction, balance-check URL construction, the reachability decision,
+ * balance parsing, and the combined balance-gating decision — all
+ * independent of any live Netty server (the actual network call lives in
+ * {@link WalletValidator}).
  */
 class WalletValidationTest {
 
@@ -89,5 +90,122 @@ class WalletValidationTest {
         // connect failure, write failure, or read timeout — per
         // CONTRACT.md's "fails or times out" -> 503 rule.
         assertFalse(WalletValidation.isReachable(Optional.empty()));
+    }
+
+    // --- parseBalance: extracting the "balance" numeric field from a GET /balance/{walletId} body ---
+
+    @Test
+    void parsesPositiveBalanceFromResponseBody() {
+        Optional<Number> balance = WalletValidation.parseBalance("{\"user_id\":\"w1\",\"balance\":3}");
+        assertTrue(balance.isPresent());
+        assertEquals(3.0, balance.get().doubleValue(), 1e-12);
+    }
+
+    @Test
+    void parsesFractionalBalanceFromResponseBody() {
+        Optional<Number> balance = WalletValidation.parseBalance("{\"user_id\":\"w1\",\"balance\":0.5}");
+        assertTrue(balance.isPresent());
+        assertEquals(0.5, balance.get().doubleValue(), 1e-12);
+    }
+
+    @Test
+    void parsesZeroBalanceFromResponseBody() {
+        Optional<Number> balance = WalletValidation.parseBalance("{\"user_id\":\"w1\",\"balance\":0}");
+        assertTrue(balance.isPresent());
+        assertEquals(0.0, balance.get().doubleValue(), 1e-12);
+    }
+
+    @Test
+    void parsesNegativeBalanceFromResponseBody() {
+        Optional<Number> balance = WalletValidation.parseBalance("{\"user_id\":\"w1\",\"balance\":-2}");
+        assertTrue(balance.isPresent());
+        assertEquals(-2.0, balance.get().doubleValue(), 1e-12);
+    }
+
+    @Test
+    void missingBalanceFieldIsNotParsed() {
+        assertFalse(WalletValidation.parseBalance("{\"user_id\":\"w1\"}").isPresent());
+    }
+
+    @Test
+    void unparseableBodyIsNotParsed() {
+        assertFalse(WalletValidation.parseBalance("not json at all {{{").isPresent());
+    }
+
+    @Test
+    void nullOrEmptyBodyIsNotParsed() {
+        assertFalse(WalletValidation.parseBalance(null).isPresent());
+        assertFalse(WalletValidation.parseBalance("").isPresent());
+        assertFalse(WalletValidation.parseBalance("   ").isPresent());
+    }
+
+    // --- decide: the combined reachability + balance gate, per CONTRACT.md's
+    // "Auth — wallet id IS the API key, gated on a positive balance" section ---
+
+    @Test
+    void positiveBalanceOnReachableNodeProceeds() {
+        WalletValidation.BalanceDecision decision =
+                WalletValidation.decide(Optional.of(200), Optional.of(3));
+        assertTrue(decision.shouldProceed());
+        assertFalse(decision.hasInsufficientBalance());
+        assertFalse(decision.isUnreachable());
+        assertEquals(3, decision.getBalance());
+    }
+
+    @Test
+    void fractionalPositiveBalanceProceeds() {
+        WalletValidation.BalanceDecision decision =
+                WalletValidation.decide(Optional.of(200), Optional.of(0.1));
+        assertTrue(decision.shouldProceed());
+    }
+
+    @Test
+    void zeroBalanceOnReachableNodeIsInsufficient() {
+        WalletValidation.BalanceDecision decision =
+                WalletValidation.decide(Optional.of(200), Optional.of(0));
+        assertFalse(decision.shouldProceed());
+        assertTrue(decision.hasInsufficientBalance());
+        assertFalse(decision.isUnreachable());
+        assertEquals(0, decision.getBalance());
+    }
+
+    @Test
+    void negativeBalanceOnReachableNodeIsInsufficient() {
+        // Shouldn't normally occur (transfers can't overdraw a wallet), but
+        // treated the same as <= 0 defensively per CONTRACT.md.
+        WalletValidation.BalanceDecision decision =
+                WalletValidation.decide(Optional.of(200), Optional.of(-5));
+        assertFalse(decision.shouldProceed());
+        assertTrue(decision.hasInsufficientBalance());
+        assertFalse(decision.isUnreachable());
+        assertEquals(-5, decision.getBalance());
+    }
+
+    @Test
+    void unreachableNodeIsNeitherProceedNorInsufficientBalance() {
+        WalletValidation.BalanceDecision decision =
+                WalletValidation.decide(Optional.empty(), Optional.empty());
+        assertTrue(decision.isUnreachable());
+        assertFalse(decision.shouldProceed());
+        assertFalse(decision.hasInsufficientBalance());
+    }
+
+    @Test
+    void non2xxStatusIsUnreachableRegardlessOfBalance() {
+        WalletValidation.BalanceDecision decision =
+                WalletValidation.decide(Optional.of(500), Optional.of(5));
+        assertTrue(decision.isUnreachable());
+        assertFalse(decision.shouldProceed());
+    }
+
+    @Test
+    void reachableButUnparseableBalanceIsTreatedAsUnreachable() {
+        // A 2xx response with no numeric "balance" field is nothing to gate
+        // on, so it's treated the same as "could not validate wallet".
+        WalletValidation.BalanceDecision decision =
+                WalletValidation.decide(Optional.of(200), Optional.empty());
+        assertTrue(decision.isUnreachable());
+        assertFalse(decision.shouldProceed());
+        assertFalse(decision.hasInsufficientBalance());
     }
 }

@@ -14,7 +14,7 @@ cd "$REPO_ROOT"
 WORKDIR="$(mktemp -d /tmp/aicoin-e2e.XXXXXX)"
 FAIL=0
 PIDS=()
-REDIS_CONTAINER=""
+DYNAMODB_CONTAINER=""
 
 log() { echo "[e2e] $*"; }
 pass() { echo "  PASS: $*"; }
@@ -31,7 +31,7 @@ cleanup() {
     pids_on_port=$(lsof -t -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null || true)
     [ -n "$pids_on_port" ] && kill -9 $pids_on_port 2>/dev/null || true
   done
-  [ -n "$REDIS_CONTAINER" ] && docker stop "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+  [ -n "$DYNAMODB_CONTAINER" ] && docker stop "$DYNAMODB_CONTAINER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -60,7 +60,8 @@ NODE_A_HTTP=19944
 NODE_B_HTTP=19946
 MOCK_PORT=18090
 PROXY_PORT=18080
-REDIS_PORT=16379
+DYNAMODB_PORT=18000
+DYNAMODB_TABLE=aicoin-e2e-chain
 
 log "building Go binaries"
 (cd "$REPO_ROOT/aicoin" && go build -o "$WORKDIR/aicoind" ./cmd/aicoind && go build -o "$WORKDIR/wallet" ./cmd/wallet) || { log "go build failed"; exit 1; }
@@ -73,15 +74,36 @@ else
   (cd "$REPO_ROOT/aicoin-proxy" && ./gradlew installDist -q --no-daemon) || { log "gradle build failed"; exit 1; }
 fi
 
-log "starting a throwaway Redis container on :$REDIS_PORT (replication between node A and node B now goes through Redis, not P2P)"
-REDIS_CONTAINER=$(docker run -d --rm -p "$REDIS_PORT:6379" redis:alpine) || { log "docker run redis failed"; exit 1; }
+# Replication between node A and node B now goes through a shared DynamoDB
+# table (polled by the follower), not P2P. There's no production local
+# stand-in for DynamoDB the way redis:alpine stood in for a managed cache
+# (see CONTRACT.md's "Docker / docker-compose" section), but AWS officially
+# ships DynamoDB Local specifically for this kind of test/dev use, so this
+# e2e test uses that -- the AWS SDK in cmd/aicoind picks up the endpoint
+# override via the standard AWS_ENDPOINT_URL_DYNAMODB env var, no code
+# changes needed.
+log "starting DynamoDB Local on :$DYNAMODB_PORT"
+DYNAMODB_CONTAINER=$(docker run -d --rm -p "$DYNAMODB_PORT:8000" amazon/dynamodb-local:latest -jar DynamoDBLocal.jar -inMemory -sharedDb) || { log "docker run dynamodb-local failed"; exit 1; }
+
+export AWS_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=fake
+export AWS_SECRET_ACCESS_KEY=fake
+export AWS_ENDPOINT_URL_DYNAMODB="http://127.0.0.1:$DYNAMODB_PORT"
+
+log "creating DynamoDB table $DYNAMODB_TABLE"
+aws dynamodb create-table \
+  --endpoint-url "$AWS_ENDPOINT_URL_DYNAMODB" --region "$AWS_REGION" \
+  --table-name "$DYNAMODB_TABLE" \
+  --attribute-definitions AttributeName=chain_id,AttributeType=S AttributeName=block_index,AttributeType=N \
+  --key-schema AttributeName=chain_id,KeyType=HASH AttributeName=block_index,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST >/dev/null || { log "creating dynamodb table failed"; exit 1; }
 
 log "starting mock AI provider on :$MOCK_PORT"
 python3 "$REPO_ROOT/e2e/mock_provider.py" "$MOCK_PORT" > "$WORKDIR/mock.log" 2>&1 &
 PIDS+=($!)
 
-log "starting aicoin node A as primary on :$NODE_A_HTTP (redis 127.0.0.1:$REDIS_PORT)"
-"$WORKDIR/aicoind" -http=":$NODE_A_HTTP" -role=primary -keyfile="$WORKDIR/nodeA.key" -redis="127.0.0.1:$REDIS_PORT" > "$WORKDIR/nodeA.log" 2>&1 &
+log "starting aicoin node A as primary on :$NODE_A_HTTP (dynamodb table $DYNAMODB_TABLE)"
+"$WORKDIR/aicoind" -http=":$NODE_A_HTTP" -role=primary -keyfile="$WORKDIR/nodeA.key" -dynamodb-table="$DYNAMODB_TABLE" > "$WORKDIR/nodeA.log" 2>&1 &
 PIDS+=($!)
 
 wait_for "http://127.0.0.1:$NODE_A_HTTP/health" || { log "node A never came up"; exit 1; }
@@ -89,8 +111,8 @@ PRIMARY_PUBKEY=$(grep -oE 'pubkey=[0-9a-f]{64}' "$WORKDIR/nodeA.log" | head -1 |
 if [ -z "$PRIMARY_PUBKEY" ]; then log "could not read primary's pubkey from its startup log"; cat "$WORKDIR/nodeA.log"; exit 1; fi
 log "primary pubkey: $PRIMARY_PUBKEY"
 
-log "starting aicoin node B as a follower of A on :$NODE_B_HTTP (same redis, polling every 1s)"
-"$WORKDIR/aicoind" -http=":$NODE_B_HTTP" -role=follower -trusted-pubkey="$PRIMARY_PUBKEY" -redis="127.0.0.1:$REDIS_PORT" -follower-poll-interval=1s > "$WORKDIR/nodeB.log" 2>&1 &
+log "starting aicoin node B as a follower of A on :$NODE_B_HTTP (same dynamodb table, polling every 1s)"
+"$WORKDIR/aicoind" -http=":$NODE_B_HTTP" -role=follower -trusted-pubkey="$PRIMARY_PUBKEY" -dynamodb-table="$DYNAMODB_TABLE" -follower-poll-interval=1s > "$WORKDIR/nodeB.log" 2>&1 &
 PIDS+=($!)
 
 wait_for "http://127.0.0.1:$MOCK_PORT/" || true
@@ -120,7 +142,9 @@ code=$(curl -s -o "$WORKDIR/t2.json" -w "%{http_code}" -X POST "http://127.0.0.1
 if [ "$code" = "400" ]; then pass "400 missing X-AI"; else fail "expected 400, got $code: $(cat "$WORKDIR/t2.json")"; fi
 
 log "--- test 3: full happy-path proxied call (routing + key injection + passthrough) ---"
-code=$(curl -s -o "$WORKDIR/t3.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" -H "X-Api-Key: alice" -H "X-AI: openai" -d '{"model":"gpt-4"}')
+log "granting carol a free coin first — the proxy now gates on a positive balance (kept separate from alice, who tests 7/8 exercise below)"
+curl -s -X POST "http://127.0.0.1:$NODE_A_HTTP/free-coins/claim" -d '{"user_id":"carol"}' > /dev/null
+code=$(curl -s -o "$WORKDIR/t3.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" -H "X-Api-Key: carol" -H "X-AI: openai" -d '{"model":"gpt-4"}')
 if [ "$code" = "200" ]; then
   auth=$(python3 -c "import json;print(json.load(open('$WORKDIR/t3.json')).get('received_authorization'))")
   xai=$(python3 -c "import json;print(json.load(open('$WORKDIR/t3.json')).get('received_x_ai'))")
@@ -132,10 +156,10 @@ else
   fail "expected 200, got $code: $(cat "$WORKDIR/t3.json")"
 fi
 
-log "--- test 4: proxy /health lists all 5 providers ---"
+log "--- test 4: proxy /health lists all 7 providers ---"
 health=$(curl -s "http://127.0.0.1:$PROXY_PORT/health")
 count=$(echo "$health" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['providers']))")
-[ "$count" = "5" ] && pass "5 providers listed" || fail "expected 5 providers, got: $health"
+[ "$count" = "7" ] && pass "7 providers listed" || fail "expected 7 providers, got: $health"
 
 log "--- test 5: proxy /price forwards to aicoin node and reflects the paid call ---"
 sleep 1
@@ -167,11 +191,11 @@ log "--- test 10: overdraft transfer is rejected ---"
 code=$(curl -s -o "$WORKDIR/t10.json" -w "%{http_code}" -X POST "http://127.0.0.1:$NODE_A_HTTP/transfer" -d '{"from_user_id":"bob","to_user_id":"alice","amount":999}')
 [ "$code" = "400" ] && pass "400 insufficient balance" || fail "expected 400, got $code: $(cat "$WORKDIR/t10.json")"
 
-log "--- test 11: Redis replication — follower B polls and mirrors primary A's signed chain ---"
+log "--- test 11: DynamoDB replication — follower B polls and mirrors primary A's signed chain ---"
 sleep 2
 height_a=$(curl -s "http://127.0.0.1:$NODE_A_HTTP/chain" | python3 -c "import json,sys;print(len(json.load(sys.stdin)))")
 height_b=$(curl -s "http://127.0.0.1:$NODE_B_HTTP/chain" | python3 -c "import json,sys;print(len(json.load(sys.stdin)))")
-if [ "$height_a" = "$height_b" ] && [ "$height_a" -gt 1 ]; then pass "follower B replicated primary A's chain via Redis polling (height $height_a)"; else fail "chain mismatch: A=$height_a B=$height_b"; fi
+if [ "$height_a" = "$height_b" ] && [ "$height_a" -gt 1 ]; then pass "follower B replicated primary A's chain via DynamoDB polling (height $height_a)"; else fail "chain mismatch: A=$height_a B=$height_b"; fi
 
 log "--- test 12: follower rejects writes (no signing key) ---"
 code=$(curl -s -o "$WORKDIR/t12.json" -w "%{http_code}" -X POST "http://127.0.0.1:$NODE_B_HTTP/events" -d '{"user_id":"eve","provider":"openai","cost_usd":0.01}')

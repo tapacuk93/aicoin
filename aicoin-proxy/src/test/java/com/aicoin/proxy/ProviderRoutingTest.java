@@ -50,8 +50,8 @@ class ProviderRoutingTest {
     }
 
     @Test
-    void allFiveKnownProvidersResolve() {
-        for (String p : new String[] {"openai", "anthropic", "google", "mistral", "cohere"}) {
+    void allSevenKnownProvidersResolve() {
+        for (String p : new String[] {"openai", "anthropic", "google", "mistral", "cohere", "elevenlabs", "stability"}) {
             Optional<String> r = ProviderRouting.resolve(p);
             assertTrue(r.isPresent(), p + " should resolve");
             assertEquals(p, r.get());

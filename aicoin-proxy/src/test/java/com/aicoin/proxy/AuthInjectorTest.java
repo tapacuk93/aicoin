@@ -49,6 +49,30 @@ class AuthInjectorTest {
     }
 
     @Test
+    void headerFormInjectsXiApiKeyWithNoPrefixForElevenLabs() {
+        ProviderConfig elevenlabs = new ProviderConfig(
+                "https://api.elevenlabs.io", "elevenlabs-secret", "xi-api-key", "", false, null);
+
+        AuthInjector.Injection injection = AuthInjector.compute(elevenlabs);
+
+        assertFalse(injection.isQueryParam());
+        assertEquals("xi-api-key", injection.getName());
+        assertEquals("elevenlabs-secret", injection.getValue());
+    }
+
+    @Test
+    void headerFormInjectsAuthorizationBearerForStability() {
+        ProviderConfig stability = new ProviderConfig(
+                "https://api.stability.ai", "stability-secret", "Authorization", "Bearer ", false, null);
+
+        AuthInjector.Injection injection = AuthInjector.compute(stability);
+
+        assertFalse(injection.isQueryParam());
+        assertEquals("Authorization", injection.getName());
+        assertEquals("Bearer stability-secret", injection.getValue());
+    }
+
+    @Test
     void appendQueryParamAddsQuestionMarkWhenNoExistingQuery() {
         String uri = AuthInjector.appendQueryParam("/v1/models", "key", "abc123");
         assertEquals("/v1/models?key=abc123", uri);

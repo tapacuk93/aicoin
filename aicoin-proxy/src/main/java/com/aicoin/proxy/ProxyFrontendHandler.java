@@ -105,12 +105,14 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         byte[] bodyBytes = ByteBufUtil.getBytes(request.content());
         HttpMethod method = request.method();
 
-        WalletValidator.validate(clientGroup, config.getBalanceUrlBase(), walletId, reachable -> {
-            if (Boolean.TRUE.equals(reachable)) {
+        WalletValidator.validate(clientGroup, config.getBalanceUrlBase(), walletId, decision -> {
+            if (decision.shouldProceed()) {
                 UpstreamForwarder.forward(clientGroup, config, healthTracker, ctx, method, finalForwardUri,
                         forwardHeaders, bodyBytes, providerConfig.getBaseUrl(), provider, walletId);
-            } else {
+            } else if (decision.isUnreachable()) {
                 sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
+            } else {
+                sendInsufficientBalance(ctx, decision.getBalance());
             }
         });
     }
@@ -146,5 +148,36 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
         HttpUtil.setContentLength(response, bytes.length);
         ctx.writeAndFlush(response);
+    }
+
+    /**
+     * {@code 402 {"error":"insufficient aicoin balance","balance":<value>}}, per
+     * CONTRACT.md's "Auth — wallet id IS the API key, gated on a positive
+     * balance" section: sent instead of forwarding when the wallet's
+     * reported balance is {@code <= 0}. No upstream call is made and no
+     * event is emitted, same as the 401/503 short-circuit cases above.
+     */
+    private static void sendInsufficientBalance(ChannelHandlerContext ctx, Number balance) {
+        byte[] bytes = ("{\"error\":\"insufficient aicoin balance\",\"balance\":" + formatNumber(balance) + "}")
+                .getBytes(CharsetUtil.UTF_8);
+        FullHttpResponse response = new DefaultFullHttpResponse(
+                HttpVersion.HTTP_1_1, HttpResponseStatus.PAYMENT_REQUIRED, Unpooled.wrappedBuffer(bytes));
+        response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
+        HttpUtil.setContentLength(response, bytes.length);
+        ctx.writeAndFlush(response);
+    }
+
+    /**
+     * Renders a {@link Number} the way a whole-number-valued JSON field
+     * typically looks (no trailing {@code .0}), matching how the aicoin
+     * node's own {@code float64} balance would serialize a whole-number
+     * balance (e.g. {@code 0} rather than {@code 0.0}).
+     */
+    private static String formatNumber(Number n) {
+        double d = n.doubleValue();
+        if (!Double.isInfinite(d) && !Double.isNaN(d) && d == Math.rint(d)) {
+            return String.valueOf((long) d);
+        }
+        return String.valueOf(d);
     }
 }

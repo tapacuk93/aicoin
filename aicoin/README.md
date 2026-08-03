@@ -1,13 +1,14 @@
 # aicoin
 
 A minimal but real blockchain node: a single signing **primary** plus any
-number of read-only **follower** replicas, replicating via a shared Redis
-key rather than any custom networking protocol — see "Roles & signing" and
-"Persistence" below. No wallet signatures on transactions themselves (user
-IDs are plain strings), no BFT/advanced consensus, no proof-of-work, no
-P2P networking. Persistence is Redis-backed: optional for a primary (unset
-`-redis` = in-memory only, resetting on restart), **required** for a
-follower (Redis is the only replication mechanism there is).
+number of read-only **follower** replicas, replicating via a shared
+DynamoDB table rather than any custom networking protocol — see "Roles &
+signing" and "Persistence" below. No wallet signatures on transactions
+themselves (user IDs are plain strings), no BFT/advanced consensus, no
+proof-of-work, no P2P networking. Persistence is DynamoDB-backed: optional
+for a primary (unset `-dynamodb-table` = in-memory only, resetting on
+restart), **required** for a follower (DynamoDB is the only replication
+mechanism there is).
 
 This document mirrors the shared contract at `../CONTRACT.md` but is
 written to stand alone.
@@ -40,21 +41,21 @@ docker run -p 9944:9944 aicoin
 | `-role`            | `primary`          | Node role: `primary` or `follower` (see "Roles & signing" below)       |
 | `-keyfile`         | `aicoin-node.key`  | Primary only: path to this node's persistent Ed25519 private key (generated on first run if it doesn't exist) |
 | `-trusted-pubkey`  | `""`               | Required when `-role=follower`: the primary's Ed25519 public key, hex-encoded |
-| `-redis`           | `""`               | `host:port` of a Redis server for chain persistence (see "Persistence" below); optional for a primary (unset = pure in-memory), **required** for a follower |
-| `-follower-poll-interval` | `2s`        | Follower only: how often to re-read the shared chain from Redis and adopt it if it's grown |
+| `-dynamodb-table`  | `""`               | DynamoDB table name for chain persistence (see "Persistence" below); optional for a primary (unset = pure in-memory), **required** for a follower. AWS region/credentials come from the standard SDK environment (`AWS_REGION`, an instance role, etc.) — there's no separate region flag |
+| `-follower-poll-interval` | `2s`        | Follower only: how often to re-query the shared chain from DynamoDB and adopt it if it's grown |
 | `-decay-halflife-days` | `110.0`        | `/price` decay half-life in days: `weight(age) = 2^(-age_days/halfLifeDays)` (see "Derived state" below); default derived from a real, documented ~10x-per-year AI pricing decline rate |
 
-Primary + follower example (the follower polls the primary's Redis-backed
-chain and verifies it against the primary's pubkey):
+Primary + follower example (the follower polls the primary's
+DynamoDB-backed chain and verifies it against the primary's pubkey):
 
 ```
-./aicoind -http=:9944 -role=primary -keyfile=aicoin-node.key -redis=localhost:6379
+./aicoind -http=:9944 -role=primary -keyfile=aicoin-node.key -dynamodb-table=aicoin-chain
 # stdout logs a line like:
 #   aicoind: role=primary pubkey=93bbf305...fb5e (copy this into a follower's -trusted-pubkey)
 
 ./aicoind -http=:9946 -role=follower \
   -trusted-pubkey=93bbf305...fb5e \
-  -redis=localhost:6379 -follower-poll-interval=2s
+  -dynamodb-table=aicoin-chain -follower-poll-interval=2s
 ```
 
 ## Roles & signing
@@ -64,31 +65,32 @@ It holds an Ed25519 keypair and *signs* every block it appends — that
 signature (not proof-of-work, not a competing-miners race) is what makes a
 block valid. **Followers** hold only the primary's public key
 (`-trusted-pubkey`), replicate the primary's signed chain by polling the
-same Redis key the primary writes to, and reject all writes: there is no
-mining, no difficulty, no nonce, no P2P networking, and no "longest chain
-from competing miners" scenario, because nobody but the primary can
+same DynamoDB table the primary writes to, and reject all writes: there is
+no mining, no difficulty, no nonce, no P2P networking, and no "longest
+chain from competing miners" scenario, because nobody but the primary can
 produce a chain whose blocks verify against the trusted pubkey — a
 decentralized gossip protocol has no problem to solve here that shared
-storage doesn't already solve more simply.
+durable storage doesn't already solve more simply.
 
 - **Primary** (`-role=primary`, the default): loads its Ed25519 private
   key from `-keyfile` (generating and saving a new one on first run if the
   file doesn't exist — raw 64-byte `crypto/ed25519.PrivateKey` bytes), logs
   its own public key hex to stdout on startup (for copy-pasting into a
   follower's `-trusted-pubkey`), seals+signs every new block itself,
-  persists the full chain to Redis after every append if `-redis` is
-  configured, and **never** re-reads/replaces its own chain from Redis
-  after startup — it is authoritative by construction; Redis is where it
-  writes, not where it takes direction from.
+  writes that one new block to DynamoDB after every append if
+  `-dynamodb-table` is configured, and **never** re-reads/replaces its own
+  chain from DynamoDB after startup — it is authoritative by construction;
+  DynamoDB is where it writes, not where it takes direction from.
 - **Follower** (`-role=follower -trusted-pubkey=<hex>`): refuses to start
-  if `-trusted-pubkey` is missing, or if `-redis` is missing — with no
-  Redis there is no replication mechanism at all, so a follower with no
-  `-redis` has no way to ever learn the primary's chain. Holds no private
-  key, so it cannot seal/append any block on its own. All three write
-  endpoints (`POST /events`, `/transfer`, `/free-coins/claim`) return
+  if `-trusted-pubkey` is missing, or if `-dynamodb-table` is missing —
+  with no DynamoDB table there is no replication mechanism at all, so a
+  follower with no `-dynamodb-table` has no way to ever learn the
+  primary's chain. Holds no private key, so it cannot seal/append any
+  block on its own. All three write endpoints (`POST /events`,
+  `/transfer`, `/free-coins/claim`) return
   `403 {"error":"this node is a read-only replica; write to the primary"}`.
-  Every `-follower-poll-interval`, it re-reads the `aicoin:chain` key from
-  Redis and, if the stored chain is longer than its local one and every
+  Every `-follower-poll-interval`, it re-queries the shared chain from
+  DynamoDB and, if the stored chain is longer than its local one and every
   block in it validates against the configured trusted pubkey, adopts it
   wholesale (longest-valid-chain rule — the same `ValidateChain` logic used
   everywhere else in this codebase).
@@ -106,8 +108,8 @@ storage doesn't already solve more simply.
 - Genesis is block index 0, `prev_hash` is 64 `'0'` chars, no transactions,
   empty `signature`, and a fixed timestamp (`1970-01-01T00:00:00Z`) —
   every node derives byte-identical genesis independently, so it's never
-  transmitted anywhere, and it's always accepted as valid without any
-  signature check.
+  transmitted or persisted anywhere (see "Persistence" below), and it's
+  always accepted as valid without any signature check.
 - Exactly one transaction per block (no mempool batching), unchanged.
 - `hash = hex(SHA256(index|prevHash|timestamp|txJSON))` — a plain content
   hash, not a puzzle. There is no nonce search: the hash is computed once.
@@ -118,8 +120,9 @@ storage doesn't already solve more simply.
   the old proof-of-work mining step one-for-one: the block is *sealed and
   signed*, then appended immediately.
 - `POST /events` (primary only): builds the transaction, seals+signs a new
-  block on top of the local tip, appends it locally, persists to Redis if
-  configured, and returns the new block's height/hash.
+  block on top of the local tip, appends it locally, writes just that one
+  new block to DynamoDB if configured, and returns the new block's
+  height/hash.
 - `ValidateBlock(block, prev, trustedPubKey)`: index 0 must exactly match
   the well-known genesis constant (always valid, no signature check).
   Index >= 1: recompute `hash` from the block's own fields and confirm it
@@ -127,16 +130,16 @@ storage doesn't already solve more simply.
   `ed25519.Verify(trustedPubKey, sha256Digest, signatureBytes)`. There is
   no difficulty/PoW check — that mechanism no longer exists.
 - Chain replacement is asymmetric by role: a **follower**, on every poll
-  tick, re-reads the shared chain from Redis and, if it's longer than its
-  local chain and every block in it validates, replaces its local chain
-  wholesale (longest-valid-chain rule). A **primary** never does this: it
-  is authoritative by construction and only ever appends blocks it itself
-  seals and signs.
+  tick, re-queries the shared chain from DynamoDB and, if it's longer than
+  its local chain and every block in it validates, replaces its local
+  chain wholesale (longest-valid-chain rule). A **primary** never does
+  this: it is authoritative by construction and only ever appends blocks
+  it itself seals and signs.
 
 ## Derived state
 
 Nothing beyond the chain itself is stored; every query recomputes from the
-in-memory (or Redis-loaded) block list:
+in-memory (or DynamoDB-loaded) block list:
 
 - **Coin acquisition is closed-set: free faucet claim, or peer transfer
   ("buy/sell") — that's it.** An `"event"` transaction (a priced
@@ -388,60 +391,89 @@ top-level `e2e` test that wires both projects together. The wallet talks
 to whichever node it's pointed at via `-node` — pointing it at a follower
 would make its faucet claim fail with `403`; point it at the primary.
 
-## Persistence (Redis — required for follower replication, optional for a primary)
+## Persistence (DynamoDB — genuinely durable, not a cache)
 
-By default (no `-redis`) a primary is pure in-memory: the chain resets on
-every restart. A follower, however, **requires** `-redis` to be set —
-Redis is the only replication mechanism there is, so a follower started
-without it fails immediately (`log.Fatalf`) rather than silently running
-with no way to ever learn the primary's chain.
+This chain holds wallet balances and transaction history, so persistence
+needs a real durability guarantee, not a best-effort cache — a managed
+in-memory cache (e.g. Redis/ElastiCache) replicates for availability, not
+durability, and can lose data written since its last snapshot on failure.
+DynamoDB is synchronously replicated across 3 AZs per write and still
+single-digit-millisecond fast, which is why it's the store here instead.
 
-- On startup, the node `GET`s key `aicoin:chain` from Redis. If present
-  (a JSON array of blocks, same shape as `GET /chain`'s response), it's
-  loaded as the starting chain instead of genesis-only.
-- After a **primary** successfully appends any block (via `/events`,
-  `/free-coins/claim`, or `/transfer`), it `SET`s `aicoin:chain` to the
-  full current chain JSON. A primary never re-reads this key after its own
-  startup load — it only ever writes to it.
-- A **follower** never writes this key. Every `-follower-poll-interval`,
-  it `GET`s `aicoin:chain` and, if the stored chain is longer than its
-  local one and every block in it validates against the configured
-  trusted pubkey, replaces its local chain with it wholesale.
-- With `-redis` unset on a primary, none of this runs; behavior is
-  unchanged (in-memory only). It is not a valid configuration for a
+By default (no `-dynamodb-table`) a primary is pure in-memory: the chain
+resets on every restart. A follower, however, **requires**
+`-dynamodb-table` to be set — DynamoDB is the only replication mechanism
+there is, so a follower started without it fails immediately
+(`log.Fatalf`) rather than silently running with no way to ever learn the
+primary's chain.
+
+**Table shape**: partition key `chain_id` (string, always the literal
+`"aicoin"` — one chain, one partition), sort key `block_index` (number,
+the block's `Index`). One item per block: `chain_id`, `block_index`,
+`timestamp`, `prev_hash`, `hash`, `signature`, and `transactions_json`
+(the block's `Transactions`, JSON-encoded into a single string attribute
+— avoids ever needing to rewrite the whole chain as one item, which would
+eventually hit DynamoDB's 400KB per-item limit). **Genesis is never
+written**: it's a well-known deterministic constant every node computes
+independently (see "Chain model" above), so the table only ever holds
+blocks with index >= 1, and readers (`chain.NewBlockchainWithStore`,
+`chain.PollAndAdopt`) prepend the local `Genesis()` to whatever comes back
+from the table.
+
+- On startup, the node `Query`s all items for `chain_id = "aicoin"`
+  ordered by `block_index` to reconstruct the chain (or starts from
+  genesis-only if the table is empty).
+- After a **primary** successfully seals a new block (via `/events`,
+  `/free-coins/claim`, or `/transfer`), it `PutItem`s just that one
+  block's item — an O(1) write regardless of chain length. A primary
+  never re-queries the table after its own startup load — it only ever
+  writes to it.
+- A **follower** never writes. Every `-follower-poll-interval`, it
+  re-runs the same `Query` and, if the result is longer than its local
+  chain and every block in it validates against the configured trusted
+  pubkey, replaces its local chain with it wholesale.
+- With `-dynamodb-table` unset on a primary, none of this runs; behavior
+  is unchanged (in-memory only). It is not a valid configuration for a
   follower.
 
 This is implemented behind a small `chain.ChainStore` interface
-(`Load() ([]Block, error)`, `Save([]Block) error`) in `internal/chain`, so
-the Redis dependency (`github.com/redis/go-redis/v9`) is confined to a
-single file, `internal/store/redis.go`. `internal/store/memory.go` provides
-an in-memory fake implementing the same interface, used by
-`internal/store/store_test.go`'s unit tests (load-then-save round-trip,
+(`Load() ([]Block, error)`, `AppendBlock(b Block) error`) in
+`internal/chain`, so the AWS SDK dependency
+(`github.com/aws/aws-sdk-go-v2/service/dynamodb`) is confined to a single
+file, `internal/store/dynamodb.go`. `internal/store/memory.go` provides an
+in-memory fake implementing the same interface, used by
+`internal/store/store_test.go`'s unit tests (load-then-append round-trip,
 empty-store-means-genesis, and a full `Blockchain` restart simulation) and
 by `internal/chain`'s own follower-poll tests (see "Testing" below) —
-useful in sandboxes where a live Redis server isn't reachable, since the
+useful in sandboxes/CI with no reachable AWS credentials, since the
 `Blockchain`/`PollAndAdopt` code paths that talk to `ChainStore` are
-exercised identically either way. In production this points at a real
-managed in-memory store (e.g. AWS ElastiCache for Redis); the same code
-path works against a local `redis-server` for development.
+exercised identically either way. `NewDynamoDB` uses the AWS SDK's
+standard default credential/config chain (`config.LoadDefaultConfig`) —
+env vars, an EC2/ECS instance role, shared config/credentials files, etc.
+— so there are no separate region/credential CLI flags.
 
 The follower side of replication is `chain.PollAndAdopt(bc, store)`
 (`internal/chain/follower.go`): on each `-follower-poll-interval` tick,
-`cmd/aicoind/main.go` calls it once. It re-reads the store and, if the
-result is both longer than `bc`'s current chain and fully valid against
-`bc`'s trusted pubkey, replaces `bc`'s chain (via the same `ReplaceIfLonger`
-every other longest-valid-chain check in this codebase uses). It is a
-structural no-op on a primary-shaped `Blockchain` (one with a signing key)
-even if called directly — belt-and-suspenders on top of the fact that
-`main.go` only ever starts the poll-tick goroutine for `-role=follower` in
-the first place.
+`cmd/aicoind/main.go` calls it once. It queries the store and, if the
+result (with `Genesis()` prepended) is both longer than `bc`'s current
+chain and fully valid against `bc`'s trusted pubkey, replaces `bc`'s chain
+(via the same `ReplaceIfLonger` every other longest-valid-chain check in
+this codebase uses) — and never writes back to the store, since a
+follower never writes. It is a structural no-op on a primary-shaped
+`Blockchain` (one with a signing key) even if called directly —
+belt-and-suspenders on top of the fact that `main.go` only ever starts the
+poll-tick goroutine for `-role=follower` in the first place.
 
 Example:
 
 ```
-./aicoind -http=:9944 -role=primary -redis=localhost:6379
-./aicoind -http=:9946 -role=follower -trusted-pubkey=<hex> -redis=localhost:6379
+./aicoind -http=:9944 -role=primary -dynamodb-table=aicoin-chain
+./aicoind -http=:9946 -role=follower -trusted-pubkey=<hex> -dynamodb-table=aicoin-chain
 ```
+
+(Both processes need AWS credentials/region for a real table — see
+`AWS_REGION`/`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or an instance
+role in your environment.)
 
 ## Docker
 
@@ -450,7 +482,7 @@ docker build -t aicoin .
 docker run -p 9944:9944 aicoin
 ```
 
-The `Dockerfile` is a multi-stage build: a `golang:1.22-alpine` stage
+The `Dockerfile` is a multi-stage build: a `golang:1.24-alpine` stage
 compiles static (`CGO_ENABLED=0`) `aicoind` and `wallet` binaries from
 `./cmd/aicoind` and `./cmd/wallet`, which are then copied into a minimal
 `gcr.io/distroless/static-debian12` runtime image. The entrypoint runs
@@ -460,14 +492,17 @@ or, for host/port mapping, via `-p`:
 
 ```
 docker run -p 19944:19944 aicoin \
-  -http=:19944 -role=primary -keyfile=/data/aicoin-node.key -redis=redis:6379
+  -http=:19944 -role=primary -keyfile=/data/aicoin-node.key -dynamodb-table=aicoin-chain
 ```
 
 Nothing about ports, roles, or keys is hardcoded in the image beyond the
 `CMD` defaults, which merely mirror aicoind's own flag defaults — `-role`,
 `-keyfile`, and `-trusted-pubkey` are all plain CLI args/env at run time,
 same as every other flag. Only the HTTP port is exposed; there is no P2P
-port anymore.
+port anymore. AWS credentials/region for `-dynamodb-table` are passed as
+plain environment variables at `docker run`/compose time (see
+`docker-compose.yml` at the repo root) — there's nothing DynamoDB-specific
+baked into the image.
 
 ## Package layout
 
@@ -476,7 +511,7 @@ port anymore.
   `chain.Blockchain` (optionally backed by a `chain.ChainStore`) and an
   `api.Server`, then runs the HTTP server. On a primary, loads or
   generates its Ed25519 signing key and logs its public half to stdout. On
-  a follower, requires `-redis` and starts a goroutine that calls
+  a follower, requires `-dynamodb-table` and starts a goroutine that calls
   `chain.PollAndAdopt` on every `-follower-poll-interval` tick.
 - `cmd/wallet` — standalone CLI client for the free-coin faucet and balance
   query (see "Wallet CLI" above).
@@ -485,10 +520,11 @@ port anymore.
   (`ValidateBlock`, `ValidateChain`) against a trusted public key, the
   `ChainStore` persistence interface, the follower poll-tick logic
   (`PollAndAdopt`), and the thread-safe `Blockchain` (seal+append,
-  append, replace-if-longer, each persisting to the configured store if
-  any).
-- `internal/store` — `ChainStore` implementations: `Redis` (the only file
-  importing a Redis client) and `InMemory` (a fake for tests).
+  append, replace-if-longer, persisting each newly appended block to the
+  configured store if any — never the whole chain, and never on the
+  follower's replace-if-longer path).
+- `internal/store` — `ChainStore` implementations: `DynamoDB` (the only
+  file importing an AWS SDK client) and `InMemory` (a fake for tests).
 - `internal/state` — derived-state computation (`Balance`, `Price`,
   `FaucetEligibility`, `Weight`) over a snapshot of the chain's
   blocks.
@@ -518,7 +554,8 @@ on a primary-shaped one; the follower side of the longest-valid-chain rule
 shorter-or-equal one; and the follower poll-tick logic (`PollAndAdopt`,
 `internal/chain/follower_test.go`) — a follower-shaped `Blockchain` polling
 a `ChainStore` that a primary-shaped `Blockchain` has written a longer
-valid chain into adopts it wholesale on a single call (no real timer
+valid chain into (one block at a time, via `AppendBlock`, exactly like the
+real DynamoDB path) adopts it wholesale on a single call (no real timer
 involved), a second tick with no store change is a harmless no-op, a `nil`
 store is a harmless no-op, and — the other half of the asymmetry — calling
 `PollAndAdopt` on a primary-shaped `Blockchain` is always a no-op, even
@@ -556,11 +593,19 @@ on a follower without mutating its chain; and `GET /health` reports the
 correct `role`/`pubkey` for both a primary and a follower.
 
 `internal/store` has unit tests for the `ChainStore` contract against the
-`InMemory` fake: load-then-save round-trip (with defensive-copy checks in
-both directions), empty-store-means-genesis, and a full `Blockchain`
+`InMemory` fake: load-then-append round-trip (with defensive-copy checks
+in both directions), empty-store-means-genesis, and a full `Blockchain`
 "restart" simulation (seal some blocks, construct a second `Blockchain`
 against the same store, verify it picks up exactly where the first left
-off).
+off). There is no test against a real AWS DynamoDB table — that would
+need live AWS credentials this repo's test suite doesn't assume — so
+`internal/store/dynamodb.go` itself is exercised only by `go build`/`go
+vet` type-checking plus manual/live smoke testing (see "Manual two-node
+smoke test" below); its `Load`/`AppendBlock` logic is a thin, mechanical
+translation to/from DynamoDB's `Query`/`PutItem` APIs, and the interesting
+behavior (genesis handling, longest-valid-chain adoption, primary/follower
+asymmetry) all lives in `internal/chain`, which *is* fully covered against
+the `InMemory` fake.
 
 `cmd/wallet` has unit tests for its pure decision/parsing functions
 (`shouldAttemptClaim`, `parseAvailable`, `parseClaim`, `parseBalance`) with
@@ -568,21 +613,26 @@ no network access required.
 
 ## Manual two-node smoke test
 
-This project's replication now runs over Redis rather than any bespoke
-protocol, so both nodes just need to be pointed at the same Redis
-instance:
+This project's replication now runs over DynamoDB rather than any bespoke
+protocol, so both nodes just need to be pointed at the same table with
+valid AWS credentials in their environment:
 
 ```
 go build -o /tmp/aicoind ./cmd/aicoind
 
-# Requires a reachable Redis at localhost:6379, e.g. `redis-server` running
-# locally, or `docker run -p 6379:6379 redis:alpine`.
+# Requires a real DynamoDB table reachable with your AWS credentials (per
+# CONTRACT.md's "Docker / docker-compose" section, there is no local
+# stand-in for DynamoDB the way redis:alpine stood in for a managed
+# cache) -- table shape: partition key chain_id (String), sort key
+# block_index (Number).
 
-/tmp/aicoind -http=:19944 -role=primary -keyfile=/tmp/primary.key -redis=localhost:6379 &
+export AWS_REGION=us-east-1   # plus AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or an instance role
+
+/tmp/aicoind -http=:19944 -role=primary -keyfile=/tmp/primary.key -dynamodb-table=aicoin-chain &
 # note the pubkey it logs, e.g. pubkey=93bbf305...fb5e
 
 /tmp/aicoind -http=:19946 -role=follower \
-  -trusted-pubkey=<pubkey from above> -redis=localhost:6379 -follower-poll-interval=1s &
+  -trusted-pubkey=<pubkey from above> -dynamodb-table=aicoin-chain -follower-poll-interval=1s &
 
 curl -s -X POST http://127.0.0.1:19944/events \
   -H 'Content-Type: application/json' \
@@ -611,7 +661,7 @@ curl -s http://127.0.0.1:19944/price   # {"price_usd":...,"total_spend_usd":0.00
 
 sleep 2   # give the follower at least one poll tick
 
-curl -s http://127.0.0.1:19946/chain   # should show all the new blocks, picked up from Redis
+curl -s http://127.0.0.1:19946/chain   # should show all the new blocks, picked up from DynamoDB
 
 curl -s -X POST http://127.0.0.1:19946/events \
   -H 'Content-Type: application/json' \
@@ -620,14 +670,19 @@ curl -s -X POST http://127.0.0.1:19946/events \
 kill %1 %2
 ```
 
-If a real `redis-server` isn't reachable in your environment (no Redis
-installed, sandbox network/process restrictions, etc.), the equivalent
-flow is exercised in-process instead, against the `internal/chain.ChainStore`
-interface directly rather than a real Redis server — this is exactly what
-`internal/chain/follower_test.go` does, and is also how this repository's
-own automated test suite validates replication end-to-end in sandboxes
-with no live Redis (see "Testing" above and "Persistence" above for the
-same constraint noted there).
+If a real DynamoDB table/AWS credentials aren't reachable in your
+environment (no AWS account configured, sandbox network/process
+restrictions, etc.), the equivalent flow is exercised in-process instead,
+against the `internal/chain.ChainStore` interface directly rather than a
+real DynamoDB table — this is exactly what
+`internal/chain/follower_test.go` does (a primary-shaped `Blockchain`
+writes blocks one at a time into a shared fake store via `AppendBlock`,
+exactly like the real DynamoDB path would; a follower-shaped `Blockchain`
+polls that same store via a single `PollAndAdopt` call and converges), and
+is also how this repository's own automated test suite validates
+replication end-to-end in sandboxes with no live AWS credentials (see
+"Testing" above and "Persistence" above for the same constraint noted
+there).
 
 ## Assumptions made for ambiguous parts of CONTRACT.md
 
@@ -648,7 +703,8 @@ the literal reading taken here:
    the resulting hash is derived purely from those fixed fields, so every
    node arrives at the exact same genesis block without needing to
    generate or verify any signature for it (index 0 is always
-   special-cased as valid in `ValidateBlock`).
+   special-cased as valid in `ValidateBlock`). Because it's deterministic,
+   it's also never written to DynamoDB — see "Persistence" above.
 
 3. **Signing key storage format.** The contract leaves the on-disk key
    format up to the implementation ("as raw bytes or PEM, your choice,
@@ -683,26 +739,30 @@ the literal reading taken here:
    flag (`-decay-halflife-days`) precisely so this calibration can be
    revised without any code change if better data becomes available.
 
-7. **`github.com/redis/go-redis/v9` pinned at `v9.5.1`**, not the newest
-   release. Newer `v9.x` releases pull in `go.uber.org/atomic` as a real
-   (non-test) dependency of the connection pool; that module's vanity
-   import path (`go.uber.org/atomic`) isn't fetchable through this
-   sandbox's network egress rules, while `v9.5.1` doesn't depend on it at
-   all and resolves entirely through `github.com/...` module paths. This
-   is a well-established, still-current-API version of the client (the
-   `redis.Client`/`redis.Options`/`Get`/`Set` surface used in
-   `internal/store/redis.go` has been stable across the whole v9 line), so
-   pinning it isn't a functionality compromise — see "Persistence" above
-   for why a live Redis server couldn't always be exercised end-to-end in
-   this particular sandbox either (this repo's Redis usage is otherwise
-   untouched by that constraint: it'll talk to any real Redis exactly the
-   same way once one is reachable).
+7. **DynamoDB item shape.** CONTRACT.md specifies the partition/sort key
+   and the fact that `Transactions` is JSON-encoded into a single
+   `transactions_json` string attribute, but not exact attribute names for
+   the rest of the block's fields; this implementation uses the same
+   snake_case convention as everywhere else (`timestamp`, `prev_hash`,
+   `hash`, `signature`), set via `dynamodbav` struct tags in
+   `internal/store/dynamodb.go`.
 
-8. **Replacing P2P with Redis polling removes any notion of a dialable
+8. **Replacing P2P with DynamoDB polling removes any notion of a dialable
    peer address or a handshake.** There is no longer a `GET /peers`
    endpoint, no per-connection bookkeeping, and no "peer address" concept
-   at all — a follower's only dependency is the same `-redis` address the
-   primary writes to, which it already needs to know to talk to the same
-   Redis instance in the first place. This is a strict simplification: the
-   old P2P layer solved a decentralized-consensus problem this system
-   never had, since there is exactly one legitimate writer by design.
+   at all — a follower's only dependency is the same `-dynamodb-table` (and
+   AWS credentials/region) the primary writes to, which it already needs
+   to know to talk to the same table in the first place. This is a strict
+   simplification: the old P2P layer solved a decentralized-consensus
+   problem this system never had, since there is exactly one legitimate
+   writer by design.
+
+9. **No local DynamoDB stand-in in `docker-compose.yml`.** Per
+   CONTRACT.md's "Docker / docker-compose" section, there is no local
+   emulator wired up the way `redis:alpine` previously stood in for a
+   managed cache — `docker-compose.yml`'s `aicoin-node` service expects a
+   real AWS DynamoDB table name (via `AICOIN_DYNAMODB_TABLE`) and AWS
+   credentials/region (via `AWS_REGION`/`AWS_ACCESS_KEY_ID`/
+   `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`) in the environment; leaving
+   the table name empty runs the primary pure in-memory, same as running
+   `aicoind` directly with no `-dynamodb-table`.

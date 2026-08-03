@@ -8,7 +8,7 @@ import java.util.Set;
  * Pure-function resolution of the {@code X-AI} request header to a known
  * provider name, per CONTRACT.md's "Routing" section: the client calls the
  * proxy at the exact same path a real provider would use; the {@code X-AI}
- * header (one of {@code openai|anthropic|google|mistral|cohere},
+ * header (one of {@code openai|anthropic|google|mistral|cohere|elevenlabs|stability},
  * case-insensitive) selects which {@code providers.<name>} config entry to
  * use. Missing or unknown values resolve to {@link Optional#empty()}, which
  * callers must turn into {@code 400 {"error":"missing or unknown X-AI header"}}.
@@ -16,7 +16,7 @@ import java.util.Set;
 public final class ProviderRouting {
 
     public static final Set<String> KNOWN_PROVIDERS =
-            Set.of("openai", "anthropic", "google", "mistral", "cohere");
+            Set.of("openai", "anthropic", "google", "mistral", "cohere", "elevenlabs", "stability");
 
     private ProviderRouting() {
     }

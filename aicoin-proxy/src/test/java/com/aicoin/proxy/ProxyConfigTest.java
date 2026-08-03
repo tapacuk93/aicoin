@@ -24,6 +24,8 @@ class ProxyConfigTest {
         assertEquals("https://generativelanguage.googleapis.com", config.getProviderBaseUrl("google"));
         assertEquals("https://api.mistral.ai", config.getProviderBaseUrl("mistral"));
         assertEquals("https://api.cohere.ai", config.getProviderBaseUrl("cohere"));
+        assertEquals("https://api.elevenlabs.io", config.getProviderBaseUrl("elevenlabs"));
+        assertEquals("https://api.stability.ai", config.getProviderBaseUrl("stability"));
 
         ProviderConfig openai = config.getProvider("openai");
         assertEquals("", openai.getApiKey());
@@ -38,6 +40,16 @@ class ProxyConfigTest {
         ProviderConfig google = config.getProvider("google");
         assertTrue(google.isAuthAsQueryParam());
         assertEquals("key", google.getAuthQueryParamName());
+
+        ProviderConfig elevenlabs = config.getProvider("elevenlabs");
+        assertEquals("xi-api-key", elevenlabs.getAuthHeader());
+        assertEquals("", elevenlabs.getAuthPrefix());
+        assertFalse(elevenlabs.isAuthAsQueryParam());
+
+        ProviderConfig stability = config.getProvider("stability");
+        assertEquals("Authorization", stability.getAuthHeader());
+        assertEquals("Bearer ", stability.getAuthPrefix());
+        assertFalse(stability.isAuthAsQueryParam());
 
         assertEquals(0.000002, config.getCostPerTokenUsd(), 1e-12);
         assertEquals(0.001, config.getDefaultCostUsdPerCall(), 1e-12);
@@ -124,5 +136,38 @@ class ProxyConfigTest {
         assertEquals("google-key-xyz", google.getApiKey());
         assertFalse(google.isAuthAsQueryParam());
         assertEquals("apikey", google.getAuthQueryParamName());
+    }
+
+    @Test
+    void envVarsOverrideElevenLabsFields() {
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_ELEVENLABS_APIKEY", "elevenlabs-key-abc");
+        env.put("AICOIN_PROXY_ELEVENLABS_BASEURL", "http://localhost:1111");
+        env.put("AICOIN_PROXY_ELEVENLABS_AUTHHEADER", "X-Custom-Voice-Auth");
+        env.put("AICOIN_PROXY_ELEVENLABS_AUTHPREFIX", "Token ");
+
+        ProxyConfig config = ProxyConfig.load(env);
+
+        ProviderConfig elevenlabs = config.getProvider("elevenlabs");
+        assertEquals("elevenlabs-key-abc", elevenlabs.getApiKey());
+        assertEquals("http://localhost:1111", elevenlabs.getBaseUrl());
+        assertEquals("X-Custom-Voice-Auth", elevenlabs.getAuthHeader());
+        assertEquals("Token ", elevenlabs.getAuthPrefix());
+    }
+
+    @Test
+    void envVarsOverrideStabilityFields() {
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_STABILITY_APIKEY", "stability-key-xyz");
+        env.put("AICOIN_PROXY_STABILITY_BASEURL", "http://localhost:2222");
+
+        ProxyConfig config = ProxyConfig.load(env);
+
+        ProviderConfig stability = config.getProvider("stability");
+        assertEquals("stability-key-xyz", stability.getApiKey());
+        assertEquals("http://localhost:2222", stability.getBaseUrl());
+
+        // Unrelated providers stay at their defaults.
+        assertEquals("https://api.elevenlabs.io", config.getProviderBaseUrl("elevenlabs"));
     }
 }

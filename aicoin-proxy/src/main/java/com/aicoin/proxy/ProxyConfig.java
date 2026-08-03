@@ -20,7 +20,8 @@ import org.yaml.snakeyaml.Yaml;
  */
 public final class ProxyConfig {
 
-    private static final String[] PROVIDERS = {"openai", "anthropic", "google", "mistral", "cohere"};
+    private static final String[] PROVIDERS =
+            {"openai", "anthropic", "google", "mistral", "cohere", "elevenlabs", "stability"};
 
     /** Stable, canonical provider order used everywhere a full provider list must be reported (e.g. {@code GET /health}). */
     public static final List<String> PROVIDER_NAMES = Collections.unmodifiableList(Arrays.asList(PROVIDERS));
@@ -114,6 +115,8 @@ public final class ProxyConfig {
         defaults.put("google", new ProviderConfig("https://generativelanguage.googleapis.com", "", null, null, true, "key"));
         defaults.put("mistral", new ProviderConfig("https://api.mistral.ai", "", "Authorization", "Bearer ", false, null));
         defaults.put("cohere", new ProviderConfig("https://api.cohere.ai", "", "Authorization", "Bearer ", false, null));
+        defaults.put("elevenlabs", new ProviderConfig("https://api.elevenlabs.io", "", "xi-api-key", "", false, null));
+        defaults.put("stability", new ProviderConfig("https://api.stability.ai", "", "Authorization", "Bearer ", false, null));
 
         Map<String, ProviderConfig> providers = new LinkedHashMap<>();
         for (String provider : PROVIDERS) {

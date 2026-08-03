@@ -34,8 +34,10 @@ you → aicoin-proxy → real AI provider (OpenAI/Anthropic/Google/Mistral/Coher
 docker compose up --build
 ```
 
-This starts Redis, one aicoin node (primary, `-redis=redis:6379`), and
-the proxy. Once it's up:
+This starts one aicoin node (primary, in-memory chain by default — set
+`AICOIN_DYNAMODB_TABLE`/AWS credentials in the environment to persist to a
+real DynamoDB table instead, see `aicoin/README.md`'s "Persistence"
+section) and the proxy. Once it's up:
 
 ```
 curl http://localhost:8080/health
@@ -146,8 +148,8 @@ bash e2e/run.sh
 
 Builds both projects, boots a mock AI provider plus a primary+follower
 aicoin node pair plus the proxy, and exercises the full flow: auth,
-routing/key-injection, price, faucet, transfer, and Redis-based follower
-replication — verified with a genuine live run (real sockets, real
+routing/key-injection, price, faucet, transfer, and DynamoDB-based
+follower replication — verified with a genuine live run (real sockets, real
 processes), all 12 checks passing.
 
 ## Repo layout
