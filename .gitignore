@@ -1,0 +1,20 @@
+# Go
+aicoin/aicoin
+aicoin/wallet
+aicoin/.e2e-bin/
+
+# Java / Gradle
+aicoin-proxy/build/
+aicoin-proxy/.gradle/
+!aicoin-proxy/gradle/wrapper/gradle-wrapper.jar
+
+# e2e scratch
+/tmp/
+*.log
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+*.iml

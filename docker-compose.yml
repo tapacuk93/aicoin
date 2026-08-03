@@ -1,0 +1,26 @@
+services:
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
+  aicoin-node:
+    build: ./aicoin
+    command: ["-http=:9944", "-p2p=:9945", "-redis=redis:6379"]
+    ports:
+      - "9944:9944"
+      - "9945:9945"
+    depends_on:
+      - redis
+
+  aicoin-proxy:
+    build: ./aicoin-proxy
+    environment:
+      AICOIN_PROXY_PORT: "8080"
+      AICOIN_PROXY_AICOIN_EVENTS_URL: "http://aicoin-node:9944/events"
+      AICOIN_PROXY_AICOIN_PRICE_URL: "http://aicoin-node:9944/price"
+      AICOIN_PROXY_AICOIN_BALANCE_URL_BASE: "http://aicoin-node:9944"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - aicoin-node

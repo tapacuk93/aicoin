@@ -1,0 +1,39 @@
+server:
+  port: 8080
+aicoin:
+  eventsUrl: http://localhost:9944/events
+  priceUrl: http://localhost:9944/price
+  balanceUrlBase: http://localhost:9944
+providers:
+  openai:
+    baseUrl: https://api.openai.com
+    apiKey: ""
+    authHeader: Authorization
+    authPrefix: "Bearer "
+  anthropic:
+    baseUrl: https://api.anthropic.com
+    apiKey: ""
+    authHeader: x-api-key
+    authPrefix: ""
+  google:
+    baseUrl: https://generativelanguage.googleapis.com
+    apiKey: ""
+    authAsQueryParam: true
+    authQueryParamName: key
+  mistral:
+    baseUrl: https://api.mistral.ai
+    apiKey: ""
+    authHeader: Authorization
+    authPrefix: "Bearer "
+  cohere:
+    baseUrl: https://api.cohere.ai
+    apiKey: ""
+    authHeader: Authorization
+    authPrefix: "Bearer "
+pricing:
+  costPerTokenUsd: 0.000002
+  defaultCostUsdPerCall: 0.001
+freeCoins:
+  counterFile: free-coins-counter.txt
+health:
+  windowSize: 50
