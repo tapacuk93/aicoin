@@ -27,23 +27,30 @@ public final class ProxyConfig {
     public static final List<String> PROVIDER_NAMES = Collections.unmodifiableList(Arrays.asList(PROVIDERS));
 
     private final int port;
-    private final String eventsUrl;
-    private final String priceUrl;
-    private final String balanceUrlBase;
+    private final String redisHost;
+    private final int redisPort;
+    private final String redisPassword;
+    private final boolean redisSsl;
+    private final double decayHalflifeDays;
+    private final int freeClaimCooldownSeconds;
     private final Map<String, ProviderConfig> providers;
     private final double costPerTokenUsd;
     private final double defaultCostUsdPerCall;
     private final String freeCoinsCounterFile;
     private final int healthWindowSize;
 
-    private ProxyConfig(int port, String eventsUrl, String priceUrl, String balanceUrlBase,
+    private ProxyConfig(int port, String redisHost, int redisPort, String redisPassword, boolean redisSsl,
+                         double decayHalflifeDays, int freeClaimCooldownSeconds,
                          Map<String, ProviderConfig> providers,
                          double costPerTokenUsd, double defaultCostUsdPerCall, String freeCoinsCounterFile,
                          int healthWindowSize) {
         this.port = port;
-        this.eventsUrl = eventsUrl;
-        this.priceUrl = priceUrl;
-        this.balanceUrlBase = balanceUrlBase;
+        this.redisHost = redisHost;
+        this.redisPort = redisPort;
+        this.redisPassword = redisPassword;
+        this.redisSsl = redisSsl;
+        this.decayHalflifeDays = decayHalflifeDays;
+        this.freeClaimCooldownSeconds = freeClaimCooldownSeconds;
         this.providers = providers;
         this.costPerTokenUsd = costPerTokenUsd;
         this.defaultCostUsdPerCall = defaultCostUsdPerCall;
@@ -55,17 +62,30 @@ public final class ProxyConfig {
         return port;
     }
 
-    public String getEventsUrl() {
-        return eventsUrl;
+    public String getRedisHost() {
+        return redisHost;
     }
 
-    public String getPriceUrl() {
-        return priceUrl;
+    public int getRedisPort() {
+        return redisPort;
     }
 
-    /** @return {@code aicoin.balanceUrlBase}: used as {@code {balanceUrlBase}/balance/{walletId}} for wallet-id validation. */
-    public String getBalanceUrlBase() {
-        return balanceUrlBase;
+    public String getRedisPassword() {
+        return redisPassword;
+    }
+
+    public boolean isRedisSsl() {
+        return redisSsl;
+    }
+
+    /** @return {@code aicoin.decayHalflifeDays}: the price formula's recency-decay half-life, in days. */
+    public double getDecayHalflifeDays() {
+        return decayHalflifeDays;
+    }
+
+    /** @return {@code aicoin.freeClaimCooldownSeconds}: minimum seconds between free-coin claims for the same wallet. */
+    public int getFreeClaimCooldownSeconds() {
+        return freeClaimCooldownSeconds;
     }
 
     /** @return the full config entry for the given (already-lowercased, known) provider, or null if unknown. */
@@ -105,9 +125,12 @@ public final class ProxyConfig {
         Map<String, Object> yaml = loadYaml(env);
 
         int port = getInt(yaml, "server.port", 8080);
-        String eventsUrl = getString(yaml, "aicoin.eventsUrl", "http://localhost:9944/events");
-        String priceUrl = getString(yaml, "aicoin.priceUrl", "http://localhost:9944/price");
-        String balanceUrlBase = getString(yaml, "aicoin.balanceUrlBase", "http://localhost:9944");
+        String redisHost = getString(yaml, "redis.host", "localhost");
+        int redisPort = getInt(yaml, "redis.port", 6379);
+        String redisPassword = getString(yaml, "redis.password", "");
+        boolean redisSsl = getBoolean(yaml, "redis.ssl", false);
+        double decayHalflifeDays = getDouble(yaml, "aicoin.decayHalflifeDays", 110.0);
+        int freeClaimCooldownSeconds = getInt(yaml, "aicoin.freeClaimCooldownSeconds", 3600);
 
         Map<String, ProviderConfig> defaults = new LinkedHashMap<>();
         defaults.put("openai", new ProviderConfig("https://api.openai.com", "", "Authorization", "Bearer ", false, null));
@@ -149,15 +172,19 @@ public final class ProxyConfig {
 
         // Env var overrides (highest precedence).
         port = envInt(env, "AICOIN_PROXY_PORT", port);
-        eventsUrl = envStr(env, "AICOIN_PROXY_AICOIN_EVENTS_URL", eventsUrl);
-        priceUrl = envStr(env, "AICOIN_PROXY_AICOIN_PRICE_URL", priceUrl);
-        balanceUrlBase = envStr(env, "AICOIN_PROXY_AICOIN_BALANCE_URL_BASE", balanceUrlBase);
+        redisHost = envStr(env, "AICOIN_PROXY_REDIS_HOST", redisHost);
+        redisPort = envInt(env, "AICOIN_PROXY_REDIS_PORT", redisPort);
+        redisPassword = envStr(env, "AICOIN_PROXY_REDIS_PASSWORD", redisPassword);
+        redisSsl = envBool(env, "AICOIN_PROXY_REDIS_SSL", redisSsl);
+        decayHalflifeDays = envDouble(env, "AICOIN_PROXY_DECAY_HALFLIFE_DAYS", decayHalflifeDays);
+        freeClaimCooldownSeconds = envInt(env, "AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS", freeClaimCooldownSeconds);
         costPerTokenUsd = envDouble(env, "AICOIN_PROXY_COST_PER_TOKEN_USD", costPerTokenUsd);
         defaultCostUsdPerCall = envDouble(env, "AICOIN_PROXY_DEFAULT_COST_USD", defaultCostUsdPerCall);
         freeCoinsCounterFile = envStr(env, "AICOIN_PROXY_FREE_COINS_COUNTER_FILE", freeCoinsCounterFile);
         healthWindowSize = envInt(env, "AICOIN_PROXY_HEALTH_WINDOW_SIZE", healthWindowSize);
 
-        return new ProxyConfig(port, eventsUrl, priceUrl, balanceUrlBase, providers, costPerTokenUsd, defaultCostUsdPerCall,
+        return new ProxyConfig(port, redisHost, redisPort, redisPassword, redisSsl,
+                decayHalflifeDays, freeClaimCooldownSeconds, providers, costPerTokenUsd, defaultCostUsdPerCall,
                 freeCoinsCounterFile, healthWindowSize);
     }
 

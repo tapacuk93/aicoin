@@ -17,17 +17,20 @@ public class ProxyServerInitializer extends ChannelInitializer<SocketChannel> {
     private final ProxyConfig config;
     private final EventLoopGroup clientGroup;
     private final ProviderHealthTracker healthTracker;
+    private final AicoinLedger ledger;
 
-    public ProxyServerInitializer(ProxyConfig config, EventLoopGroup clientGroup, ProviderHealthTracker healthTracker) {
+    public ProxyServerInitializer(ProxyConfig config, EventLoopGroup clientGroup, ProviderHealthTracker healthTracker,
+                                   AicoinLedger ledger) {
         this.config = config;
         this.clientGroup = clientGroup;
         this.healthTracker = healthTracker;
+        this.ledger = ledger;
     }
 
     @Override
     protected void initChannel(SocketChannel ch) {
         ch.pipeline().addLast(new HttpServerCodec());
         ch.pipeline().addLast(new HttpObjectAggregator(MAX_CONTENT_LENGTH));
-        ch.pipeline().addLast(new ProxyFrontendHandler(config, clientGroup, healthTracker));
+        ch.pipeline().addLast(new ProxyFrontendHandler(config, clientGroup, healthTracker, ledger));
     }
 }

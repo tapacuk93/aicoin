@@ -16,24 +16,27 @@ import io.netty.util.CharsetUtil;
  * provider (all of {@link ProxyConfig#PROVIDER_NAMES}, always, in a stable
  * order, even ones with zero traffic so far), whether its rolling window of
  * recent forwarded calls (tracked by {@link ProviderHealthTracker}) has hit
- * a rate-limit (429) or budget (402/403) error.
+ * a rate-limit (429) or budget (402/403) error, and whether the proxy has a
+ * real (non-empty) {@code apiKey} configured for it at all ({@code enabled})
+ * — the landing page uses this to show which AI backends are actually live.
  */
 final class HealthHandler {
 
     private HealthHandler() {
     }
 
-    static void respond(ChannelHandlerContext ctx, ProviderHealthTracker tracker) {
-        byte[] bytes = buildJson(tracker).getBytes(CharsetUtil.UTF_8);
+    static void respond(ChannelHandlerContext ctx, ProviderHealthTracker tracker, ProxyConfig config) {
+        byte[] bytes = buildJson(tracker, config).getBytes(CharsetUtil.UTF_8);
         FullHttpResponse response = new DefaultFullHttpResponse(
                 HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.wrappedBuffer(bytes));
         response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
+        response.headers().set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN, "*");
         HttpUtil.setContentLength(response, bytes.length);
         ctx.writeAndFlush(response);
     }
 
     /** Pure JSON body construction, exposed for testing without a Netty channel. */
-    static String buildJson(ProviderHealthTracker tracker) {
+    static String buildJson(ProviderHealthTracker tracker, ProxyConfig config) {
         StringBuilder sb = new StringBuilder();
         sb.append("{\"providers\":[");
         boolean first = true;
@@ -43,7 +46,10 @@ final class HealthHandler {
             }
             first = false;
             ProviderHealthTracker.Health health = tracker.healthFor(provider);
+            String apiKey = config.getProvider(provider).getApiKey();
+            boolean enabled = apiKey != null && !apiKey.isEmpty();
             sb.append("{\"name\":\"").append(provider).append("\",")
+                    .append("\"enabled\":").append(enabled).append(",")
                     .append("\"healthy\":").append(health.isHealthy()).append(",")
                     .append("\"rateLimited\":").append(health.isRateLimited()).append(",")
                     .append("\"overBudget\":").append(health.isOverBudget()).append("}");

@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>aicoin wallet</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0b0d10;
+    --fg: #e8eaed;
+    --muted: #9aa0a6;
+    --accent: #6ee7b7;
+    --danger: #f87171;
+    --card: #14171c;
+    --border: #23262b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  main {
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 4rem;
+  }
+  h1 {
+    font-size: 1.75rem;
+    margin: 0 0 0.25rem;
+    letter-spacing: -0.02em;
+  }
+  .tagline {
+    color: var(--muted);
+    font-size: 0.95rem;
+    margin: 0 0 2rem;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+  }
+  .card h2 {
+    font-size: 0.95rem;
+    margin: 0 0 0.75rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  label {
+    display: block;
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 0.35rem;
+  }
+  input {
+    width: 100%;
+    background: #0b0d10;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 8px;
+    padding: 0.55rem 0.7rem;
+    font-size: 0.95rem;
+    margin-bottom: 0.9rem;
+  }
+  input:focus { outline: 1px solid var(--accent); }
+  button {
+    background: var(--accent);
+    color: #06251a;
+    border: none;
+    border-radius: 8px;
+    padding: 0.6rem 1rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    width: 100%;
+  }
+  button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg);
+  }
+  .row { display: flex; gap: 0.6rem; }
+  .row > * { flex: 1; }
+  .balance {
+    font-size: 2.25rem;
+    font-weight: 700;
+    margin: 0;
+  }
+  .balance .unit { font-size: 1rem; color: var(--muted); font-weight: 400; }
+  .price-line {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin: 0.25rem 0 0;
+  }
+  .msg {
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+    min-height: 1.2em;
+  }
+  .msg.ok { color: var(--accent); }
+  .msg.err { color: var(--danger); }
+  .caveat {
+    font-size: 0.78rem;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    margin-bottom: 1.5rem;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  #walletScreen, #connectScreen { display: none; }
+  .switch-link {
+    display: inline-block;
+    margin-top: 0.75rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>aicoin wallet</h1>
+  <p class="tagline">Check your balance, claim your hourly free coin, and send coins to another wallet.</p>
+
+  <div class="caveat">
+    <strong>Draft/prototype:</strong> a "wallet key" here is just a plain
+    identifier, not a real cryptographic private key — anyone who knows it
+    can view/spend from that wallet. Don't reuse a real secret as your key.
+  </div>
+
+  <div id="connectScreen" class="card">
+    <h2>Wallet key</h2>
+    <label for="walletKeyInput">Enter or create a wallet key</label>
+    <input id="walletKeyInput" type="text" placeholder="e.g. my-wallet-42" autocomplete="off">
+    <button id="connectBtn">Open wallet</button>
+    <div id="connectMsg" class="msg"></div>
+  </div>
+
+  <div id="walletScreen">
+    <div class="card">
+      <h2>Balance</h2>
+      <p class="balance"><span id="balanceValue">&mdash;</span> <span class="unit">aicoin</span></p>
+      <p class="price-line">1 aicoin &asymp; $<span id="priceValue">&mdash;</span> &middot; wallet key: <code id="walletKeyLabel"></code></p>
+      <span class="switch-link" id="switchWalletLink">use a different wallet key</span>
+    </div>
+
+    <div class="card">
+      <h2>Free coin faucet</h2>
+      <p class="price-line">1 free coin per wallet per hour.</p>
+      <button id="claimBtn">Claim free coin</button>
+      <div id="claimMsg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Send coins</h2>
+      <label for="toWalletInput">To wallet key</label>
+      <input id="toWalletInput" type="text" placeholder="recipient-wallet-key" autocomplete="off">
+      <label for="amountInput">Amount</label>
+      <input id="amountInput" type="number" step="any" min="0" placeholder="0.10">
+      <button id="sendBtn">Send</button>
+      <div id="sendMsg" class="msg"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+(function () {
+  const STORAGE_KEY = "aicoin.walletKey";
+  const connectScreen = document.getElementById("connectScreen");
+  const walletScreen = document.getElementById("walletScreen");
+  const walletKeyInput = document.getElementById("walletKeyInput");
+  const connectBtn = document.getElementById("connectBtn");
+  const connectMsg = document.getElementById("connectMsg");
+  const balanceValue = document.getElementById("balanceValue");
+  const priceValue = document.getElementById("priceValue");
+  const walletKeyLabel = document.getElementById("walletKeyLabel");
+  const switchWalletLink = document.getElementById("switchWalletLink");
+  const claimBtn = document.getElementById("claimBtn");
+  const claimMsg = document.getElementById("claimMsg");
+  const toWalletInput = document.getElementById("toWalletInput");
+  const amountInput = document.getElementById("amountInput");
+  const sendBtn = document.getElementById("sendBtn");
+  const sendMsg = document.getElementById("sendMsg");
+
+  let walletKey = null;
+
+  function setMsg(el, text, ok) {
+    el.textContent = text || "";
+    el.className = "msg" + (text ? (ok ? " ok" : " err") : "");
+  }
+
+  async function fetchJson(url, options) {
+    const res = await fetch(url, options);
+    let body = null;
+    try { body = await res.json(); } catch (e) { /* no body */ }
+    return { status: res.status, body: body };
+  }
+
+  async function refreshBalance() {
+    if (!walletKey) return;
+    const { status, body } = await fetchJson("/wallet/api/balance/" + encodeURIComponent(walletKey));
+    if (status === 200 && body) {
+      balanceValue.textContent = body.balance;
+    }
+  }
+
+  async function refreshPrice() {
+    const { status, body } = await fetchJson("/price");
+    if (status === 200 && body) {
+      priceValue.textContent = Number(body.price_usd).toFixed(6);
+    }
+  }
+
+  function openWallet(key) {
+    walletKey = key;
+    localStorage.setItem(STORAGE_KEY, key);
+    walletKeyLabel.textContent = key;
+    connectScreen.style.display = "none";
+    walletScreen.style.display = "block";
+    refreshBalance();
+    refreshPrice();
+  }
+
+  connectBtn.addEventListener("click", function () {
+    const key = walletKeyInput.value.trim();
+    if (!key) {
+      setMsg(connectMsg, "Enter a wallet key first.", false);
+      return;
+    }
+    setMsg(connectMsg, "", true);
+    openWallet(key);
+  });
+
+  walletKeyInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") connectBtn.click();
+  });
+
+  switchWalletLink.addEventListener("click", function () {
+    walletKey = null;
+    localStorage.removeItem(STORAGE_KEY);
+    walletKeyInput.value = "";
+    walletScreen.style.display = "none";
+    connectScreen.style.display = "block";
+  });
+
+  claimBtn.addEventListener("click", async function () {
+    claimBtn.disabled = true;
+    setMsg(claimMsg, "Claiming...", true);
+    try {
+      const { status, body } = await fetchJson("/wallet/api/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: walletKey })
+      });
+      if (status === 200 && body && body.granted) {
+        setMsg(claimMsg, "Claimed 1 free aicoin!", true);
+        refreshBalance();
+      } else if (status === 429 && body) {
+        setMsg(claimMsg, "Not eligible yet — next free coin at " + body.next_eligible_at, false);
+      } else {
+        setMsg(claimMsg, (body && body.error) || "Claim failed.", false);
+      }
+    } catch (e) {
+      setMsg(claimMsg, "Network error — try again.", false);
+    } finally {
+      claimBtn.disabled = false;
+    }
+  });
+
+  sendBtn.addEventListener("click", async function () {
+    const to = toWalletInput.value.trim();
+    const amount = parseFloat(amountInput.value);
+    if (!to || !(amount > 0)) {
+      setMsg(sendMsg, "Enter a recipient wallet key and a positive amount.", false);
+      return;
+    }
+    sendBtn.disabled = true;
+    setMsg(sendMsg, "Sending...", true);
+    try {
+      const { status, body } = await fetchJson("/wallet/api/transfer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from_user_id: walletKey, to_user_id: to, amount: amount })
+      });
+      if (status === 200) {
+        setMsg(sendMsg, "Sent " + amount + " aicoin to " + to + ".", true);
+        toWalletInput.value = "";
+        amountInput.value = "";
+        refreshBalance();
+      } else {
+        setMsg(sendMsg, (body && body.error) || "Transfer failed.", false);
+      }
+    } catch (e) {
+      setMsg(sendMsg, "Network error — try again.", false);
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved) {
+    openWallet(saved);
+  } else {
+    connectScreen.style.display = "block";
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 ## Multi-stage build for aicoin-proxy, per CONTRACT.md's "Docker /
-## docker-compose" section: a JDK-11 build stage running the Gradle build,
-## then just the application plugin's install output copied onto a JRE-11
+## docker-compose" section: a JDK-17 build stage running the Gradle build,
+## then just the application plugin's install output copied onto a JRE-17
 ## runtime base. Nothing here bakes in config values — every ProxyConfig
 ## field remains overridable via env vars at `docker run` time (see
 ## README.md's "Configuration" section for the full list).

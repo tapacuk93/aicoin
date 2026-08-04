@@ -1,8 +1,3 @@
-# Go
-aicoin/aicoin
-aicoin/wallet
-aicoin/.e2e-bin/
-
 # Java / Gradle
 aicoin-proxy/build/
 aicoin-proxy/.gradle/

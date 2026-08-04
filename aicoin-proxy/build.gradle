@@ -19,6 +19,7 @@ ext {
 dependencies {
     implementation "io.netty:netty-all:${nettyVersion}"
     implementation 'org.yaml:snakeyaml:2.2'
+    implementation 'io.lettuce:lettuce-core:6.5.0.RELEASE'
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'

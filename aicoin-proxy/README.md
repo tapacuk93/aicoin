@@ -7,17 +7,26 @@ path** a real LLM provider would use; a request header (`X-AI`) picks which
 provider/upstream to use, and the proxy injects **its own** paid API key
 into the forwarded request — clients never hold or send provider
 credentials. The caller's aicoin wallet id doubles as their API key (sent
-as `X-Api-Key`), which the proxy validates against the aicoin node — and
+as `X-Api-Key`), which the proxy validates against its own coin ledger — and
 gates on a positive balance — before forwarding. It relays the upstream
-response verbatim and asynchronously reports a cost event to the `aicoin`
-chain node for every successful call. It also exposes three small
-proxy-side endpoints: `GET /price`, `GET /free-coins/available`, and `GET
-/health` — none of which require `X-Api-Key`.
+response verbatim and asynchronously records a cost event into the ledger
+for every successful call.
+
+This same process **is** the coin ledger — wallet balances, the free-coin
+faucet, peer transfers, and the recency-weighted price all live here,
+backed directly by Redis (`AicoinLedger`). There is no separate node
+process, no blockchain, no signing, no replication. It also exposes small
+proxy-side endpoints: `GET /price`, `GET /free-coins/available`, `GET
+/health`, `GET /wallet` (a browser wallet UI), and `GET|POST
+/wallet/api/*` — none of which require `X-Api-Key`.
 
 This document mirrors the shared `CONTRACT.md` at the repo root but is
 meant to stand on its own.
 
 ## Running
+
+You need a JDK 17 and a Redis (or Redis-compatible, e.g. Valkey) server
+reachable at `redis.host`/`redis.port` (default `localhost:6379`).
 
 ```
 ./gradlew run
@@ -36,10 +45,14 @@ default (env > YAML > default).
 ```yaml
 server:
   port: 8080                      # AICOIN_PROXY_PORT
+redis:
+  host: localhost                 # AICOIN_PROXY_REDIS_HOST
+  port: 6379                      # AICOIN_PROXY_REDIS_PORT
+  password: ""                    # AICOIN_PROXY_REDIS_PASSWORD (empty = no AUTH)
+  ssl: false                      # AICOIN_PROXY_REDIS_SSL (true for ElastiCache in-transit encryption)
 aicoin:
-  eventsUrl: http://localhost:9944/events   # AICOIN_PROXY_AICOIN_EVENTS_URL
-  priceUrl: http://localhost:9944/price     # AICOIN_PROXY_AICOIN_PRICE_URL
-  balanceUrlBase: http://localhost:9944     # AICOIN_PROXY_AICOIN_BALANCE_URL_BASE (used as {balanceUrlBase}/balance/{walletId} for wallet-id validation)
+  decayHalflifeDays: 110.0        # AICOIN_PROXY_DECAY_HALFLIFE_DAYS
+  freeClaimCooldownSeconds: 3600  # AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS
 providers:
   openai:
     baseUrl: https://api.openai.com          # AICOIN_PROXY_OPENAI_BASEURL
@@ -136,7 +149,7 @@ upstream/config to use:
 There is no separate provider key or API key concept for the client — the
 caller's aicoin wallet id **doubles as their API key**. Every proxied
 request (i.e. everything except `GET /price`, `GET /free-coins/available`,
-and `GET /health`) requires a header:
+`GET /health`, `GET /wallet`, and `/wallet/api/*`) requires a header:
 
 ```
 X-Api-Key: <walletId>
@@ -148,56 +161,43 @@ Missing (or blank/whitespace-only) header:
 401 {"error":"missing X-Api-Key (wallet id)"}
 ```
 
-Before forwarding to the upstream AI provider, the proxy validates the
-wallet id over plain HTTP (no subprocess — a Netty client `Bootstrap`, same
-mechanism as `UpstreamForwarder`/`PriceForwarder`):
+Before forwarding to the upstream AI provider, the proxy reads the wallet's
+balance directly from the ledger (`AicoinLedger.getBalance`, an in-process
+async Redis `GET` — no network hop to another service):
 
-```
-GET {aicoin.balanceUrlBase}/balance/{walletId}
-```
-
-- If that call **fails or times out** (aicoin node unreachable, connection
-  refused, or no response within the read timeout), the proxy responds to
-  the original client with:
+- If that call **fails** (Redis connection error/timeout), the proxy
+  responds to the original client with:
 
   ```
   503 {"error":"could not validate wallet"}
   ```
 
   and does **not** forward the request to the AI provider — no upstream
-  call is made and no cost event is ever emitted for it.
-- If it **succeeds** (any 2xx response), the proxy reads the `balance`
-  field from the response body and gates on it — this is deliberately a
-  simple binary gate, not per-call metering: a successful call still
-  doesn't debit anything from the balance (an `event` transaction still
+  call is made and no cost event is ever recorded for it.
+- If it **succeeds**, the proxy gates on the returned balance — this is
+  deliberately a simple binary gate, not per-call metering: a successful
+  call still doesn't debit anything from the balance (a priced event still
   contributes 0 to balance, unchanged; that's documented behavior, not a
   bug):
   - `balance <= 0` (including negative, which shouldn't normally occur
-    since a `/transfer` can't overdraw a wallet, but is treated the same
-    defensively) — the wallet has never received a faucet claim/transfer,
-    or has sent away everything it had:
+    since `/wallet/api/transfer` can't overdraw a wallet, but is treated the
+    same defensively) — the wallet has never received a faucet claim/
+    transfer, or has sent away everything it had:
 
     ```
     402 {"error":"insufficient aicoin balance","balance":<value>}
     ```
 
     and does **not** forward the request to the AI provider — no upstream
-    call is made and no cost event is ever emitted for it, same as the
+    call is made and no cost event is ever recorded for it, same as the
     401/503 cases above. Client apps integrating the wallet should treat
     `402` from this proxy as the one and only signal to fall back to the
     user's own provider key for that request.
   - `balance > 0` — the proxy proceeds with forwarding exactly as before.
-    The aicoin node returns a balance (possibly `0`) for *any*
-    syntactically-valid id, even one never used before, so the underlying
-    validation call is a liveness/reachability check on the aicoin node,
-    not a cryptographic identity check — that's a documented assumption,
-    not a security guarantee. The validated `walletId` becomes the
-    `user_id` in the eventual `/events` POST (see "Forwarding pipeline"
-    below).
-
-The old `X-User-Id` header is gone — `X-Api-Key` is now the only identity
-mechanism, for both routing decisions (there are none left tied to it) and
-billing.
+    The ledger returns a balance (possibly `0`) for *any* syntactically-
+    valid id, even one never used before, so there's no cryptographic
+    identity check here — that's a documented assumption, not a security
+    guarantee.
 
 ## Forwarding pipeline
 
@@ -215,49 +215,84 @@ billing.
    - Neither present/parseable: falls back to `pricing.defaultCostUsdPerCall`
    - Otherwise: `tokens * pricing.costPerTokenUsd`
 
-   A fire-and-forget async `POST` is then sent to `aicoin.eventsUrl` with
-   `{"user_id","provider","cost_usd"}`, where `user_id` is the wallet id
-   already validated from the `X-Api-Key` header (see "Auth" above). This
-   never blocks or affects the client-facing response; failures are logged
-   and swallowed.
+   `AicoinLedger.recordEvent` is then called in-process (a fire-and-forget
+   `ZADD` into the price event log). This never blocks or affects the
+   client-facing response; failures are logged and swallowed.
 5. If the upstream connection fails, or the upstream returns a non-2xx
-   status, no event is emitted. Non-2xx upstream responses are relayed to
+   status, no event is recorded. Non-2xx upstream responses are relayed to
    the client byte-for-byte (same as step 3).
+
+## The ledger (`AicoinLedger`)
+
+Backed by a single Redis instance — ElastiCache for Redis (snapshotting
+enabled) in production, `redis:7-alpine` locally/in e2e. Full data model,
+Lua-script atomicity rationale, and the price formula are documented in the
+repo-root `CONTRACT.md`'s "Ledger (Redis)" section — this section covers
+just the Java-side shape:
+
+- `getBalance(userId, callback)` — async Redis `GET aicoin:balance:{userId}`.
+- `claimFreeCoins(userId, cooldownSeconds, callback)` — runs a Lua `EVAL`
+  script that atomically checks `aicoin:lastclaim:{userId}` against the
+  cooldown and, if eligible, mints +1.0 into the balance.
+- `transfer(from, to, amount, callback)` — runs a Lua `EVAL` script that
+  atomically checks the sender's balance and, if sufficient, moves the
+  amount.
+- `recordEvent(provider, costUsd, timestamp)` — fire-and-forget `ZADD` into
+  `aicoin:events` (member `costUsd|uuid`, score = epoch-millis).
+- `computePrice(halfLifeDays, callback)` — `ZRANGE ... WITHSCORES` over
+  `aicoin:events`, then folds the recency-weighted average via the pure
+  `PriceCalculator.compute` (no Redis dependency, fully unit-tested).
+
+All five operations are async (Lettuce's `RedisFuture`/`CompletableFuture`
+API), matching the rest of this codebase's non-blocking Netty style — none
+of them block an event-loop thread.
 
 ## Additional proxy-side endpoints
 
-- `GET /price` — forwards to `aicoin.priceUrl` and returns that JSON body
-  verbatim, so callers don't need to know the aicoin node's address. If the
-  upstream is unreachable: `502 {"error":"aicoin node unreachable"}`.
+- `GET /price` — computed directly from the ledger, returns
+  `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"half_life_days":110}`.
+  Always includes `Access-Control-Allow-Origin: *` (public data, fetched
+  cross-origin by the landing page at aicoin.oeaio.com).
 - `GET /free-coins/available` — reads `freeCoins.counterFile` fresh on every
   request (a bundled resource file containing a single integer, meant to be
   manually bumped by an operator via git push + CI redeploy) and returns
   `{"available": N}`. A missing or unparseable file resolves to
-  `{"available": 0}`.
+  `{"available": 0}`. This is a separate, admin-managed system-wide
+  allowance, distinct from the per-wallet 1-hour claim cooldown.
 - `GET /health` — for each of the 7 configured providers (`openai`,
   `anthropic`, `google`, `mistral`, `cohere`, `elevenlabs`, `stability`),
-  reports whether recent upstream calls have hit rate-limiting or budget
-  errors. The proxy keeps, per provider, a rolling window of the last
-  `health.windowSize` forwarded calls' upstream HTTP status codes (recorded
-  regardless of whether the call was 2xx or not): `rateLimited` is `true`
-  if any status in the window was `429`; `overBudget` is `true` if any was
-  `402` or `403`; `healthy` is `!rateLimited && !overBudget`. Response:
+  reports whether it has a real (non-empty) `apiKey` configured (`enabled`
+  — this is what the landing page reads to show which AI backends are
+  actually live) and whether recent upstream calls have hit rate-limiting
+  or budget errors. The proxy keeps, per provider, a rolling window of the
+  last `health.windowSize` forwarded calls' upstream HTTP status codes
+  (recorded regardless of whether the call was 2xx or not): `rateLimited`
+  is `true` if any status in the window was `429`; `overBudget` is `true`
+  if any was `402` or `403`; `healthy` is `!rateLimited && !overBudget`.
+  Always includes `Access-Control-Allow-Origin: *`, same as `/price`.
+  Response:
 
   ```json
   {"providers":[
-    {"name":"openai","healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"anthropic","healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"google","healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"mistral","healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"cohere","healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"elevenlabs","healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"stability","healthy":true,"rateLimited":false,"overBudget":false}
+    {"name":"openai","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false},
+    {"name":"anthropic","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false},
+    {"name":"google","enabled":false,"healthy":true,"rateLimited":false,"overBudget":false},
+    {"name":"mistral","enabled":false,"healthy":true,"rateLimited":false,"overBudget":false},
+    {"name":"cohere","enabled":false,"healthy":true,"rateLimited":false,"overBudget":false},
+    {"name":"elevenlabs","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false},
+    {"name":"stability","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false}
   ]}
   ```
 
   All 7 providers are always listed, in this stable order, even ones with
   zero forwarded calls so far — those default to
-  `healthy:true`/`rateLimited:false`/`overBudget:false`.
+  `healthy:true`/`rateLimited:false`/`overBudget:false`; `enabled` reflects
+  configuration, not traffic.
+- `GET /wallet` — the browser wallet page (bundled `wallet.html`).
+- `GET /wallet/api/balance/{walletId}`, `POST /wallet/api/claim`, `POST
+  /wallet/api/transfer` — the wallet page's backing endpoints, all calling
+  directly into `AicoinLedger`. See `CONTRACT.md`'s "Wallet web page"
+  section for exact request/response shapes.
 
 ## Tests
 
@@ -265,29 +300,27 @@ billing.
 ./gradlew test
 ```
 
-JUnit5 pure-function tests, with no network/Netty server startup required:
+JUnit5 pure-function tests, with no network/Redis dependency required:
 
 - `ProviderRoutingTest` — `X-AI` header → provider resolution, including
   case-insensitivity and the missing/unknown case, across all 7 providers.
 - `WalletValidationTest` — `X-Api-Key` header → wallet id extraction
-  (missing/blank/whitespace-trimmed), the `{balanceUrlBase}/balance/{walletId}`
-  URL construction (trailing-slash tolerance, path-segment encoding of
-  special characters), the reachability decision (any 2xx status code →
-  reachable; any other status, or no response at all — modeling a connect
-  failure or read timeout → not reachable), parsing the `balance` field out
-  of the response body, and the combined balance-gating decision: positive
-  balance → proceed; zero, negative, or unparseable/missing balance on an
-  otherwise-reachable node → the appropriate `402`/`503` outcome.
+  (missing/blank/whitespace-trimmed), and the balance-gating decision:
+  positive balance → proceed; zero/negative balance → `402`; a failed
+  ledger lookup → `503`.
+- `PriceCalculatorTest` — the recency-weighted price formula's checkpoint
+  table (1 hour/day/week/month/quarter/year/5-years), negative-age
+  clamping, the zero-events case, and custom half-life behavior.
 - `AuthInjectorTest` — auth-injection construction, both the header+prefix
   form (OpenAI/Anthropic/Mistral/Cohere/ElevenLabs/Stability-style) and the
   query-param form (Google-style).
 - `CostCalculatorTest` — usage-JSON → `cost_usd` parsing, both OpenAI-style
   and Anthropic-style, plus the fallback-to-default case.
 - `ProxyConfigTest` — config precedence (env var > YAML > default),
-  covering `port`/`eventsUrl`/`priceUrl`/`balanceUrlBase`/
-  `freeCoinsCounterFile` and each of the 7 providers'
-  `baseUrl`/`apiKey`/`authHeader`/`authPrefix`/`authAsQueryParam`/
-  `authQueryParamName`.
+  covering `port`/`redis.*`/`aicoin.decayHalflifeDays`/
+  `aicoin.freeClaimCooldownSeconds`/`freeCoinsCounterFile` and each of the
+  7 providers' `baseUrl`/`apiKey`/`authHeader`/`authPrefix`/
+  `authAsQueryParam`/`authQueryParamName`.
 - `FreeCoinsCounterTest` — reading the free-coins counter fresh from a
   filesystem path or the bundled classpath resource, including the
   missing/unparseable → 0 cases.
@@ -301,21 +334,27 @@ JUnit5 pure-function tests, with no network/Netty server startup required:
   elevenlabs, stability` order, defaulting to the all-clear state for
   providers with zero recorded calls, and reflecting recorded
   rate-limit/budget statuses for others.
+- `WalletPageHandlerTest` — `GET /wallet` serves the bundled HTML page
+  verbatim.
+
+`AicoinLedger`'s Lua-script atomicity (claim cooldown, transfer overdraft
+check) requires a live Redis/Valkey connection to exercise end-to-end —
+covered by `e2e/run.sh`, not the pure JUnit suite.
 
 ## Assumptions made where the contract is ambiguous
 
 - **JSON parsing.** The contract doesn't name a JSON library. Rather than
-  add a second parsing dependency, `CostCalculator` parses response bodies
-  with SnakeYAML (already required for config): valid JSON is valid YAML
-  for the simple object/array/number shapes used here, so `new
-  Yaml().load(jsonBody)` gives a plain `Map`/`List`/`Number` tree.
+  add a second parsing dependency, `CostCalculator` (and the wallet
+  transfer/claim body parsing in `ProxyFrontendHandler`) parse request/
+  response bodies with SnakeYAML (already required for config): valid JSON
+  is valid YAML for the simple object/array/number shapes used here, so
+  `new Yaml().load(jsonBody)` gives a plain `Map`/`List`/`Number` tree.
 - **Connection failure to upstream.** The contract says to "relay the real
   error/status to the client" on connection failure, but there is no real
   HTTP status in that case (the connection never succeeded). That language
   is read as applying to actual non-2xx upstream *HTTP responses* (relayed
   byte-for-byte). For a connect/write failure, the proxy instead returns a
-  synthetic `502 {"error":"..."}` to the client and emits no event. The
-  same reasoning applies to `GET /price`'s "aicoin node unreachable" case.
+  synthetic `502 {"error":"..."}` to the client and records no event.
 - **baseUrl has no path component.** All example `baseUrl`s in the contract
   are bare `scheme://host[:port]` with no path. The forwarded upstream
   request URI is therefore exactly the inbound request's path+query
@@ -331,30 +370,13 @@ JUnit5 pure-function tests, with no network/Netty server startup required:
   either way, never cached.
 - **`X-Api-Key` lookup** is case-insensitive (Netty's `HttpHeaders` are
   case-insensitive by default) and uses the first value if the header is
-  repeated; the header value is trimmed before being used both as the
-  wallet id and as the `/balance/{walletId}` path segment (which is also
-  URL-path-encoded, in case a wallet id ever contains characters like `/`
-  or spaces).
-- **Wallet-check timeout.** The contract says "fails or times out" without
-  naming a duration. `WalletValidator` uses a 5s TCP connect timeout (same
-  order of magnitude as the other outbound calls in this project) plus a
-  5s Netty `ReadTimeoutHandler` so a connected-but-hanging aicoin node
-  still resolves to `503` rather than hanging the client request
-  indefinitely.
-- **A 2xx balance-check response with no parseable numeric `balance` field**
-  is treated the same as an unreachable aicoin node (`503`), not as
-  insufficient balance (`402`) — there's nothing to gate on in that case,
-  and the contract's `GET /balance/{user_id}` shape always includes
-  `balance`, so this should never happen against a compliant aicoin node;
-  it's purely a defensive fallback. `balance <= 0` (including negative,
-  which also shouldn't normally occur since `/transfer` can't overdraw a
-  wallet) is always `402`, per the contract's explicit "treat the same
-  defensively" instruction.
-- **The `balance` field in a `402` response body** is rendered from
-  whatever numeric type SnakeYAML parsed out of the upstream JSON
-  (`Integer`/`Long`/`Double`), formatted without a trailing `.0` when it's
-  a whole number — matching how Go's `encoding/json` would itself render a
-  whole-number `float64` balance (e.g. `0`, not `0.0`).
+  repeated; the header value is trimmed before being used as the wallet id.
+- **A ledger balance lookup that fails** (Redis connection error/timeout)
+  is treated as unreachable (`503`), not as insufficient balance (`402`) —
+  there's nothing to gate on in that case.
+- **The `balance` field in a `402` response body** is rendered without a
+  trailing `.0` when it's a whole number (e.g. `0`, not `0.0`), matching
+  how a whole-number balance would typically be expected to render.
 - **`GET /health` only records real upstream responses.** The contract says
   to record "every forwarded call" into a provider's rolling window; a
   connect/write failure to the upstream never produces a real HTTP status
@@ -363,28 +385,26 @@ JUnit5 pure-function tests, with no network/Netty server startup required:
   the window. Only genuine upstream responses — 2xx or not — are recorded,
   which is also exactly the status the health signals (`429`/`402`/`403`)
   are about.
-- **Toolchain.** This project targets Java 11 per `CONTRACT.md`
-  (`java.toolchain.languageVersion = 11` in `build.gradle`), matching the
-  repo-root `.java-version` (`11.0.29`). The Gradle wrapper itself is
-  pinned to Gradle 9.6.1, which requires JVM 17+ just to launch its own
-  daemon (unrelated to the Java level of the compiled/tested code); the
-  local `aicoin-proxy/.java-version` is therefore set to `17.0.16` so
-  `./gradlew` can run, while the toolchain block makes Gradle compile and
-  execute the actual application/tests on the auto-detected JDK 11
-  installation (confirmed via `--info`: "Compiling with toolchain
-  '.../applejdk-11.0.29.7.1.jdk/Contents/Home'", and compiled `.class`
-  files report major version 55 = Java 11).
+- **Toolchain.** This project targets Java 17 (`java.toolchain.languageVersion
+  = 17` in `build.gradle`), matching the repo-root `.java-version`
+  (`17.0.16`).
+- **Claim/transfer atomicity.** The contract doesn't mandate a specific
+  Redis mechanism for the check-then-mutate operations in the ledger; Lua
+  `EVAL` scripts were chosen because Redis executes a script atomically
+  with respect to every other client, which is the simplest way to
+  replicate the correctness a single-writer blockchain got "for free" from
+  having exactly one legitimate writer.
 
 ## Docker
 
 `Dockerfile` is a multi-stage build, per `CONTRACT.md`'s "Docker /
 docker-compose" section:
 
-1. A `eclipse-temurin:11-jdk` build stage runs `./gradlew installDist`,
+1. A `eclipse-temurin:17-jdk` build stage runs `./gradlew installDist`,
    producing the `application` plugin's install output at
    `build/install/aicoin-proxy/` (a `bin/aicoin-proxy` start script plus a
    `lib/` of jars — everything needed to run, no Gradle at runtime).
-2. Only that install output is copied onto an `eclipse-temurin:11-jre`
+2. Only that install output is copied onto an `eclipse-temurin:17-jre`
    runtime base. The entrypoint runs the generated start script,
    `/opt/aicoin-proxy/bin/aicoin-proxy`.
 
@@ -398,25 +418,23 @@ Build:
 docker build -t aicoin-proxy .
 ```
 
-Run (defaults — expects an aicoin node reachable at `localhost:9944`, which
-won't resolve from inside the container without `--network`/`--add-host`
+Run (defaults — expects Redis reachable at `localhost:6379`, which won't
+resolve from inside the container without `--network`/`--add-host`
 adjustments or `docker-compose`):
 
 ```
 docker run --rm -p 8080:8080 aicoin-proxy
 ```
 
-Run with env var overrides, e.g. pointing at an `aicoin-node` container by
-DNS name on a shared Docker network, and supplying real provider keys:
+Run with env var overrides, e.g. pointing at a `redis` container by DNS
+name on a shared Docker network, and supplying real provider keys:
 
 ```
 docker run --rm -p 8080:8080 \
-  -e AICOIN_PROXY_AICOIN_EVENTS_URL=http://aicoin-node:9944/events \
-  -e AICOIN_PROXY_AICOIN_PRICE_URL=http://aicoin-node:9944/price \
-  -e AICOIN_PROXY_AICOIN_BALANCE_URL_BASE=http://aicoin-node:9944 \
+  -e AICOIN_PROXY_REDIS_HOST=redis \
+  -e AICOIN_PROXY_REDIS_PORT=6379 \
   -e AICOIN_PROXY_OPENAI_APIKEY=sk-... \
   -e AICOIN_PROXY_ANTHROPIC_APIKEY=sk-ant-... \
   -e AICOIN_PROXY_PORT=8080 \
   aicoin-proxy
 ```
-

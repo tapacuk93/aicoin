@@ -77,6 +77,58 @@
     padding: 0.2rem 0.7rem;
     margin-bottom: 1.5rem;
   }
+  .price-card {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .price-value {
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .price-value .unit { font-size: 0.95rem; color: var(--muted); font-weight: 400; }
+  .price-meta { color: var(--muted); font-size: 0.85rem; margin: 0.3rem 0 0; }
+  .wallet-btn {
+    display: inline-block;
+    background: var(--accent);
+    color: #06251a;
+    font-weight: 600;
+    border-radius: 8px;
+    padding: 0.7rem 1.3rem;
+    margin: 0.5rem 0 1rem;
+  }
+  .wallet-btn:hover { opacity: 0.9; text-decoration: none; }
+  .backends {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+  .backend-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.3rem 0.8rem;
+    color: var(--muted);
+  }
+  .backend-pill .dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+  .backend-pill.enabled {
+    color: var(--fg);
+    border-color: var(--accent);
+  }
+  .backend-pill.enabled .dot { background: var(--accent); }
 </style>
 </head>
 <body>
@@ -84,6 +136,33 @@
   <span class="status">draft / prototype</span>
   <h1>aicoin</h1>
   <p class="tagline">A reverse proxy for AI provider APIs, and the coin priced off real usage.</p>
+
+  <div class="card price-card">
+    <div>
+      <h2>Current price</h2>
+      <p class="price-value">$<span id="priceValue">&mdash;</span> <span class="unit">per aicoin</span></p>
+      <p class="price-meta" id="priceMeta">Loading&hellip;</p>
+    </div>
+    <a class="wallet-btn" href="https://proxy.aicoin.oeaio.com/wallet">Open wallet</a>
+  </div>
+
+  <div class="card">
+    <h2>Enabled AI backends</h2>
+    <p class="price-meta">Which providers you can call through the proxy right now.</p>
+    <div class="backends" id="backendsList">
+      <span class="backend-pill"><span class="dot"></span>Loading&hellip;</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>What&rsquo;s an aicoin?</h2>
+    <p>1 aicoin is worth 1 paid AI call through
+    <a href="https://proxy.aicoin.oeaio.com">proxy.aicoin.oeaio.com</a> &mdash;
+    the proxy holds the real paid provider key, so you spend aicoin instead
+    of your own OpenAI/Anthropic/etc. key. The price above tracks a
+    recency-weighted average of real recent AI spend, so it falls over time
+    as inference gets cheaper.</p>
+  </div>
 
   <div class="card">
     <h2>aicoin&#8209;proxy</h2>
@@ -95,10 +174,9 @@
 
   <div class="card">
     <h2>aicoin</h2>
-    <p>A small signed blockchain: one primary node, optional read-only
-    followers, a 1-coin-per-hour faucet, peer-to-peer transfers, and a
-    price that decays smoothly with the real historical drop in AI
-    inference cost.</p>
+    <p>A centralized coin ledger backed by Redis: a 1-coin-per-hour
+    faucet, peer-to-peer transfers, and a price that decays smoothly with
+    the real historical drop in AI inference cost.</p>
   </div>
 
   <footer>
@@ -106,5 +184,50 @@
     <a href="https://github.com/tapacuk93/aicoin">github.com/tapacuk93/aicoin</a>
   </footer>
 </main>
+
+<script>
+(function () {
+  var priceValue = document.getElementById("priceValue");
+  var priceMeta = document.getElementById("priceMeta");
+  fetch("https://proxy.aicoin.oeaio.com/price")
+    .then(function (res) { return res.json(); })
+    .then(function (body) {
+      priceValue.textContent = Number(body.price_usd).toFixed(6);
+      priceMeta.textContent = "from " + Number(body.total_spend_usd).toFixed(2) + " USD of real AI spend recorded so far";
+    })
+    .catch(function () {
+      priceMeta.textContent = "Price unavailable right now.";
+    });
+
+  var backendsList = document.getElementById("backendsList");
+  var LABELS = {
+    openai: "OpenAI",
+    anthropic: "Anthropic",
+    google: "Google",
+    mistral: "Mistral",
+    cohere: "Cohere",
+    elevenlabs: "ElevenLabs",
+    stability: "Stability"
+  };
+  fetch("https://proxy.aicoin.oeaio.com/health")
+    .then(function (res) { return res.json(); })
+    .then(function (body) {
+      backendsList.innerHTML = "";
+      (body.providers || []).forEach(function (p) {
+        var pill = document.createElement("span");
+        pill.className = "backend-pill" + (p.enabled ? " enabled" : "");
+        var dot = document.createElement("span");
+        dot.className = "dot";
+        pill.appendChild(dot);
+        pill.appendChild(document.createTextNode(LABELS[p.name] || p.name));
+        backendsList.appendChild(pill);
+      });
+    })
+    .catch(function () {
+      backendsList.innerHTML = '<span class="backend-pill"><span class="dot"></span>Unavailable right now.</span>';
+    });
+})();
+</script>
 </body>
 </html>
+

@@ -14,9 +14,12 @@ class ProxyConfigTest {
     void bundledDefaultsMatchContract() {
         ProxyConfig config = ProxyConfig.load(new HashMap<>());
         assertEquals(8080, config.getPort());
-        assertEquals("http://localhost:9944/events", config.getEventsUrl());
-        assertEquals("http://localhost:9944/price", config.getPriceUrl());
-        assertEquals("http://localhost:9944", config.getBalanceUrlBase());
+        assertEquals("localhost", config.getRedisHost());
+        assertEquals(6379, config.getRedisPort());
+        assertEquals("", config.getRedisPassword());
+        assertFalse(config.isRedisSsl());
+        assertEquals(110.0, config.getDecayHalflifeDays(), 1e-12);
+        assertEquals(3600, config.getFreeClaimCooldownSeconds());
         assertEquals("free-coins-counter.txt", config.getFreeCoinsCounterFile());
 
         assertEquals("https://api.openai.com", config.getProviderBaseUrl("openai"));
@@ -61,14 +64,14 @@ class ProxyConfigTest {
         Map<String, String> env = new HashMap<>();
         env.put("AICOIN_PROXY_PORT", "9090");
         env.put("AICOIN_PROXY_OPENAI_BASEURL", "http://localhost:1234");
-        env.put("AICOIN_PROXY_AICOIN_EVENTS_URL", "http://localhost:5555/events");
+        env.put("AICOIN_PROXY_REDIS_HOST", "redis.internal");
         env.put("AICOIN_PROXY_COST_PER_TOKEN_USD", "0.5");
         env.put("AICOIN_PROXY_DEFAULT_COST_USD", "1.5");
 
         ProxyConfig config = ProxyConfig.load(env);
         assertEquals(9090, config.getPort());
         assertEquals("http://localhost:1234", config.getProviderBaseUrl("openai"));
-        assertEquals("http://localhost:5555/events", config.getEventsUrl());
+        assertEquals("redis.internal", config.getRedisHost());
         assertEquals(0.5, config.getCostPerTokenUsd(), 1e-12);
         assertEquals(1.5, config.getDefaultCostUsdPerCall(), 1e-12);
 
@@ -77,23 +80,22 @@ class ProxyConfigTest {
     }
 
     @Test
-    void envVarsOverridePriceUrlAndFreeCoinsCounterFile() {
+    void envVarsOverrideRedisAndLedgerSettings() {
         Map<String, String> env = new HashMap<>();
-        env.put("AICOIN_PROXY_AICOIN_PRICE_URL", "http://localhost:6666/price");
+        env.put("AICOIN_PROXY_REDIS_PORT", "16379");
+        env.put("AICOIN_PROXY_REDIS_PASSWORD", "s3cret");
+        env.put("AICOIN_PROXY_REDIS_SSL", "true");
+        env.put("AICOIN_PROXY_DECAY_HALFLIFE_DAYS", "30");
+        env.put("AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS", "60");
         env.put("AICOIN_PROXY_FREE_COINS_COUNTER_FILE", "/tmp/some-counter.txt");
 
         ProxyConfig config = ProxyConfig.load(env);
-        assertEquals("http://localhost:6666/price", config.getPriceUrl());
+        assertEquals(16379, config.getRedisPort());
+        assertEquals("s3cret", config.getRedisPassword());
+        assertTrue(config.isRedisSsl());
+        assertEquals(30.0, config.getDecayHalflifeDays(), 1e-12);
+        assertEquals(60, config.getFreeClaimCooldownSeconds());
         assertEquals("/tmp/some-counter.txt", config.getFreeCoinsCounterFile());
-    }
-
-    @Test
-    void envVarOverridesBalanceUrlBase() {
-        Map<String, String> env = new HashMap<>();
-        env.put("AICOIN_PROXY_AICOIN_BALANCE_URL_BASE", "http://localhost:7777");
-
-        ProxyConfig config = ProxyConfig.load(env);
-        assertEquals("http://localhost:7777", config.getBalanceUrlBase());
     }
 
     @Test

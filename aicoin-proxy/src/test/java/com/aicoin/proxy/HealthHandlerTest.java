@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -13,7 +14,10 @@ import org.yaml.snakeyaml.Yaml;
  * {@code GET /health} response construction, per CONTRACT.md's "Additional
  * proxy-side endpoints" section: all 7 configured providers are always
  * listed, in a stable order, even ones with zero recorded calls (which
- * default to healthy:true/rateLimited:false/overBudget:false).
+ * default to healthy:true/rateLimited:false/overBudget:false), and each
+ * reports whether the proxy actually has a configured (non-empty) apiKey
+ * for it ({@code enabled}) — the landing page's "enabled AI backends" list
+ * reads this field.
  */
 class HealthHandlerTest {
 
@@ -27,11 +31,15 @@ class HealthHandlerTest {
         return (List<Map<String, Object>>) parse(json).get("providers");
     }
 
+    private static ProxyConfig configWithNoKeys() {
+        return ProxyConfig.load(new HashMap<>());
+    }
+
     @Test
     void listsAllSevenProvidersEvenWithZeroTraffic() {
         ProviderHealthTracker tracker = new ProviderHealthTracker(50);
 
-        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker));
+        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker, configWithNoKeys()));
 
         assertEquals(7, providers.size());
         assertEquals(
@@ -50,7 +58,7 @@ class HealthHandlerTest {
         ProviderHealthTracker tracker = new ProviderHealthTracker(50);
         tracker.record("openai", 429);
 
-        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker));
+        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker, configWithNoKeys()));
         assertEquals(7, providers.size());
 
         Map<String, Object> openai = findByName(providers, "openai");
@@ -68,7 +76,7 @@ class HealthHandlerTest {
         ProviderHealthTracker tracker = new ProviderHealthTracker(50);
         tracker.record("cohere", 403);
 
-        Map<String, Object> cohere = findByName(providersOf(HealthHandler.buildJson(tracker)), "cohere");
+        Map<String, Object> cohere = findByName(providersOf(HealthHandler.buildJson(tracker, configWithNoKeys())), "cohere");
         assertFalse((Boolean) cohere.get("healthy"));
         assertTrue((Boolean) cohere.get("overBudget"));
         assertFalse((Boolean) cohere.get("rateLimited"));
@@ -80,7 +88,7 @@ class HealthHandlerTest {
         tracker.record("elevenlabs", 429);
         tracker.record("stability", 402);
 
-        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker));
+        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker, configWithNoKeys()));
 
         Map<String, Object> elevenlabs = findByName(providers, "elevenlabs");
         assertFalse((Boolean) elevenlabs.get("healthy"));
@@ -91,6 +99,31 @@ class HealthHandlerTest {
         assertFalse((Boolean) stability.get("healthy"));
         assertFalse((Boolean) stability.get("rateLimited"));
         assertTrue((Boolean) stability.get("overBudget"));
+    }
+
+    @Test
+    void enabledReflectsWhetherAnApiKeyIsConfigured() {
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_OPENAI_APIKEY", "sk-test-123");
+        env.put("AICOIN_PROXY_ANTHROPIC_APIKEY", "anthropic-key-abc");
+        ProxyConfig config = ProxyConfig.load(env);
+        ProviderHealthTracker tracker = new ProviderHealthTracker(50);
+
+        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker, config));
+
+        assertEquals(Boolean.TRUE, findByName(providers, "openai").get("enabled"));
+        assertEquals(Boolean.TRUE, findByName(providers, "anthropic").get("enabled"));
+        assertEquals(Boolean.FALSE, findByName(providers, "google").get("enabled"));
+        assertEquals(Boolean.FALSE, findByName(providers, "mistral").get("enabled"));
+    }
+
+    @Test
+    void noConfiguredKeysMeansNoProviderIsEnabled() {
+        List<Map<String, Object>> providers = providersOf(
+                HealthHandler.buildJson(new ProviderHealthTracker(50), configWithNoKeys()));
+        for (Map<String, Object> p : providers) {
+            assertEquals(Boolean.FALSE, p.get("enabled"), p.get("name") + " should default to disabled with no apiKey");
+        }
     }
 
     private static Map<String, Object> findByName(List<Map<String, Object>> providers, String name) {

@@ -1,9 +1,13 @@
 server:
   port: 8080
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  ssl: false
 aicoin:
-  eventsUrl: http://localhost:9944/events
-  priceUrl: http://localhost:9944/price
-  balanceUrlBase: http://localhost:9944
+  decayHalflifeDays: 110.0
+  freeClaimCooldownSeconds: 3600
 providers:
   openai:
     baseUrl: https://api.openai.com

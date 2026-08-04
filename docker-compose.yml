@@ -1,30 +1,17 @@
 services:
-  aicoin-node:
-    build: ./aicoin
-    # -dynamodb-table points at a real AWS DynamoDB table; there is no local
-    # stand-in for DynamoDB the way redis:alpine stood in for a managed
-    # cache (see CONTRACT.md's "Docker / docker-compose" section). AWS
-    # region/credentials come from the standard SDK environment below —
-    # set them (or mount a real AWS credentials file / use an instance
-    # role in production) before bringing this up, or leave
-    # AICOIN_DYNAMODB_TABLE unset to run the primary pure in-memory.
-    command: ["-http=:9944", "-role=primary", "-dynamodb-table=${AICOIN_DYNAMODB_TABLE:-}"]
-    environment:
-      AWS_REGION: "${AWS_REGION:-eu-west-1}"
-      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
-      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
-      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1000"]
     ports:
-      - "9944:9944"
+      - "6379:6379"
 
   aicoin-proxy:
     build: ./aicoin-proxy
     environment:
       AICOIN_PROXY_PORT: "8080"
-      AICOIN_PROXY_AICOIN_EVENTS_URL: "http://aicoin-node:9944/events"
-      AICOIN_PROXY_AICOIN_PRICE_URL: "http://aicoin-node:9944/price"
-      AICOIN_PROXY_AICOIN_BALANCE_URL_BASE: "http://aicoin-node:9944"
+      AICOIN_PROXY_REDIS_HOST: "redis"
+      AICOIN_PROXY_REDIS_PORT: "6379"
     ports:
       - "8080:8080"
     depends_on:
-      - aicoin-node
+      - redis

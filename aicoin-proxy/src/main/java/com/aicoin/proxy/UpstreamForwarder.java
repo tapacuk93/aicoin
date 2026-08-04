@@ -28,6 +28,7 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.util.CharsetUtil;
 import java.net.URI;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
@@ -38,11 +39,12 @@ import java.util.logging.Logger;
  * to a provider's baseUrl, forwards method/path+query/headers/body unchanged,
  * and relays the upstream's exact response back to the original client.
  *
- * On success with a 2xx status, fires an async cost event POST (see
- * {@link EventPublisher}) without blocking or affecting the client response.
- * On connection failure or non-2xx status, no event is emitted; connection
- * failures are surfaced to the client as a synthetic 502 (there is no real
- * upstream status to relay in that case — see README.md for this assumption).
+ * On success with a 2xx status, records an event into {@link AicoinLedger}
+ * (fire-and-forget, in-process) without blocking or affecting the client
+ * response. On connection failure or non-2xx status, no event is emitted;
+ * connection failures are surfaced to the client as a synthetic 502 (there
+ * is no real upstream status to relay in that case — see README.md for this
+ * assumption).
  *
  * Every real upstream response — 2xx or not — is also recorded into that
  * provider's {@link ProviderHealthTracker} rolling window, feeding {@code
@@ -61,14 +63,14 @@ final class UpstreamForwarder {
     static void forward(EventLoopGroup group,
                          ProxyConfig config,
                          ProviderHealthTracker healthTracker,
+                         AicoinLedger ledger,
                          ChannelHandlerContext clientCtx,
                          HttpMethod method,
                          String forwardUri,
                          List<Map.Entry<String, String>> headers,
                          byte[] body,
                          String baseUrl,
-                         String provider,
-                         String userId) {
+                         String provider) {
         URI upstreamUri;
         try {
             upstreamUri = new URI(baseUrl);
@@ -98,7 +100,7 @@ final class UpstreamForwarder {
                         }
                         ch.pipeline().addLast(new HttpClientCodec());
                         ch.pipeline().addLast(new HttpObjectAggregator(MAX_CONTENT_LENGTH));
-                        ch.pipeline().addLast(new UpstreamResponseHandler(config, healthTracker, clientCtx, provider, userId));
+                        ch.pipeline().addLast(new UpstreamResponseHandler(config, healthTracker, ledger, clientCtx, provider));
                     }
                 });
 
@@ -141,17 +143,17 @@ final class UpstreamForwarder {
     private static final class UpstreamResponseHandler extends SimpleChannelInboundHandler<FullHttpResponse> {
         private final ProxyConfig config;
         private final ProviderHealthTracker healthTracker;
+        private final AicoinLedger ledger;
         private final ChannelHandlerContext clientCtx;
         private final String provider;
-        private final String userId;
 
-        UpstreamResponseHandler(ProxyConfig config, ProviderHealthTracker healthTracker, ChannelHandlerContext clientCtx,
-                                 String provider, String userId) {
+        UpstreamResponseHandler(ProxyConfig config, ProviderHealthTracker healthTracker, AicoinLedger ledger,
+                                 ChannelHandlerContext clientCtx, String provider) {
             this.config = config;
             this.healthTracker = healthTracker;
+            this.ledger = ledger;
             this.clientCtx = clientCtx;
             this.provider = provider;
-            this.userId = userId;
         }
 
         @Override
@@ -170,7 +172,7 @@ final class UpstreamForwarder {
                 String bodyStr = new String(bodyBytes, CharsetUtil.UTF_8);
                 double costUsd = CostCalculator.computeCostUsd(
                         bodyStr, config.getCostPerTokenUsd(), config.getDefaultCostUsdPerCall());
-                EventPublisher.publish(upstreamCtx.channel().eventLoop(), config.getEventsUrl(), userId, provider, costUsd);
+                ledger.recordEvent(provider, costUsd, Instant.now());
             }
 
             upstreamCtx.close();

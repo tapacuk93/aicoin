@@ -22,6 +22,8 @@ public final class ProxyMain {
     public static void main(String[] args) throws InterruptedException {
         ProxyConfig config = ProxyConfig.load();
         ProviderHealthTracker healthTracker = new ProviderHealthTracker(config.getHealthWindowSize());
+        AicoinLedger ledger = new AicoinLedger(
+                config.getRedisHost(), config.getRedisPort(), config.getRedisPassword(), config.isRedisSsl());
 
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
         EventLoopGroup workerGroup = new NioEventLoopGroup();
@@ -29,7 +31,7 @@ public final class ProxyMain {
             ServerBootstrap bootstrap = new ServerBootstrap();
             bootstrap.group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
-                    .childHandler(new ProxyServerInitializer(config, workerGroup, healthTracker))
+                    .childHandler(new ProxyServerInitializer(config, workerGroup, healthTracker, ledger))
                     .childOption(ChannelOption.AUTO_READ, true)
                     .option(ChannelOption.SO_BACKLOG, 1024);
 
@@ -39,6 +41,7 @@ public final class ProxyMain {
         } finally {
             bossGroup.shutdownGracefully();
             workerGroup.shutdownGracefully();
+            ledger.close();
         }
     }
 }
