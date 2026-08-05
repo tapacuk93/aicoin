@@ -139,3 +139,4 @@ faucet, transfer.
 - [`aicoin-proxy/`](./aicoin-proxy/) — the Java/Netty proxy and the Redis-backed coin ledger. Full flag/API/config reference in its own README.
 - [`e2e/run.sh`](./e2e/run.sh) — the end-to-end test.
 - [`site/`](./site/) — the static landing page deployed at aicoin.oeaio.com.
+- [`ios/AICoinWallet/`](./ios/AICoinWallet/) — a native SwiftUI wallet app (bundle `com.oeaio.aicoin.wallet`) mirroring `wallet.html`'s capabilities.
