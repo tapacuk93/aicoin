@@ -20,7 +20,8 @@ class ProxyConfigTest {
         assertFalse(config.isRedisSsl());
         assertEquals(110.0, config.getDecayHalflifeDays(), 1e-12);
         assertEquals(3600, config.getFreeClaimCooldownSeconds());
-        assertEquals("free-coins-counter.txt", config.getFreeCoinsCounterFile());
+        assertEquals(120, config.getSignatureSkewSeconds());
+        assertEquals(100, config.getFreeCoinsPoolSize());
 
         assertEquals("https://api.openai.com", config.getProviderBaseUrl("openai"));
         assertEquals("https://api.anthropic.com", config.getProviderBaseUrl("anthropic"));
@@ -87,7 +88,8 @@ class ProxyConfigTest {
         env.put("AICOIN_PROXY_REDIS_SSL", "true");
         env.put("AICOIN_PROXY_DECAY_HALFLIFE_DAYS", "30");
         env.put("AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS", "60");
-        env.put("AICOIN_PROXY_FREE_COINS_COUNTER_FILE", "/tmp/some-counter.txt");
+        env.put("AICOIN_PROXY_SIGNATURE_SKEW_SECONDS", "30");
+        env.put("AICOIN_PROXY_FREE_COINS_POOL_SIZE", "5");
 
         ProxyConfig config = ProxyConfig.load(env);
         assertEquals(16379, config.getRedisPort());
@@ -95,7 +97,8 @@ class ProxyConfigTest {
         assertTrue(config.isRedisSsl());
         assertEquals(30.0, config.getDecayHalflifeDays(), 1e-12);
         assertEquals(60, config.getFreeClaimCooldownSeconds());
-        assertEquals("/tmp/some-counter.txt", config.getFreeCoinsCounterFile());
+        assertEquals(30, config.getSignatureSkewSeconds());
+        assertEquals(5, config.getFreeCoinsPoolSize());
     }
 
     @Test

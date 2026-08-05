@@ -8,6 +8,8 @@ redis:
 aicoin:
   decayHalflifeDays: 110.0
   freeClaimCooldownSeconds: 3600
+  signatureSkewSeconds: 120
+  freeCoinsPoolSize: 100
 providers:
   openai:
     baseUrl: https://api.openai.com
@@ -47,7 +49,5 @@ providers:
 pricing:
   costPerTokenUsd: 0.000002
   defaultCostUsdPerCall: 0.001
-freeCoins:
-  counterFile: free-coins-counter.txt
 health:
   windowSize: 50

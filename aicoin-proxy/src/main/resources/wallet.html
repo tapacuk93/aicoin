@@ -24,7 +24,7 @@
     line-height: 1.55;
   }
   main {
-    max-width: 480px;
+    max-width: 520px;
     margin: 0 auto;
     padding: 3rem 1.5rem 4rem;
   }
@@ -58,7 +58,7 @@
     color: var(--muted);
     margin-bottom: 0.35rem;
   }
-  input {
+  input, select, textarea {
     width: 100%;
     background: #0b0d10;
     border: 1px solid var(--border);
@@ -67,8 +67,10 @@
     padding: 0.55rem 0.7rem;
     font-size: 0.95rem;
     margin-bottom: 0.9rem;
+    font-family: inherit;
   }
-  input:focus { outline: 1px solid var(--accent); }
+  textarea { resize: vertical; min-height: 4.5rem; font-family: ui-monospace, monospace; font-size: 0.85rem; }
+  input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); }
   button {
     background: var(--accent);
     color: #06251a;
@@ -87,6 +89,11 @@
     border: 1px solid var(--border);
     color: var(--fg);
   }
+  button.danger {
+    background: transparent;
+    border: 1px solid var(--danger);
+    color: var(--danger);
+  }
   .row { display: flex; gap: 0.6rem; }
   .row > * { flex: 1; }
   .balance {
@@ -100,6 +107,13 @@
     font-size: 0.85rem;
     margin: 0.25rem 0 0;
   }
+  .address-line {
+    font-size: 0.8rem;
+    color: var(--muted);
+    word-break: break-all;
+    margin: 0.35rem 0 0;
+  }
+  .address-line code { color: var(--fg); }
   .msg {
     font-size: 0.85rem;
     margin-top: 0.5rem;
@@ -115,9 +129,10 @@
     padding: 0.6rem 0.8rem;
     margin-bottom: 1.5rem;
   }
+  .caveat.danger { border-color: var(--danger); color: var(--fg); }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  #walletScreen, #connectScreen { display: none; }
+  #walletScreen, #connectScreen, #backupScreen { display: none; }
   .switch-link {
     display: inline-block;
     margin-top: 0.75rem;
@@ -125,78 +140,261 @@
     color: var(--muted);
     cursor: pointer;
   }
+  .divider {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin: 1.25rem 0;
+  }
+  details summary {
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  details[open] summary { color: var(--fg); }
 </style>
 </head>
 <body>
 <main>
   <h1>aicoin wallet</h1>
-  <p class="tagline">Check your balance, claim your hourly free coin, and send coins to another wallet.</p>
-
-  <div class="caveat">
-    <strong>Draft/prototype:</strong> a "wallet key" here is just a plain
-    identifier, not a real cryptographic private key — anyone who knows it
-    can view/spend from that wallet. Don't reuse a real secret as your key.
-  </div>
+  <p class="tagline">A real Ed25519 keypair. Your private key never leaves this browser.</p>
 
   <div id="connectScreen" class="card">
-    <h2>Wallet key</h2>
-    <label for="walletKeyInput">Enter or create a wallet key</label>
-    <input id="walletKeyInput" type="text" placeholder="e.g. my-wallet-42" autocomplete="off">
-    <button id="connectBtn">Open wallet</button>
+    <h2>Open wallet</h2>
+    <button id="generateBtn">Generate new wallet</button>
+    <div class="divider">or</div>
+    <label for="importInput">Import from a backup private key</label>
+    <textarea id="importInput" placeholder="128 hex characters"></textarea>
+    <button id="importBtn" class="secondary">Import wallet</button>
     <div id="connectMsg" class="msg"></div>
+  </div>
+
+  <div id="backupScreen" class="card">
+    <h2>Save your private key</h2>
+    <div class="caveat danger">
+      This is the <strong>only</strong> copy of your private key. Anyone who has it can spend and send your
+      coins. If you lose it, there is no way to recover this wallet &mdash; save it somewhere safe before continuing.
+    </div>
+    <label for="backupOutput">Private key (back this up now)</label>
+    <textarea id="backupOutput" readonly></textarea>
+    <button id="copyBackupBtn" class="secondary">Copy to clipboard</button>
+    <button id="backupContinueBtn" style="margin-top: 0.6rem;">I've saved it &mdash; continue</button>
   </div>
 
   <div id="walletScreen">
     <div class="card">
       <h2>Balance</h2>
       <p class="balance"><span id="balanceValue">&mdash;</span> <span class="unit">aicoin</span></p>
-      <p class="price-line">1 aicoin &asymp; $<span id="priceValue">&mdash;</span> &middot; wallet key: <code id="walletKeyLabel"></code></p>
-      <span class="switch-link" id="switchWalletLink">use a different wallet key</span>
+      <p class="price-line">1 aicoin &asymp; $<span id="priceValue">&mdash;</span></p>
+      <p class="address-line">your address (safe to share &mdash; used to receive coins): <code id="addressLabel"></code></p>
+      <span class="switch-link" id="switchWalletLink">use a different wallet</span>
+    </div>
+
+    <div class="card">
+      <h2>Private key</h2>
+      <details>
+        <summary>Show / re-save backup</summary>
+        <div class="caveat danger" style="margin-top: 0.75rem;">Never share this. Anyone with it controls this wallet.</div>
+        <textarea id="revealBackupOutput" readonly style="margin-top: 0.5rem;"></textarea>
+      </details>
     </div>
 
     <div class="card">
       <h2>Free coin faucet</h2>
-      <p class="price-line">1 free coin per wallet per hour.</p>
-      <button id="claimBtn">Claim free coin</button>
+      <p class="price-line">Up to 10 free coins per wallet per hour, while the shared pool lasts.</p>
+      <p class="price-line"><span id="freeCoinsRemainingValue">&hellip;</span> free coins left in the pool</p>
+      <button id="claimBtn">Claim free coins</button>
       <div id="claimMsg" class="msg"></div>
     </div>
 
     <div class="card">
       <h2>Send coins</h2>
-      <label for="toWalletInput">To wallet key</label>
-      <input id="toWalletInput" type="text" placeholder="recipient-wallet-key" autocomplete="off">
+      <label for="toAddressInput">To address</label>
+      <input id="toAddressInput" type="text" placeholder="recipient's 64-char address" autocomplete="off">
       <label for="amountInput">Amount</label>
       <input id="amountInput" type="number" step="any" min="0" placeholder="0.10">
       <button id="sendBtn">Send</button>
       <div id="sendMsg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>API tokens</h2>
+      <p class="price-line">
+        A token lets whoever holds it make AI-proxy calls billed to this wallet &mdash; use it as your
+        <code>X-Api-Key</code> in scripts, no signing needed per call. A token <strong>cannot</strong> claim
+        free coins or send coins; only your private key can do that.
+      </p>
+      <label for="tokenExpirySelect">Expires after</label>
+      <select id="tokenExpirySelect">
+        <option value="1">1 day</option>
+        <option value="7" selected>7 days</option>
+        <option value="30">30 days</option>
+        <option value="90">90 days</option>
+      </select>
+      <button id="generateTokenBtn">Generate token</button>
+      <div id="tokenMsg" class="msg"></div>
+      <textarea id="tokenOutput" readonly style="display:none; margin-top: 0.75rem;"></textarea>
+      <button id="copyTokenBtn" class="secondary" style="display:none; margin-top: 0.4rem;">Copy to clipboard</button>
+      <button id="revokeTokensBtn" class="danger" style="margin-top: 0.75rem;">Revoke all tokens</button>
+      <div id="revokeMsg" class="msg"></div>
     </div>
   </div>
 </main>
 
 <script>
 (function () {
-  const STORAGE_KEY = "aicoin.walletKey";
+  const STORAGE_KEY = "aicoin.wallet";
   const connectScreen = document.getElementById("connectScreen");
+  const backupScreen = document.getElementById("backupScreen");
   const walletScreen = document.getElementById("walletScreen");
-  const walletKeyInput = document.getElementById("walletKeyInput");
-  const connectBtn = document.getElementById("connectBtn");
+  const generateBtn = document.getElementById("generateBtn");
+  const importInput = document.getElementById("importInput");
+  const importBtn = document.getElementById("importBtn");
   const connectMsg = document.getElementById("connectMsg");
+  const backupOutput = document.getElementById("backupOutput");
+  const copyBackupBtn = document.getElementById("copyBackupBtn");
+  const backupContinueBtn = document.getElementById("backupContinueBtn");
+  const revealBackupOutput = document.getElementById("revealBackupOutput");
   const balanceValue = document.getElementById("balanceValue");
   const priceValue = document.getElementById("priceValue");
-  const walletKeyLabel = document.getElementById("walletKeyLabel");
+  const freeCoinsRemainingValue = document.getElementById("freeCoinsRemainingValue");
+  const addressLabel = document.getElementById("addressLabel");
   const switchWalletLink = document.getElementById("switchWalletLink");
   const claimBtn = document.getElementById("claimBtn");
   const claimMsg = document.getElementById("claimMsg");
-  const toWalletInput = document.getElementById("toWalletInput");
+  const toAddressInput = document.getElementById("toAddressInput");
   const amountInput = document.getElementById("amountInput");
   const sendBtn = document.getElementById("sendBtn");
   const sendMsg = document.getElementById("sendMsg");
+  const tokenExpirySelect = document.getElementById("tokenExpirySelect");
+  const generateTokenBtn = document.getElementById("generateTokenBtn");
+  const tokenMsg = document.getElementById("tokenMsg");
+  const tokenOutput = document.getElementById("tokenOutput");
+  const copyTokenBtn = document.getElementById("copyTokenBtn");
+  const revokeTokensBtn = document.getElementById("revokeTokensBtn");
+  const revokeMsg = document.getElementById("revokeMsg");
 
-  let walletKey = null;
+  let wallet = null; // { d, x, privateKey, address }
+  let pendingBackupBlob = null;
 
   function setMsg(el, text, ok) {
     el.textContent = text || "";
     el.className = "msg" + (text ? (ok ? " ok" : " err") : "");
+  }
+
+  function showScreen(screen) {
+    connectScreen.style.display = screen === "connect" ? "block" : "none";
+    backupScreen.style.display = screen === "backup" ? "block" : "none";
+    walletScreen.style.display = screen === "wallet" ? "block" : "none";
+  }
+
+  // ---- encoding helpers ----
+
+  function bytesToHex(bytes) {
+    return Array.from(bytes).map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+  }
+
+  function hexToBytes(hex) {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return bytes;
+  }
+
+  function base64UrlToBytes(b64url) {
+    const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64.length % 4 === 0 ? "" : "=".repeat(4 - (b64.length % 4));
+    const bin = atob(b64 + pad);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  function bytesToBase64Url(bytes) {
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  function addressFromX(xBase64Url) {
+    return bytesToHex(base64UrlToBytes(xBase64Url));
+  }
+
+  function backupBlobOf(w) {
+    return bytesToHex(base64UrlToBytes(w.d)) + bytesToHex(base64UrlToBytes(w.x));
+  }
+
+  async function copyToClipboard(text, msgEl) {
+    try {
+      await navigator.clipboard.writeText(text);
+      if (msgEl) setMsg(msgEl, "Copied.", true);
+    } catch (e) {
+      if (msgEl) setMsg(msgEl, "Couldn't copy automatically — select the text and copy manually.", false);
+    }
+  }
+
+  // ---- key management ----
+
+  async function generateWallet() {
+    const keyPair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    const jwk = await crypto.subtle.exportKey("jwk", keyPair.privateKey);
+    return loadWalletFromJwk(jwk.d, jwk.x);
+  }
+
+  async function loadWalletFromJwk(d, x) {
+    const privateKey = await crypto.subtle.importKey(
+        "jwk", { kty: "OKP", crv: "Ed25519", d: d, x: x, key_ops: ["sign"], ext: true },
+        { name: "Ed25519" }, true, ["sign"]);
+    return { d: d, x: x, privateKey: privateKey, address: addressFromX(x) };
+  }
+
+  async function importWalletFromBackupBlob(blob) {
+    const trimmed = blob.trim();
+    if (!/^[0-9a-fA-F]{128}$/.test(trimmed)) {
+      throw new Error("Private key must be exactly 128 hex characters.");
+    }
+    const d = bytesToBase64Url(hexToBytes(trimmed.slice(0, 64)));
+    const x = bytesToBase64Url(hexToBytes(trimmed.slice(64, 128)));
+    return loadWalletFromJwk(d, x);
+  }
+
+  function persistWallet(w) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ d: w.d, x: w.x }));
+  }
+
+  async function loadPersistedWallet() {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) return null;
+    try {
+      const parsed = JSON.parse(saved);
+      return await loadWalletFromJwk(parsed.d, parsed.x);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // ---- signing ----
+
+  async function sha256Hex(bytes) {
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return bytesToHex(new Uint8Array(digest));
+  }
+
+  async function signedFetch(method, path, bodyBytes) {
+    const timestamp = Date.now();
+    const bodyHashHex = await sha256Hex(bodyBytes);
+    const message = wallet.address + "\n" + timestamp + "\n" + method + "\n" + path + "\n" + bodyHashHex;
+    const signatureBuf = await crypto.subtle.sign({ name: "Ed25519" }, wallet.privateKey, new TextEncoder().encode(message));
+    const signatureHex = bytesToHex(new Uint8Array(signatureBuf));
+    return fetch(path, {
+      method: method,
+      headers: {
+        "X-Api-Key": wallet.address,
+        "X-Api-Signature": signatureHex,
+        "X-Api-Timestamp": String(timestamp),
+        "Content-Type": "application/json"
+      },
+      body: bodyBytes.length > 0 ? bodyBytes : undefined
+    });
   }
 
   async function fetchJson(url, options) {
@@ -206,9 +404,10 @@
     return { status: res.status, body: body };
   }
 
+  // ---- balance / price ----
+
   async function refreshBalance() {
-    if (!walletKey) return;
-    const { status, body } = await fetchJson("/wallet/api/balance/" + encodeURIComponent(walletKey));
+    const { status, body } = await fetchJson("/wallet/api/balance/" + encodeURIComponent(wallet.address));
     if (status === 200 && body) {
       balanceValue.textContent = body.balance;
     }
@@ -221,55 +420,93 @@
     }
   }
 
-  function openWallet(key) {
-    walletKey = key;
-    localStorage.setItem(STORAGE_KEY, key);
-    walletKeyLabel.textContent = key;
-    connectScreen.style.display = "none";
-    walletScreen.style.display = "block";
-    refreshBalance();
-    refreshPrice();
+  async function refreshFreeCoinsRemaining() {
+    const { status, body } = await fetchJson("/free-coins/available");
+    if (status === 200 && body) {
+      freeCoinsRemainingValue.textContent = body.available;
+    }
   }
 
-  connectBtn.addEventListener("click", function () {
-    const key = walletKeyInput.value.trim();
-    if (!key) {
-      setMsg(connectMsg, "Enter a wallet key first.", false);
-      return;
+  // ---- screen transitions ----
+
+  function enterWallet(w) {
+    wallet = w;
+    addressLabel.textContent = w.address;
+    revealBackupOutput.value = backupBlobOf(w);
+    showScreen("wallet");
+    refreshBalance();
+    refreshPrice();
+    refreshFreeCoinsRemaining();
+  }
+
+  function goToBackupScreen(w, thenPersist) {
+    pendingBackupBlob = { wallet: w, persist: thenPersist };
+    backupOutput.value = backupBlobOf(w);
+    showScreen("backup");
+  }
+
+  generateBtn.addEventListener("click", async function () {
+    generateBtn.disabled = true;
+    setMsg(connectMsg, "Generating...", true);
+    try {
+      const w = await generateWallet();
+      goToBackupScreen(w, true);
+    } catch (e) {
+      setMsg(connectMsg, "Could not generate a wallet in this browser: " + e.message, false);
+    } finally {
+      generateBtn.disabled = false;
     }
-    setMsg(connectMsg, "", true);
-    openWallet(key);
   });
 
-  walletKeyInput.addEventListener("keydown", function (e) {
-    if (e.key === "Enter") connectBtn.click();
+  importBtn.addEventListener("click", async function () {
+    setMsg(connectMsg, "", true);
+    try {
+      const w = await importWalletFromBackupBlob(importInput.value);
+      persistWallet(w);
+      enterWallet(w);
+    } catch (e) {
+      setMsg(connectMsg, e.message, false);
+    }
+  });
+
+  copyBackupBtn.addEventListener("click", function () {
+    copyToClipboard(backupOutput.value, null);
+  });
+
+  backupContinueBtn.addEventListener("click", function () {
+    if (!pendingBackupBlob) return;
+    if (pendingBackupBlob.persist) persistWallet(pendingBackupBlob.wallet);
+    enterWallet(pendingBackupBlob.wallet);
+    pendingBackupBlob = null;
   });
 
   switchWalletLink.addEventListener("click", function () {
-    walletKey = null;
+    wallet = null;
     localStorage.removeItem(STORAGE_KEY);
-    walletKeyInput.value = "";
-    walletScreen.style.display = "none";
-    connectScreen.style.display = "block";
+    importInput.value = "";
+    setMsg(connectMsg, "", true);
+    showScreen("connect");
   });
+
+  // ---- claim ----
 
   claimBtn.addEventListener("click", async function () {
     claimBtn.disabled = true;
     setMsg(claimMsg, "Claiming...", true);
     try {
-      const { status, body } = await fetchJson("/wallet/api/claim", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: walletKey })
-      });
-      if (status === 200 && body && body.granted) {
-        setMsg(claimMsg, "Claimed 1 free aicoin!", true);
+      const res = await signedFetch("POST", "/wallet/api/claim", new Uint8Array(0));
+      const body = await res.json().catch(function () { return null; });
+      if (res.status === 200 && body && body.granted) {
+        setMsg(claimMsg, "Claimed " + body.amount + " free aicoin!", true);
         refreshBalance();
-      } else if (status === 429 && body) {
+      } else if (res.status === 429 && body && body.reason === "pool_exhausted") {
+        setMsg(claimMsg, "The shared free-coins pool is empty.", false);
+      } else if (res.status === 429 && body) {
         setMsg(claimMsg, "Not eligible yet — next free coin at " + body.next_eligible_at, false);
       } else {
         setMsg(claimMsg, (body && body.error) || "Claim failed.", false);
       }
+      refreshFreeCoinsRemaining();
     } catch (e) {
       setMsg(claimMsg, "Network error — try again.", false);
     } finally {
@@ -277,24 +514,24 @@
     }
   });
 
+  // ---- send ----
+
   sendBtn.addEventListener("click", async function () {
-    const to = toWalletInput.value.trim();
+    const to = toAddressInput.value.trim();
     const amount = parseFloat(amountInput.value);
     if (!to || !(amount > 0)) {
-      setMsg(sendMsg, "Enter a recipient wallet key and a positive amount.", false);
+      setMsg(sendMsg, "Enter a recipient address and a positive amount.", false);
       return;
     }
     sendBtn.disabled = true;
     setMsg(sendMsg, "Sending...", true);
     try {
-      const { status, body } = await fetchJson("/wallet/api/transfer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from_user_id: walletKey, to_user_id: to, amount: amount })
-      });
-      if (status === 200) {
+      const bodyBytes = new TextEncoder().encode(JSON.stringify({ to_user_id: to, amount: amount }));
+      const res = await signedFetch("POST", "/wallet/api/transfer", bodyBytes);
+      const body = await res.json().catch(function () { return null; });
+      if (res.status === 200) {
         setMsg(sendMsg, "Sent " + amount + " aicoin to " + to + ".", true);
-        toWalletInput.value = "";
+        toAddressInput.value = "";
         amountInput.value = "";
         refreshBalance();
       } else {
@@ -307,12 +544,64 @@
     }
   });
 
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved) {
-    openWallet(saved);
-  } else {
-    connectScreen.style.display = "block";
-  }
+  // ---- API tokens ----
+
+  generateTokenBtn.addEventListener("click", async function () {
+    generateTokenBtn.disabled = true;
+    setMsg(tokenMsg, "Generating...", true);
+    try {
+      const expiryDays = parseInt(tokenExpirySelect.value, 10);
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const payload = { addr: wallet.address, iat: nowSeconds, exp: nowSeconds + expiryDays * 86400 };
+      const payloadB64 = bytesToBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
+      const signatureBuf = await crypto.subtle.sign({ name: "Ed25519" }, wallet.privateKey, new TextEncoder().encode(payloadB64));
+      const token = payloadB64 + "." + bytesToBase64Url(new Uint8Array(signatureBuf));
+      tokenOutput.value = token;
+      tokenOutput.style.display = "block";
+      copyTokenBtn.style.display = "block";
+      setMsg(tokenMsg, "Token generated — use it as your X-Api-Key.", true);
+    } catch (e) {
+      setMsg(tokenMsg, "Could not generate a token: " + e.message, false);
+    } finally {
+      generateTokenBtn.disabled = false;
+    }
+  });
+
+  copyTokenBtn.addEventListener("click", function () {
+    copyToClipboard(tokenOutput.value, tokenMsg);
+  });
+
+  revokeTokensBtn.addEventListener("click", async function () {
+    revokeTokensBtn.disabled = true;
+    setMsg(revokeMsg, "Revoking...", true);
+    try {
+      const res = await signedFetch("POST", "/wallet/api/revoke-tokens", new Uint8Array(0));
+      if (res.status === 200) {
+        setMsg(revokeMsg, "All previously issued tokens are now revoked.", true);
+        tokenOutput.style.display = "none";
+        copyTokenBtn.style.display = "none";
+        tokenOutput.value = "";
+      } else {
+        const body = await res.json().catch(function () { return null; });
+        setMsg(revokeMsg, (body && body.error) || "Revoke failed.", false);
+      }
+    } catch (e) {
+      setMsg(revokeMsg, "Network error — try again.", false);
+    } finally {
+      revokeTokensBtn.disabled = false;
+    }
+  });
+
+  // ---- boot ----
+
+  (async function () {
+    const saved = await loadPersistedWallet();
+    if (saved) {
+      enterWallet(saved);
+    } else {
+      showScreen("connect");
+    }
+  })();
 })();
 </script>
 </body>

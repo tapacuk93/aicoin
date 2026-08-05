@@ -38,6 +38,8 @@ redis:
 aicoin:
   decayHalflifeDays: 110.0        # AICOIN_PROXY_DECAY_HALFLIFE_DAYS
   freeClaimCooldownSeconds: 3600  # AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS
+  signatureSkewSeconds: 120       # AICOIN_PROXY_SIGNATURE_SKEW_SECONDS
+  freeCoinsPoolSize: 100          # AICOIN_PROXY_FREE_COINS_POOL_SIZE
 providers:
   openai:
     baseUrl: https://api.openai.com          # AICOIN_PROXY_OPENAI_BASEURL
@@ -77,8 +79,6 @@ providers:
 pricing:
   costPerTokenUsd: 0.000002       # AICOIN_PROXY_COST_PER_TOKEN_USD
   defaultCostUsdPerCall: 0.001    # AICOIN_PROXY_DEFAULT_COST_USD
-freeCoins:
-  counterFile: free-coins-counter.txt   # AICOIN_PROXY_FREE_COINS_COUNTER_FILE — bundled classpath/resource file, single integer, admin-managed via git push + CI redeploy
 ```
 `baseUrl` may be `http://` (plain, used by tests against a local mock) or `https://` (real providers, TLS client). `elevenlabs`/`stability` exist so client apps that call voice (ElevenLabs) or image (Stability) generation, not just text, can route through the wallet too — OpenAI's own image generation (DALL-E) already goes through the existing `openai` entry, since it's the same `api.openai.com` host.
 
@@ -88,35 +88,59 @@ The client calls the proxy at **exactly the same path** the real provider would 
 2. **Removes** the `X-AI` header (the upstream provider must never see it).
 3. Forwards the **same method + same path/query + same body** to `providers.<name>.baseUrl`, with all original client headers preserved *except*: `Host`/`Content-Length` (recomputed) and whatever the client sent in `authHeader` for this provider (or the raw `Authorization`) — the proxy **overwrites/injects its own `apiKey`** as that provider's paid credential (via `authHeader`+`authPrefix`, or as a `authQueryParamName` query param when `authAsQueryParam` is true, e.g. Google).
 
-### Auth — wallet id IS the API key, gated on a positive balance
-There is no separate provider key or API key concept for the client — **the caller's aicoin wallet id doubles as their API key.** Required header: `X-Api-Key: <walletId>`. Missing → `401 {"error":"missing X-Api-Key (wallet id)"}`.
-Before forwarding, the proxy reads the wallet's balance directly from the ledger (in-process Redis call, no network hop). If that call fails/times out (Redis unreachable) → `503 {"error":"could not validate wallet"}`. Otherwise:
-- `balance <= 0` → `402 {"error":"insufficient aicoin balance","balance":<value>}` — do not forward to the AI provider, do not record an event. This is deliberately a simple binary gate, not per-call metering: a call doesn't debit anything from the balance (a priced event still contributes 0 to balance, unchanged); "insufficient" just means the wallet has never received a faucet claim/transfer, or has sent away everything it had. Client apps integrating the wallet should treat `402` from this proxy as the one and only signal to fall back to the user's own provider key for that request (see each app's own integration notes for exactly how).
-- `balance > 0` → proceed, exactly as before. Note the ledger returns a balance (possibly 0) for *any* syntactically-valid id, even one never used before, so there's no cryptographic identity check here — that's a documented assumption, not a security guarantee.
+### Auth for wallet-management actions (live Ed25519 signature)
+A wallet is a real Ed25519 keypair — the **address** (used both to receive transfers and to identify the signer of a request) is the hex-encoded raw 32-byte public key (64 hex chars). The private key never leaves the browser wallet page. `POST /wallet/api/claim`, `POST /wallet/api/transfer`, and `POST /wallet/api/revoke-tokens` each require three headers, signed fresh per request:
+- `X-Api-Key: <address>` — 64 hex chars.
+- `X-Api-Signature: <signature>` — 128 hex chars, the raw 64-byte `R‖S` Ed25519 signature (no DER wrapping — matches WebCrypto's `sign()` output and Java's `Signature.verify(byte[])` input directly).
+- `X-Api-Timestamp: <epochMillis>` — checked against server time within `aicoin.signatureSkewSeconds` (default 120s), bounding replay risk without a nonce-tracking store (a documented, not hardened, trade-off).
+
+Canonical signed message (one construction for all three actions):
+```
+address + "\n" + timestampMillis + "\n" + httpMethod + "\n" + requestPath + "\n" + hex(sha256(requestBody))
+```
+`requestPath` has no query string. Server-side, the address's raw 32 bytes are wrapped in the fixed 12-byte X.509 SubjectPublicKeyInfo DER prefix for Ed25519 (`302a300506032b6570032100`, per RFC 8410) to reconstruct a `PublicKey` via `KeyFactory.getInstance("Ed25519")`, then `Signature.getInstance("Ed25519").verify(...)` checks the signature — no manual pre-hashing, Ed25519's own internal hashing (RFC 8032) is what the JCA provider does. Any missing header, malformed hex, out-of-skew timestamp, or failed verification → `401 {"error":"<specific reason>"}`, never a `500`.
+
+The verified address becomes the identity for that request — `POST /wallet/api/claim` needs no body (identity = the signer); `POST /wallet/api/transfer`'s body is `{"to_user_id":"<address>","amount":N}` only, `from` is always the verified signer, never trusted from the body; `POST /wallet/api/revoke-tokens` needs no body either.
+
+### Auth for AI-proxy calls (API tokens)
+Requiring every single AI-proxy HTTP request to be individually signed would be impractical for scripts/SDKs/curl. Instead, the wallet page issues a **token** — signed once by the private key, then used many times as a plain `X-Api-Key` bearer value, with no signing needed at call time. Format: `<base64url(payloadJson)>.<base64url(signature)>` (JWT-shaped, self-verifying — the embedded address *is* the verification key, so only Ed25519 is ever used, no algorithm-confusion surface). Payload: `{"addr":"<64-hex address>","iat":<epochSeconds>,"exp":<epochSeconds>}`; the signature covers the exact `base64url(payload)` string bytes (sign the encoded form, not the raw JSON — no key-ordering ambiguity).
+
+Issuance is entirely client-side — the server never sees the private key and has no "issue token" endpoint. The generic `X-AI`-routed proxy path accepts **only** tokens as `X-Api-Key` (bare addresses are not accepted here — those are for the live-signature scheme above): missing/malformed → `401`; on success, the same balance-gate logic below applies using the token's embedded address.
+
+**Revocation**: `POST /wallet/api/revoke-tokens` (live-signed, see above) sets `aicoin:token-revoked-before:{address}` to the current time in Redis. Verifying a token additionally checks `iat > revokedBefore` (missing key = never revoked). A token authenticates AI-proxy calls only — it **cannot** claim free coins or transfer coins, since those require the raw private key. A leaked token can run up AI-proxy usage against the wallet's balance until revoked/expired; it cannot drain coins via transfer.
+
+### Balance gate (applies after either auth scheme verifies an address)
+**1 aicoin is worth 1 paid AI call — enforced, not just a tagline.** Before forwarding, the proxy atomically checks and debits exactly 1.0 aicoin from the verified address's balance (`AicoinLedger.debitForCall`, a single Redis Lua script — no separate read-then-write, so two concurrent calls can't both pass a stale check and overdraw). If that call fails/times out (Redis unreachable) → `503 {"error":"could not validate wallet"}`. Otherwise:
+- Balance `< 1.0` → `402 {"error":"insufficient aicoin balance","balance":<value>}` — do not forward to the AI provider, no debit applied. Client apps integrating the wallet should treat `402` from this proxy as the one and only signal to fall back to the user's own provider key for that request (see each app's own integration notes for exactly how).
+- Balance `>= 1.0` → the 1.0 is debited immediately and the call proceeds. If the upstream call then fails (non-2xx or connection failure), the debit is **refunded** — see "Forwarding" below — since the proxy was never actually billed by the real provider for a call that didn't complete. This is also the boundary that keeps *paid* calls (successful, billed, feeding the price formula) cleanly distinguished from *free* activity (a faucet claim mints coins but is never treated as a call; a failed call never counts as paid and its debit is reversed).
 
 ### Forwarding (non-streaming, full aggregation is fine)
 1. Inbound: `HttpServerCodec` + `HttpObjectAggregator` → routing handler.
 2. Outbound: new Netty client `Bootstrap` per request to upstream host, `HttpClientCodec` + `HttpObjectAggregator`, TLS via `SslContextBuilder.forClient()` when baseUrl is https.
 3. Write the upstream's exact status/headers/body back to the client.
-4. If upstream status is 2xx: compute `cost_usd` — parse JSON body for `usage.total_tokens` (OpenAI-style) or `usage.input_tokens`+`usage.output_tokens` (Anthropic-style); `cost_usd = tokens * pricing.costPerTokenUsd` if found, else `pricing.defaultCostUsdPerCall`. Record the event into the ledger in-process (fire-and-forget `ZADD`, see below) — must never block or fail the client response; log+ignore errors.
-5. Non-2xx/connection failure: relay the real error to the client, do not record an event.
+4. If upstream status is 2xx (a genuine paid call): compute `cost_usd` — parse JSON body for `usage.total_tokens` (OpenAI-style) or `usage.input_tokens`+`usage.output_tokens` (Anthropic-style); `cost_usd = tokens * pricing.costPerTokenUsd` if found, else `pricing.defaultCostUsdPerCall`. Record the event into the ledger in-process (fire-and-forget `ZADD`, see below) — must never block or fail the client response; log+ignore errors. The 1.0 aicoin debit from the balance gate stands.
+5. Non-2xx/connection failure: relay the real error to the client (or a synthetic `502` for a connection failure — there is no real status to relay), do not record a price event, and **refund** the 1.0 aicoin debited before forwarding (`AicoinLedger.refund`) — the call never actually cost the proxy anything, so it shouldn't cost the wallet anything either.
 
 ### Ledger (Redis)
 
 Backed by a single Redis instance — ElastiCache for Redis (with snapshotting
 enabled for durability) in production, a plain `redis:7-alpine` container
 locally/in e2e. No signing, no chain, no replication: this is a centralized
-ledger, and the only two ways to acquire aicoin are the free faucet and a
-peer transfer — a priced AI call never mints anything, it only feeds the
-price formula below.
+ledger, and the only two ways to *acquire* aicoin are the free faucet and a
+peer transfer. A paid AI call *spends* exactly 1.0 aicoin (refunded if the
+call fails) and separately feeds the price formula with its real USD cost —
+two independent effects of the same event, never conflated with faucet
+claims or transfers.
 
 Keys, namespaced under `aicoin:`:
 
 | Concept | Key | Type | Notes |
 |---|---|---|---|
-| Price event log | `aicoin:events` | ZSET | member = `<costUsd>\|<uuid>` (uuid keeps members unique since ZSET dedupes by member), score = event epoch-millis timestamp |
-| Wallet balance | `aicoin:balance:{userId}` | String (float) | `INCRBYFLOAT`, plain atomic op |
-| Last free-claim time | `aicoin:lastclaim:{userId}` | String (epoch-millis) | read/written only inside the claim Lua script below |
+| Price event log | `aicoin:events` | ZSET | member = `<costUsd>\|<uuid>` (uuid keeps members unique since ZSET dedupes by member), score = event epoch-millis timestamp — fed **only** by genuine 2xx paid calls, never by claims/transfers/failed calls |
+| Wallet balance | `aicoin:balance:{address}` | String (float) | `INCRBYFLOAT` for claim mints, transfers, and call refunds (all plain atomic ops); check-then-debit for claims/transfers/call-debits uses the Lua scripts below |
+| Last free-claim time | `aicoin:lastclaim:{address}` | String (epoch-millis) | read/written only inside the claim Lua script below |
+| Free-coins pool remaining | `aicoin:free-coins-remaining` | String (int) | shared across every wallet, lazily initialized to `aicoin.freeCoinsPoolSize` on first-ever claim; read/written only inside the claim Lua script |
+| Token revocation | `aicoin:token-revoked-before:{address}` | String (epoch-millis) | set by `POST /wallet/api/revoke-tokens`; missing = never revoked |
 
 **Price (final formula, v2: smooth exponential decay)** — unchanged math from
 before, now computed by fetching the full event log rather than folding
@@ -159,47 +183,67 @@ Named checkpoints (informational only — computed from the one formula above), 
 `price_usd = Σ(weight(age_i) * cost_usd_i) / Σ(weight(age_i))` over every
 event. Zero events → `price_usd = 0`. Implemented as a pure function
 (`PriceCalculator`) over the events fetched from Redis, so it's unit-testable
-without a live Redis connection.
+without a live Redis connection. This is purely a market-rate *signal*, distinct
+from the fixed 1-aicoin-per-call spending rate above — a call always costs
+1.0 aicoin regardless of what the price formula currently reports.
 
-**Balance** is a plain running counter, no log needed — `free_claim` mints
-+1.0, `transfer` debits sender/credits recipient, a priced event never
-touches it.
-
-**Atomicity**: claim and transfer are check-then-mutate operations that must
-be atomic against concurrent calls for the same wallet, or two simultaneous
-claims could both mint, or two simultaneous transfers could both pass a
-stale balance check and overdraw. Both run as single Redis Lua `EVAL`
-scripts, which Redis executes atomically with respect to every other client:
-- **Claim**: read `lastclaim:{userId}`; if `now - lastclaim < cooldownMillis`
-  return not-eligible; else `SET lastclaim now` + `INCRBYFLOAT balance 1.0`
-  and return granted.
+**Atomicity**: claim, transfer, and the per-call debit are all check-then-mutate
+operations that must be atomic against concurrent calls for the same wallet
+(or the same shared pool), or two concurrent claims could both mint/double-count
+the pool, two concurrent transfers could both pass a stale balance check and
+overdraw, or two concurrent calls could both debit past zero. All three run
+as single Redis Lua `EVAL` scripts, which Redis executes atomically with
+respect to every other client:
+- **Claim**: read `lastclaim:{address}`; if `now - lastclaim < cooldownMillis`
+  return not-eligible (`reason:"cooldown"`). Else read the shared pool
+  counter (lazily initialized to `aicoin.freeCoinsPoolSize` if never set);
+  if `< freeClaimAmount` (10 aicoin) return not-eligible
+  (`reason:"pool_exhausted"`) without touching balance/cooldown — a claim
+  always grants the full amount or nothing, never a partial top-up of
+  whatever's left in the pool. Else `SET lastclaim now` +
+  `INCRBYFLOAT balance freeClaimAmount` + decrement the pool counter by
+  the same amount, and return granted.
 - **Transfer**: read `balance:{from}`; if `< amount` return insufficient;
   else `INCRBYFLOAT balance:from -amount` + `INCRBYFLOAT balance:to amount`.
+- **Call debit**: read `balance:{address}`; if `< 1.0` return insufficient
+  (with the current balance, for the `402` body); else `INCRBYFLOAT balance
+  -1.0` and return success. A failed upstream call reverses this with a
+  plain `INCRBYFLOAT balance +1.0` (no script needed for a pure increment).
 
 ### Free-coin faucet
-`POST /wallet/api/claim` — body `{"user_id":"..."}`. Runs the claim script
-above with cooldown `aicoin.freeClaimCooldownSeconds` (default 3600 = 1
-hour). Granted → `200 {"granted":true,"next_eligible_at":"RFC3339"}`. Not yet
-eligible → `429 {"granted":false,"next_eligible_at":"RFC3339"}`.
+`POST /wallet/api/claim` — live-signed, no body needed. Runs the claim script
+above against both the per-wallet cooldown (`aicoin.freeClaimCooldownSeconds`,
+default 3600 = 1 hour) and the shared pool (`aicoin.freeCoinsPoolSize`,
+default 100 — a single pool shared across *every* wallet, not a per-wallet
+allowance). A successful claim mints a fixed `freeClaimAmount` of 10 aicoin
+(hardcoded, not configurable — the "up to 10 free coins per wallet per hour"
+rate limit is *this* fixed amount plus the hour-long cooldown, not a
+separate rolling counter). Granted →
+`200 {"granted":true,"amount":10,"next_eligible_at":"RFC3339"}`.
+Not yet eligible → `429 {"granted":false,"reason":"cooldown","next_eligible_at":"RFC3339"}`.
+Pool exhausted → `429 {"granted":false,"reason":"pool_exhausted"}` — this can
+reject a wallet that has never claimed before, since the constraint is
+global, not per-wallet; the cooldown check always runs first, so a
+still-on-cooldown wallet gets `reason:"cooldown"` even if the pool also
+happens to be empty.
 
 ### Peer transfer (buy/sell)
-`POST /wallet/api/transfer` — body `{"from_user_id":"...","to_user_id":"...","amount":N}`. Runs the transfer script above. Validates `amount > 0` and current balance of `from_user_id >= amount`; if not, `400 {"error":"insufficient balance"}`. This is the *entire* buy/sell mechanism — no real money, no external payment rail: "buying" is just receiving a transfer, "selling" is sending one.
+`POST /wallet/api/transfer` — live-signed, body `{"to_user_id":"<address>","amount":N}` (`from` is always the verified signer). Runs the transfer script above. Validates `amount > 0` and current balance of the signer `>= amount`; if not, `400 {"error":"insufficient balance"}`. This is the *entire* buy/sell mechanism — no real money, no external payment rail: "buying" is just receiving a transfer, "selling" is sending one.
 
 ### Additional proxy-side endpoints
 - `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"half_life_days":110}` computed directly from the ledger — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life. Always includes `Access-Control-Allow-Origin: *` — this is public, read-only data fetched cross-origin by the landing page at aicoin.oeaio.com (a separate origin from the proxy).
-- `GET /free-coins/available` — reads `freeCoins.counterFile` fresh on every request (bundled resource, manually bumped via git push + CI redeploy of the proxy) → `{"available": N}`. Missing/unparseable file → `{"available": 0}`. This is a separate, admin-managed system-wide allowance, distinct from the per-wallet 1-hour claim cooldown above.
+- `GET /free-coins/available` → `{"available": N}` — the real, live remaining count in the shared Redis-backed pool (`AicoinLedger.getFreeCoinsRemaining`), the same counter `POST /wallet/api/claim` atomically decrements. Not a static admin-managed file — this number is authoritative and changes in real time as wallets claim. A ledger-lookup failure resolves to `{"available": 0}`.
 - `GET /health` — for each configured provider (openai, anthropic, google, mistral, cohere, elevenlabs, stability), report whether recent upstream calls have hit rate-limiting or budget errors, and whether the proxy has a real (non-empty) `apiKey` configured for it at all (`enabled`) — this is what the landing page reads to show which AI backends are actually live. Track, per provider, a rolling window of the last `health.windowSize` forwarded calls (config, default 50, env `AICOIN_PROXY_HEALTH_WINDOW_SIZE`): `rateLimited` = true if any upstream response in the window was HTTP 429; `overBudget` = true if any was HTTP 402 or 403; `healthy` = `!rateLimited && !overBudget`. Response: `{"providers":[{"name":"openai","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false}, ...]}` (all providers always listed, even ones with zero calls so far — those default to `healthy:true`/`enabled` reflects config regardless of traffic). Always includes `Access-Control-Allow-Origin: *`, same as `/price`, since the landing page fetches it cross-origin too.
 
 ### Wallet web page
-- `GET /wallet` — serves a bundled static HTML/CSS/JS page (single file, no build step) that lets a user manage a wallet directly in the browser: enter a wallet id (persisted in `localStorage`, labeled "wallet key" in the UI to match how end users think of it, with a visible caveat that it's a plain identifier, not real cryptography), view balance and the current price (calls the existing `GET /price` directly), claim the free-coin faucet, and transfer coins to another wallet id. No auth on the page itself — same posture as everything else here.
-- The page's JS only calls same-origin, relative paths — no CORS needed. Three endpoints support it, all backed directly by the ledger:
-  - `GET /wallet/api/balance/{walletId}` → `{"user_id":"...","balance":N}`
-  - `POST /wallet/api/claim` → see "Free-coin faucet" above
-  - `POST /wallet/api/transfer` → see "Peer transfer" above
-- These three are checked before the generic `X-AI`-header routing/auth logic (same as `/price`, `/free-coins/available`, `/health`) — they need no `X-Api-Key`, since they're the client's only way to interact with a wallet that doesn't have one yet (e.g. before ever claiming a free coin).
+- `GET /wallet` — serves a bundled static HTML/CSS/JS page (single file, no build step) that lets a user manage a wallet directly in the browser: generate a new Ed25519 keypair or import one from a backup blob (private key material stays client-side, in-memory + `localStorage`), view its address/balance/the current price, claim the free-coin faucet, transfer coins to another address, issue an API token (with a selectable expiry), and revoke all previously issued tokens. No auth on the page itself — same posture as everything else here.
+- The page's JS only calls same-origin, relative paths — no CORS needed. Backing endpoints, all backed directly by the ledger:
+  - `GET /wallet/api/balance/{address}` → `{"user_id":"...","balance":N}` — unsigned; a public address's balance is inherently public info, like a blockchain explorer.
+  - `POST /wallet/api/claim`, `POST /wallet/api/transfer`, `POST /wallet/api/revoke-tokens` → live-signed, see "Auth for wallet-management actions" above.
+- The balance-lookup endpoint is checked before the generic `X-AI`-header routing/auth logic (same as `/price`, `/free-coins/available`, `/health`) — it needs no auth, since it's how a wallet checks its own state before ever claiming a free coin.
 
 ### Tests to include
-- JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table (no network/Redis needed).
+- JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, and the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs) — no network/Redis needed.
 
 ## Docker / docker-compose
 - `aicoin-proxy/Dockerfile` — multi-stage: `./gradlew build` in a JDK-17 build stage, copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a JRE-17 runtime image. Entrypoint runs the generated start script.

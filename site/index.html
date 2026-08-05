@@ -129,6 +129,20 @@
     border-color: var(--accent);
   }
   .backend-pill.enabled .dot { background: var(--accent); }
+  pre {
+    background: #0b0d10;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    margin: 0.75rem 0 0;
+  }
+  pre code { background: none; padding: 0; }
+  .steps { margin: 0; padding-left: 1.2rem; }
+  .steps li { margin-bottom: 0.5rem; }
+  .steps li:last-child { margin-bottom: 0; }
 </style>
 </head>
 <body>
@@ -147,8 +161,24 @@
   </div>
 
   <div class="card">
-    <h2>Enabled AI backends</h2>
-    <p class="price-meta">Which providers you can call through the proxy right now.</p>
+    <h2>How to use it</h2>
+    <ol class="steps">
+      <li><a href="https://proxy.aicoin.oeaio.com/wallet">Open the wallet</a> and generate a new keypair &mdash; your address (public key) is what receives coins; your private key never leaves your browser.</li>
+      <li>Claim free coins (up to 10 per wallet per hour, while the shared pool lasts &mdash; <span id="freeCoinsRemaining">&hellip;</span> left) so your balance is positive.</li>
+      <li>Generate an API token from the wallet &mdash; a bearer credential you can use in scripts, no signing needed per call.</li>
+      <li>Call any supported provider through the proxy, same request path as the real API, with two headers:</li>
+    </ol>
+    <pre><code>curl https://proxy.aicoin.oeaio.com/v1/chat/completions \
+  -H "X-AI: openai" \
+  -H "X-Api-Key: &lt;token from the wallet&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'</code></pre>
+    <p class="price-meta" style="margin-top: 0.6rem;"><code>X-AI</code> selects the upstream (see supported providers below); the proxy injects its own paid key so you never need your own. A <code>402</code> response means your aicoin balance ran out &mdash; claim more or buy some from another wallet.</p>
+  </div>
+
+  <div class="card">
+    <h2>Supported providers</h2>
+    <p class="price-meta">Green = the proxy holds a paid API key for this provider right now, so calls with that <code>X-AI</code> value will actually reach the upstream. Gray = not configured yet.</p>
     <div class="backends" id="backendsList">
       <span class="backend-pill"><span class="dot"></span>Loading&hellip;</span>
     </div>
@@ -165,16 +195,8 @@
   </div>
 
   <div class="card">
-    <h2>aicoin&#8209;proxy</h2>
-    <p>Call any AI provider through one proxy &mdash; same request path, only the
-    domain changes. An <code>X-AI</code> header picks the upstream
-    (OpenAI, Anthropic, Google, Mistral, Cohere); the proxy holds the real
-    paid key so you never need your own.</p>
-  </div>
-
-  <div class="card">
     <h2>aicoin</h2>
-    <p>A centralized coin ledger backed by Redis: a 1-coin-per-hour
+    <p>A centralized coin ledger backed by Redis: a 10-coin-per-hour
     faucet, peer-to-peer transfers, and a price that decays smoothly with
     the real historical drop in AI inference cost.</p>
   </div>
@@ -200,6 +222,16 @@
     });
 
   var backendsList = document.getElementById("backendsList");
+  var freeCoinsRemaining = document.getElementById("freeCoinsRemaining");
+  fetch("https://proxy.aicoin.oeaio.com/free-coins/available")
+    .then(function (res) { return res.json(); })
+    .then(function (body) {
+      freeCoinsRemaining.textContent = body.available;
+    })
+    .catch(function () {
+      freeCoinsRemaining.textContent = "?";
+    });
+
   var LABELS = {
     openai: "OpenAI",
     anthropic: "Anthropic",

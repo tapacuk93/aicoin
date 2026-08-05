@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.yaml.snakeyaml.Yaml;
@@ -32,12 +33,26 @@ import org.yaml.snakeyaml.Yaml;
  * ledger endpoints ({@code GET /price}, {@code GET /wallet/api/*}) directly
  * against {@link AicoinLedger}, plus {@code GET /free-coins/available} and
  * {@code GET /health}.
+ *
+ * <p>Two independent auth schemes gate mutating requests, per CONTRACT.md's
+ * auth sections: wallet-management actions (claim/transfer/revoke-tokens)
+ * require a live {@link WalletSignature#verifyLive} signature over each
+ * request; the generic {@code X-AI}-routed proxy path requires a {@link
+ * WalletSignature#verifyToken} API token instead, since routine AI-proxy
+ * traffic needs to work from any HTTP client without implementing
+ * per-request signing.
  */
 public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
 
     private static final Logger LOG = Logger.getLogger(ProxyFrontendHandler.class.getName());
     private static final String X_AI_HEADER = "X-AI";
     private static final String X_API_KEY_HEADER = WalletValidation.HEADER_NAME;
+    private static final String X_API_SIGNATURE_HEADER = "X-Api-Signature";
+    private static final String X_API_TIMESTAMP_HEADER = "X-Api-Timestamp";
+
+    /** 1 aicoin is worth 1 paid AI call — the currency's fixed exchange rate, not a tunable. */
+    private static final double CALL_COST_AICOIN = 1.0;
+    private static final double FREE_CLAIM_AMOUNT_AICOIN = 10.0;
 
     private final ProxyConfig config;
     private final EventLoopGroup clientGroup;
@@ -86,20 +101,32 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
         if (request.method() == HttpMethod.POST && "/wallet/api/claim".equals(path)) {
-            handleClaim(ctx, ByteBufUtil.getBytes(request.content()));
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> handleClaim(ctx, address));
             return;
         }
         if (request.method() == HttpMethod.POST && "/wallet/api/transfer".equals(path)) {
-            handleTransfer(ctx, ByteBufUtil.getBytes(request.content()));
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> handleTransfer(ctx, address, body));
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/wallet/api/revoke-tokens".equals(path)) {
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> handleRevokeTokens(ctx, address));
             return;
         }
 
-        Optional<String> walletIdOpt = WalletValidation.extractWalletId(request.headers().get(X_API_KEY_HEADER));
-        if (!walletIdOpt.isPresent()) {
-            sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, "missing X-Api-Key (wallet id)");
+        Optional<String> apiKeyOpt = WalletValidation.extractWalletId(request.headers().get(X_API_KEY_HEADER));
+        if (!apiKeyOpt.isPresent()) {
+            sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, "missing X-Api-Key (API token)");
             return;
         }
-        String walletId = walletIdOpt.get();
+        String apiKeyHeader = apiKeyOpt.get();
+        Optional<String> peekedAddress = WalletSignature.peekTokenAddress(apiKeyHeader);
+        if (!peekedAddress.isPresent()) {
+            sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, "invalid API token");
+            return;
+        }
 
         Optional<String> providerOpt = ProviderRouting.resolve(request.headers().get(X_AI_HEADER));
         if (!providerOpt.isPresent()) {
@@ -136,16 +163,25 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         byte[] bodyBytes = ByteBufUtil.getBytes(request.content());
         HttpMethod method = request.method();
 
-        ledger.getBalance(walletId, balance -> {
-            WalletValidation.BalanceDecision decision = WalletValidation.decide(balance);
-            if (decision.shouldProceed()) {
-                UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, finalForwardUri,
-                        forwardHeaders, bodyBytes, providerConfig.getBaseUrl(), provider);
-            } else if (decision.isUnreachable()) {
-                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
-            } else {
-                sendInsufficientBalance(ctx, decision.getBalance());
+        ledger.getTokenRevokedBefore(peekedAddress.get(), revokedBefore -> {
+            WalletSignature.AuthResult authResult = WalletSignature.verifyToken(
+                    apiKeyHeader, Instant.now().toEpochMilli(), revokedBefore.orElse(null));
+            if (!authResult.isValid()) {
+                sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, authResult.getFailureReason());
+                return;
             }
+            String walletAddress = authResult.getAddress();
+            ledger.debitForCall(walletAddress, CALL_COST_AICOIN, debit -> {
+                if (!debit.isReachable()) {
+                    sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
+                } else if (!debit.isSuccess()) {
+                    sendInsufficientBalance(ctx, debit.getBalance());
+                } else {
+                    UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, finalForwardUri,
+                            forwardHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
+                            walletAddress, CALL_COST_AICOIN);
+                }
+            });
         });
     }
 
@@ -153,6 +189,31 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         LOG.log(Level.WARNING, "error handling inbound request", cause);
         ctx.close();
+    }
+
+    /**
+     * Verifies the three live-signature headers ({@code X-Api-Key},
+     * {@code X-Api-Signature}, {@code X-Api-Timestamp}) against the given
+     * request's method/path/body, per {@link WalletSignature#verifyLive}.
+     * On success, invokes {@code onVerified} with the signer's address —
+     * the only identity these wallet-management actions trust, never a
+     * body field. On failure, responds {@code 401} with the specific
+     * reason and never invokes {@code onVerified}.
+     */
+    private void requireLiveSignature(ChannelHandlerContext ctx, FullHttpRequest request, byte[] body,
+                                       Consumer<String> onVerified) {
+        String address = request.headers().get(X_API_KEY_HEADER);
+        String signature = request.headers().get(X_API_SIGNATURE_HEADER);
+        String timestamp = request.headers().get(X_API_TIMESTAMP_HEADER);
+        String path = pathOnly(request.uri());
+
+        WalletSignature.AuthResult result = WalletSignature.verifyLive(address, signature, timestamp,
+                request.method().name(), path, body, Instant.now().toEpochMilli(), config.getSignatureSkewSeconds());
+        if (!result.isValid()) {
+            sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, result.getFailureReason());
+            return;
+        }
+        onVerified.accept(result.getAddress());
     }
 
     private void sendPrice(ChannelHandlerContext ctx) {
@@ -180,32 +241,32 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         });
     }
 
-    private void handleClaim(ChannelHandlerContext ctx, byte[] body) {
-        Optional<String> userIdOpt = parseUserId(body);
-        if (!userIdOpt.isPresent()) {
-            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "missing user_id");
-            return;
-        }
-        String userId = userIdOpt.get();
-        ledger.claimFreeCoins(userId, config.getFreeClaimCooldownSeconds(), result -> {
+    private void handleClaim(ChannelHandlerContext ctx, String address) {
+        ledger.claimFreeCoins(address, config.getFreeClaimCooldownSeconds(), config.getFreeCoinsPoolSize(), FREE_CLAIM_AMOUNT_AICOIN, result -> {
             if (!result.isReachable()) {
                 sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
                 return;
             }
+            if (result.isPoolExhausted()) {
+                byte[] bytes = "{\"granted\":false,\"reason\":\"pool_exhausted\"}".getBytes(CharsetUtil.UTF_8);
+                sendJson(ctx, HttpResponseStatus.TOO_MANY_REQUESTS, bytes);
+                return;
+            }
             String nextEligibleAt = result.getNextEligibleAt().toString();
             if (result.isGranted()) {
-                byte[] bytes = ("{\"granted\":true,\"next_eligible_at\":" + jsonString(nextEligibleAt) + "}")
+                byte[] bytes = ("{\"granted\":true,\"amount\":" + formatNumber(FREE_CLAIM_AMOUNT_AICOIN)
+                        + ",\"next_eligible_at\":" + jsonString(nextEligibleAt) + "}")
                         .getBytes(CharsetUtil.UTF_8);
                 sendJson(ctx, HttpResponseStatus.OK, bytes);
             } else {
-                byte[] bytes = ("{\"granted\":false,\"next_eligible_at\":" + jsonString(nextEligibleAt) + "}")
+                byte[] bytes = ("{\"granted\":false,\"reason\":\"cooldown\",\"next_eligible_at\":" + jsonString(nextEligibleAt) + "}")
                         .getBytes(CharsetUtil.UTF_8);
                 sendJson(ctx, HttpResponseStatus.TOO_MANY_REQUESTS, bytes);
             }
         });
     }
 
-    private void handleTransfer(ChannelHandlerContext ctx, byte[] body) {
+    private void handleTransfer(ChannelHandlerContext ctx, String fromAddress, byte[] body) {
         Object parsed;
         try {
             parsed = new Yaml().load(new String(body, CharsetUtil.UTF_8));
@@ -218,20 +279,16 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
         Map<?, ?> map = (Map<?, ?>) parsed;
-        Object fromRaw = map.get("from_user_id");
         Object toRaw = map.get("to_user_id");
         Object amountRaw = map.get("amount");
-        if (!(fromRaw instanceof String) || ((String) fromRaw).isEmpty()
-                || !(toRaw instanceof String) || ((String) toRaw).isEmpty()
-                || !(amountRaw instanceof Number)) {
-            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "from_user_id, to_user_id, and amount are required");
+        if (!(toRaw instanceof String) || ((String) toRaw).isEmpty() || !(amountRaw instanceof Number)) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "to_user_id and amount are required");
             return;
         }
-        String from = (String) fromRaw;
         String to = (String) toRaw;
         double amount = ((Number) amountRaw).doubleValue();
 
-        ledger.transfer(from, to, amount, result -> {
+        ledger.transfer(fromAddress, to, amount, result -> {
             if (!result.isReachable()) {
                 sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
             } else if (result.isSuccess()) {
@@ -242,25 +299,27 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         });
     }
 
-    private void sendFreeCoinsAvailable(ChannelHandlerContext ctx) {
-        int available = FreeCoinsCounter.readAvailable(config.getFreeCoinsCounterFile());
-        byte[] bytes = ("{\"available\":" + available + "}").getBytes(CharsetUtil.UTF_8);
-        sendJson(ctx, HttpResponseStatus.OK, bytes);
+    private void handleRevokeTokens(ChannelHandlerContext ctx, String address) {
+        ledger.revokeTokensBefore(address, Instant.now().toEpochMilli(), ok -> {
+            if (!ok) {
+                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not revoke tokens");
+                return;
+            }
+            sendJson(ctx, HttpResponseStatus.OK, "{}".getBytes(CharsetUtil.UTF_8));
+        });
     }
 
-    private static Optional<String> parseUserId(byte[] body) {
-        try {
-            Object parsed = new Yaml().load(new String(body, CharsetUtil.UTF_8));
-            if (parsed instanceof Map) {
-                Object userId = ((Map<?, ?>) parsed).get("user_id");
-                if (userId instanceof String && !((String) userId).isEmpty()) {
-                    return Optional.of((String) userId);
-                }
-            }
-        } catch (Exception e) {
-            // falls through to empty
-        }
-        return Optional.empty();
+    private void sendFreeCoinsAvailable(ChannelHandlerContext ctx) {
+        ledger.getFreeCoinsRemaining(config.getFreeCoinsPoolSize(), remaining -> {
+            int available = remaining.orElse(0);
+            byte[] bytes = ("{\"available\":" + available + "}").getBytes(CharsetUtil.UTF_8);
+            FullHttpResponse response = new DefaultFullHttpResponse(
+                    HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.wrappedBuffer(bytes));
+            response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
+            response.headers().set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+            HttpUtil.setContentLength(response, bytes.length);
+            ctx.writeAndFlush(response);
+        });
     }
 
     private static String pathOnly(String uri) {
@@ -285,12 +344,12 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
 
     /**
      * {@code 402 {"error":"insufficient aicoin balance","balance":<value>}}, per
-     * CONTRACT.md's "Auth — wallet id IS the API key, gated on a positive
-     * balance" section: sent instead of forwarding when the wallet's
-     * reported balance is {@code <= 0}. No upstream call is made and no
-     * event is emitted, same as the 401/503 short-circuit cases above.
+     * CONTRACT.md's "Balance gate" section: sent when {@link
+     * AicoinLedger#debitForCall} finds less than {@link #CALL_COST_AICOIN}
+     * available. No upstream call is made and no debit is applied, same as
+     * the 401/503 short-circuit cases above.
      */
-    private static void sendInsufficientBalance(ChannelHandlerContext ctx, Double balance) {
+    private static void sendInsufficientBalance(ChannelHandlerContext ctx, double balance) {
         byte[] bytes = ("{\"error\":\"insufficient aicoin balance\",\"balance\":" + formatNumber(balance) + "}")
                 .getBytes(CharsetUtil.UTF_8);
         FullHttpResponse response = new DefaultFullHttpResponse(
@@ -332,4 +391,3 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         return sb.toString();
     }
 }
-

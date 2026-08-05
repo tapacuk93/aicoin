@@ -33,16 +33,17 @@ public final class ProxyConfig {
     private final boolean redisSsl;
     private final double decayHalflifeDays;
     private final int freeClaimCooldownSeconds;
+    private final int signatureSkewSeconds;
+    private final int freeCoinsPoolSize;
     private final Map<String, ProviderConfig> providers;
     private final double costPerTokenUsd;
     private final double defaultCostUsdPerCall;
-    private final String freeCoinsCounterFile;
     private final int healthWindowSize;
 
     private ProxyConfig(int port, String redisHost, int redisPort, String redisPassword, boolean redisSsl,
-                         double decayHalflifeDays, int freeClaimCooldownSeconds,
-                         Map<String, ProviderConfig> providers,
-                         double costPerTokenUsd, double defaultCostUsdPerCall, String freeCoinsCounterFile,
+                         double decayHalflifeDays, int freeClaimCooldownSeconds, int signatureSkewSeconds,
+                         int freeCoinsPoolSize, Map<String, ProviderConfig> providers,
+                         double costPerTokenUsd, double defaultCostUsdPerCall,
                          int healthWindowSize) {
         this.port = port;
         this.redisHost = redisHost;
@@ -51,10 +52,11 @@ public final class ProxyConfig {
         this.redisSsl = redisSsl;
         this.decayHalflifeDays = decayHalflifeDays;
         this.freeClaimCooldownSeconds = freeClaimCooldownSeconds;
+        this.signatureSkewSeconds = signatureSkewSeconds;
+        this.freeCoinsPoolSize = freeCoinsPoolSize;
         this.providers = providers;
         this.costPerTokenUsd = costPerTokenUsd;
         this.defaultCostUsdPerCall = defaultCostUsdPerCall;
-        this.freeCoinsCounterFile = freeCoinsCounterFile;
         this.healthWindowSize = healthWindowSize;
     }
 
@@ -88,6 +90,16 @@ public final class ProxyConfig {
         return freeClaimCooldownSeconds;
     }
 
+    /** @return {@code aicoin.signatureSkewSeconds}: max allowed clock skew between a live-signed request's {@code X-Api-Timestamp} and server time. */
+    public int getSignatureSkewSeconds() {
+        return signatureSkewSeconds;
+    }
+
+    /** @return {@code aicoin.freeCoinsPoolSize}: total free-coin claims available across every wallet combined right now (a shared, atomically-decremented pool, not a per-wallet allowance). */
+    public int getFreeCoinsPoolSize() {
+        return freeCoinsPoolSize;
+    }
+
     /** @return the full config entry for the given (already-lowercased, known) provider, or null if unknown. */
     public ProviderConfig getProvider(String provider) {
         return providers.get(provider);
@@ -105,10 +117,6 @@ public final class ProxyConfig {
 
     public double getDefaultCostUsdPerCall() {
         return defaultCostUsdPerCall;
-    }
-
-    public String getFreeCoinsCounterFile() {
-        return freeCoinsCounterFile;
     }
 
     /** @return {@code health.windowSize}: how many of a provider's most recent forwarded calls to track for {@code GET /health}. */
@@ -131,6 +139,8 @@ public final class ProxyConfig {
         boolean redisSsl = getBoolean(yaml, "redis.ssl", false);
         double decayHalflifeDays = getDouble(yaml, "aicoin.decayHalflifeDays", 110.0);
         int freeClaimCooldownSeconds = getInt(yaml, "aicoin.freeClaimCooldownSeconds", 3600);
+        int signatureSkewSeconds = getInt(yaml, "aicoin.signatureSkewSeconds", 120);
+        int freeCoinsPoolSize = getInt(yaml, "aicoin.freeCoinsPoolSize", 100);
 
         Map<String, ProviderConfig> defaults = new LinkedHashMap<>();
         defaults.put("openai", new ProviderConfig("https://api.openai.com", "", "Authorization", "Bearer ", false, null));
@@ -167,7 +177,6 @@ public final class ProxyConfig {
 
         double costPerTokenUsd = getDouble(yaml, "pricing.costPerTokenUsd", 0.000002);
         double defaultCostUsdPerCall = getDouble(yaml, "pricing.defaultCostUsdPerCall", 0.001);
-        String freeCoinsCounterFile = getString(yaml, "freeCoins.counterFile", "free-coins-counter.txt");
         int healthWindowSize = getInt(yaml, "health.windowSize", 50);
 
         // Env var overrides (highest precedence).
@@ -178,14 +187,15 @@ public final class ProxyConfig {
         redisSsl = envBool(env, "AICOIN_PROXY_REDIS_SSL", redisSsl);
         decayHalflifeDays = envDouble(env, "AICOIN_PROXY_DECAY_HALFLIFE_DAYS", decayHalflifeDays);
         freeClaimCooldownSeconds = envInt(env, "AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS", freeClaimCooldownSeconds);
+        signatureSkewSeconds = envInt(env, "AICOIN_PROXY_SIGNATURE_SKEW_SECONDS", signatureSkewSeconds);
+        freeCoinsPoolSize = envInt(env, "AICOIN_PROXY_FREE_COINS_POOL_SIZE", freeCoinsPoolSize);
         costPerTokenUsd = envDouble(env, "AICOIN_PROXY_COST_PER_TOKEN_USD", costPerTokenUsd);
         defaultCostUsdPerCall = envDouble(env, "AICOIN_PROXY_DEFAULT_COST_USD", defaultCostUsdPerCall);
-        freeCoinsCounterFile = envStr(env, "AICOIN_PROXY_FREE_COINS_COUNTER_FILE", freeCoinsCounterFile);
         healthWindowSize = envInt(env, "AICOIN_PROXY_HEALTH_WINDOW_SIZE", healthWindowSize);
 
         return new ProxyConfig(port, redisHost, redisPort, redisPassword, redisSsl,
-                decayHalflifeDays, freeClaimCooldownSeconds, providers, costPerTokenUsd, defaultCostUsdPerCall,
-                freeCoinsCounterFile, healthWindowSize);
+                decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, providers,
+                costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize);
     }
 
     @SuppressWarnings("unchecked")
