@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>aicoin price</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0b0d10;
+    --fg: #e8eaed;
+    --muted: #9aa0a6;
+    --accent: #6ee7b7;
+    --card: #14171c;
+    --border: #23262b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  main {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 4rem;
+  }
+  h1 { font-size: 1.75rem; margin: 0 0 0.25rem; letter-spacing: -0.02em; }
+  .tagline { color: var(--muted); font-size: 0.95rem; margin: 0 0 2rem; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+  }
+  .card h2 {
+    font-size: 0.95rem;
+    margin: 0 0 0.75rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .price-value { font-size: 2.25rem; font-weight: 700; margin: 0; }
+  .price-value .unit { font-size: 1rem; color: var(--muted); font-weight: 400; }
+  .price-meta { color: var(--muted); font-size: 0.85rem; margin: 0.3rem 0 0; }
+  canvas { width: 100%; height: 260px; display: block; }
+  .range-row { display: flex; gap: 0.5rem; margin-bottom: 0.9rem; }
+  .range-row button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 8px;
+    padding: 0.35rem 0.8rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .range-row button.active { border-color: var(--accent); color: var(--accent); }
+  .axis-labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.75rem; margin-top: 0.4rem; }
+  .msg { font-size: 0.85rem; color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<main>
+  <h1>aicoin price</h1>
+  <p class="tagline">A recency-weighted average of real recent AI spend — see <a href="/wallet">the wallet</a> or <a href="/">the homepage</a>.</p>
+
+  <div class="card">
+    <h2>Current price</h2>
+    <p class="price-value">$<span id="priceValue">&mdash;</span> <span class="unit">per aicoin</span></p>
+    <p class="price-meta" id="priceMeta">Loading&hellip;</p>
+  </div>
+
+  <div class="card">
+    <h2>How it changed</h2>
+    <div class="range-row">
+      <button data-points="30" class="active">30 points</button>
+      <button data-points="60">60 points</button>
+      <button data-points="200">200 points</button>
+    </div>
+    <canvas id="chart" width="640" height="260"></canvas>
+    <div class="axis-labels"><span id="axisStart"></span><span id="axisEnd"></span></div>
+    <p class="msg" id="chartMsg">Loading&hellip;</p>
+  </div>
+</main>
+
+<script>
+(function () {
+  var priceValue = document.getElementById("priceValue");
+  var priceMeta = document.getElementById("priceMeta");
+  var canvas = document.getElementById("chart");
+  var ctx = canvas.getContext("2d");
+  var chartMsg = document.getElementById("chartMsg");
+  var axisStart = document.getElementById("axisStart");
+  var axisEnd = document.getElementById("axisEnd");
+  var muted = "#9aa0a6";
+  var accent = "#6ee7b7";
+  var border = "#23262b";
+
+  function fmtDate(ms) {
+    var d = new Date(ms);
+    return d.toISOString().slice(0, 16).replace("T", " ");
+  }
+
+  function drawChart(points) {
+    var w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    if (points.length === 0) {
+      chartMsg.textContent = "No priced calls recorded yet.";
+      axisStart.textContent = "";
+      axisEnd.textContent = "";
+      return;
+    }
+    var prices = points.map(function (p) { return p.price_usd; });
+    var minP = Math.min.apply(null, prices);
+    var maxP = Math.max.apply(null, prices);
+    var scaleMin = minP, scaleMax = maxP;
+    if (scaleMin === scaleMax) { scaleMin -= 1; scaleMax += 1; }
+    var padding = 10;
+    var plotW = w - padding * 2;
+    var plotH = h - padding * 2;
+
+    // gridlines
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    for (var g = 0; g <= 4; g++) {
+      var y = padding + (plotH * g) / 4;
+      ctx.beginPath();
+      ctx.moveTo(padding, y);
+      ctx.lineTo(w - padding, y);
+      ctx.stroke();
+    }
+
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    points.forEach(function (p, i) {
+      var x = padding + (plotW * i) / Math.max(1, points.length - 1);
+      var norm = (p.price_usd - scaleMin) / (scaleMax - scaleMin);
+      var y = padding + plotH * (1 - norm);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    axisStart.textContent = fmtDate(points[0].at) + " UTC";
+    axisEnd.textContent = fmtDate(points[points.length - 1].at) + " UTC";
+    chartMsg.textContent = "min $" + minP.toFixed(6) + " — max $" + maxP.toFixed(6);
+  }
+
+  async function loadHistory(numPoints) {
+    chartMsg.textContent = "Loading...";
+    try {
+      var res = await fetch("/price/history?points=" + numPoints);
+      var body = await res.json();
+      drawChart(body.points || []);
+    } catch (e) {
+      chartMsg.textContent = "Could not load price history.";
+    }
+  }
+
+  document.querySelectorAll(".range-row button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll(".range-row button").forEach(function (b) { b.classList.remove("active"); });
+      btn.classList.add("active");
+      loadHistory(parseInt(btn.dataset.points, 10));
+    });
+  });
+
+  fetch("/price")
+    .then(function (res) { return res.json(); })
+    .then(function (body) {
+      priceValue.textContent = Number(body.price_usd).toFixed(6);
+      priceMeta.textContent = "from " + Number(body.total_spend_usd).toFixed(2)
+        + " USD of real AI spend recorded so far, half-life " + body.half_life_days + " days";
+    })
+    .catch(function () {
+      priceMeta.textContent = "Price unavailable right now.";
+    });
+
+  loadHistory(30);
+})();
+</script>
+</body>
+</html>

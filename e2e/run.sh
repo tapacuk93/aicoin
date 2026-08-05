@@ -18,7 +18,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # jenv resolves the `java` on PATH by searching for a .java-version file
 # upward from the current directory, falling back to a global default if
-# none is found; pin CWD to the repo root (whose .java-version is 17.0.16)
+# none is found; pin CWD to the repo root (whose .java-version is 26.0.2)
 # so the proxy binary launched below doesn't inherit whatever directory
 # this script happened to be invoked from.
 cd "$REPO_ROOT"
@@ -413,6 +413,30 @@ if [ "$code" = "200" ] && [ "$types" = "refund,debit,claim" ]; then
   pass "dave's transaction log is [refund, debit, claim] (most-recent first): $types"
 else
   fail "expected types=refund,debit,claim, got code=$code types=$types: $(cat "$WORKDIR/t19.json")"
+fi
+
+log "--- test 20: /price/history reconstructs the price series from the same event log /price reads live ---"
+code=$(curl -s -o "$WORKDIR/t20.json" -w "%{http_code}" "http://127.0.0.1:$PROXY_PORT/price/history?points=5")
+current_price=$(curl -s "http://127.0.0.1:$PROXY_PORT/price" | python3 -c "import json,sys;print(json.load(sys.stdin)['price_usd'])")
+history_check=$(python3 -c "
+import json
+body = json.load(open('$WORKDIR/t20.json'))
+points = body['points']
+if len(points) != 5:
+    print('wrong point count: %d' % len(points)); exit()
+ats = [p['at'] for p in points]
+if ats != sorted(ats):
+    print('points not in chronological order'); exit()
+last_price = points[-1]['price_usd']
+current = $current_price
+if abs(last_price - current) > 0.01 * max(current, 1e-9):
+    print('last point (%s) does not match live /price (%s)' % (last_price, current)); exit()
+print('ok')
+")
+if [ "$code" = "200" ] && [ "$history_check" = "ok" ]; then
+  pass "price history has 5 chronologically-ordered points, last one matching live /price ($current_price)"
+else
+  fail "expected ok, got code=$code check=$history_check: $(cat "$WORKDIR/t20.json")"
 fi
 
 echo

@@ -42,7 +42,7 @@ Provider API keys aren't set by default — pass them as env vars (see
 
 ## Manual setup (no Docker)
 
-You need a JDK 17 and a local Redis (or Redis-compatible, e.g. Valkey)
+You need a JDK 26 and a local Redis (or Redis-compatible, e.g. Valkey)
 server.
 
 **1. Start Redis:**

@@ -7,12 +7,12 @@ keys here without updating this file.
 
 ```
 aicoin/            (this repo root)
-  aicoin-proxy/     Java 17 + Netty reverse proxy AND the coin ledger (Gradle)
+  aicoin-proxy/     Java 26 + Netty reverse proxy AND the coin ledger (Gradle)
   e2e/              end-to-end test
   site/             static landing page (aicoin.oeaio.com)
 ```
 
-## aicoin-proxy (Java 17 + Netty, Gradle)
+## aicoin-proxy (Java 26 + Netty, Gradle)
 
 Run: `./gradlew run` (application plugin), Netty 4.1.x + Lettuce (Redis
 client) from Maven Central. Fully async — no framework (no Spring).
@@ -237,6 +237,8 @@ happens to be empty.
 - `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"half_life_days":110}` computed directly from the ledger — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life. Always includes `Access-Control-Allow-Origin: *` — this is public, read-only data fetched cross-origin by the landing page at aicoin.oeaio.com (a separate origin from the proxy).
 - `GET /free-coins/available` → `{"available": N}` — the real, live remaining count in the shared Redis-backed pool (`AicoinLedger.getFreeCoinsRemaining`), the same counter `POST /wallet/api/claim` atomically decrements. Not a static admin-managed file — this number is authoritative and changes in real time as wallets claim. A ledger-lookup failure resolves to `{"available": 0}`.
 - `GET /health` — for each configured provider (openai, anthropic, google, mistral, cohere, elevenlabs, stability), report whether recent upstream calls have hit rate-limiting or budget errors, and whether the proxy has a real (non-empty) `apiKey` configured for it at all (`enabled`) — this is what the landing page reads to show which AI backends are actually live. Track, per provider, a rolling window of the last `health.windowSize` forwarded calls (config, default 50, env `AICOIN_PROXY_HEALTH_WINDOW_SIZE`): `rateLimited` = true if any upstream response in the window was HTTP 429; `overBudget` = true if any was HTTP 402 or 403; `healthy` = `!rateLimited && !overBudget`. Response: `{"providers":[{"name":"openai","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false}, ...]}` (all providers always listed, even ones with zero calls so far — those default to `healthy:true`/`enabled` reflects config regardless of traffic). Always includes `Access-Control-Allow-Origin: *`, same as `/price`, since the landing page fetches it cross-origin too.
+- `GET /price/history?points=N` (default 60, max 500) → `{"half_life_days":110,"points":[{"at":epochMillis,"price_usd":N}, ...]}` — reconstructs how `price_usd` arrived at its current value: `N` evenly-spaced samples between the earliest recorded event and now, each computed by re-running the exact same price formula as if `now` were that sample's timestamp, using only the events that had actually happened by then (a naive re-use of the full event list per sample would let a "future" event's clock-skew-clamped weight of 1.0 leak into a past sample). Zero events → `{"points":[]}`, not an error. Always includes `Access-Control-Allow-Origin: *`, same as `/price`.
+- `GET /price/chart` — a bundled static page: current price plus a canvas-drawn line graph of `/price/history`, with buttons to change the sample count. No auth, same posture as `/wallet`/`/admin`'s page markup.
 
 ### Wallet web page
 - `GET /wallet` — serves a bundled static HTML/CSS/JS page (single file, no build step) that lets a user manage a wallet directly in the browser: generate a new Ed25519 keypair or import one from a backup blob (private key material stays client-side, in-memory + `localStorage`), view its address/balance/the current price, claim the free-coin faucet, transfer coins to another address, issue an API token (with a selectable expiry), and revoke all previously issued tokens. No auth on the page itself — same posture as everything else here.
@@ -274,5 +276,5 @@ history, so it needs its own, separate auth.
 - JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs), and the admin token's constant-time comparison + address-format validation — no network/Redis needed.
 
 ## Docker / docker-compose
-- `aicoin-proxy/Dockerfile` — multi-stage: `./gradlew build` in a JDK-17 build stage, copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a JRE-17 runtime image. Entrypoint runs the generated start script.
+- `aicoin-proxy/Dockerfile` — multi-stage: `./gradlew build` in a JDK-26 build stage, copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a JRE-26 runtime image. Entrypoint runs the generated start script.
 - Repo-root `docker-compose.yml`: `redis` (`redis:7-alpine`, `--save 60 1000` snapshotting), `aicoin-proxy` (built from `aicoin-proxy/Dockerfile`, pointed at `redis` via `AICOIN_PROXY_REDIS_HOST`/`_PORT`). Production points those env vars at a real ElastiCache endpoint instead.

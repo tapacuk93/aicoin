@@ -28,7 +28,7 @@ meant to stand on its own.
 
 ## Running
 
-You need a JDK 17 and a Redis (or Redis-compatible, e.g. Valkey) server
+You need a JDK 26 and a Redis (or Redis-compatible, e.g. Valkey) server
 reachable at `redis.host`/`redis.port` (default `localhost:6379`).
 
 ```
@@ -339,6 +339,11 @@ just the Java-side shape:
 - `computePrice(halfLifeDays, callback)` — `ZRANGE ... WITHSCORES` over
   `aicoin:events`, then folds the recency-weighted average via the pure
   `PriceCalculator.compute` (no Redis dependency, fully unit-tested).
+- `computePriceHistory(numPoints, halfLifeDays, callback)` — fetches
+  `aicoin:events` once, then calls `PriceCalculator.compute` once per
+  sample point with the event list filtered to `timestamp <= sampleTime`
+  (skipping that filter would let a "future" event's clock-skew-clamped
+  weight of 1.0 leak into a past sample). Backs `GET /price/history`.
 - `revokeTokensBefore(address, nowMillis, callback)` — Redis `SET
   aicoin:token-revoked-before:{address} nowMillis`.
 - `getTokenRevokedBefore(address, callback)` — Redis `GET`, `Optional.empty`
@@ -394,6 +399,17 @@ of them block an event-loop thread.
   zero forwarded calls so far — those default to
   `healthy:true`/`rateLimited:false`/`overBudget:false`; `enabled` reflects
   configuration, not traffic.
+- `GET /price/history?points=N` (default 60, max 500) — reconstructs the
+  price series: `N` evenly-spaced samples between the earliest recorded
+  event and now, each re-running `PriceCalculator.compute` as if `now` were
+  that sample's timestamp, filtered to only the events that had actually
+  happened by then (`AicoinLedger.computePriceHistory`). Returns
+  `{"half_life_days":110,"points":[{"at":epochMillis,"price_usd":N}, ...]}`;
+  zero events → `{"points":[]}`. Always includes
+  `Access-Control-Allow-Origin: *`, same as `/price`.
+- `GET /price/chart` — the bundled price-chart page (`price-chart.html`):
+  current price plus a canvas-drawn line graph of `/price/history`, with
+  buttons to switch the sample count.
 - `GET /wallet` — the browser wallet page (bundled `wallet.html`): generate
   or import an Ed25519 keypair, view address/balance/price, claim/transfer
   (live-signed), and issue/revoke API tokens.
@@ -455,6 +471,9 @@ JUnit5 pure-function tests, with no network/Redis dependency required:
   admin-token constant-time comparison (exact match only; the actual
   `X-Admin-Token` header check + the empty-token-disables-everything
   behavior need a live request/config, covered by `e2e/run.sh`).
+- `PriceChartHandlerTest` — the `?points=` query-param parsing: defaults
+  when absent, clamps below the minimum (2) and above the maximum (500),
+  falls back to the default on non-numeric input.
 - `ProviderHealthTrackerTest` — the rolling-window health computation:
   `rateLimited`/`overBudget`/`healthy` derivation from a sequence of
   synthetic status codes, per-provider independence, and window-eviction
@@ -521,9 +540,11 @@ against real claim/debit/refund activity.
   the window. Only genuine upstream responses — 2xx or not — are recorded,
   which is also exactly the status the health signals (`429`/`402`/`403`)
   are about.
-- **Toolchain.** This project targets Java 17 (`java.toolchain.languageVersion
-  = 17` in `build.gradle`), matching the repo-root `.java-version`
-  (`17.0.16`).
+- **Toolchain.** This project targets Java 26 (`java.toolchain.languageVersion
+  = 26` in `build.gradle`), matching the repo-root `.java-version`
+  (`26.0.2`) — the latest available JDK release at the time this was
+  written, not the latest LTS (25); bump both together if that's ever a
+  problem (e.g. once `eclipse-temurin` drops image support for it).
 - **Claim/transfer/per-call-debit atomicity.** The contract doesn't mandate a
   specific Redis mechanism for the check-then-mutate operations in the
   ledger (free-coins pool decrement + cooldown, transfer overdraft check,

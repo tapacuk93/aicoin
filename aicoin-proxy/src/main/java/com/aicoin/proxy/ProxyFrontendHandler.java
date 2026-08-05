@@ -75,6 +75,14 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             sendPrice(ctx);
             return;
         }
+        if (request.method() == HttpMethod.GET && "/price/chart".equals(path)) {
+            PriceChartHandler.servePage(ctx);
+            return;
+        }
+        if (request.method() == HttpMethod.GET && "/price/history".equals(path)) {
+            PriceChartHandler.serveHistory(ctx, request, ledger, config);
+            return;
+        }
         if (request.method() == HttpMethod.GET && "/free-coins/available".equals(path)) {
             sendFreeCoinsAvailable(ctx);
             return;

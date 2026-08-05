@@ -241,6 +241,52 @@ final class AicoinLedger implements AutoCloseable {
         });
     }
 
+    /**
+     * Reconstructs how {@code price_usd} arrived at its current value: {@code numPoints} evenly-spaced
+     * samples between the earliest recorded event and now, each computed by re-running {@link
+     * PriceCalculator#compute} as if {@code now} were that sample's timestamp — using, critically, only
+     * the events that had actually happened by then. (Passing the *full* event list to every sample
+     * would be wrong: {@link PriceCalculator#weight} clamps a negative age to a full weight of 1.0, so an
+     * event from next week would incorrectly dominate a price sample from yesterday.) No events yet →
+     * an empty list, not an error. {@link Optional#empty()} means the lookup itself failed.
+     */
+    void computePriceHistory(int numPoints, double halfLifeDays, Consumer<Optional<List<PricePoint>>> onResult) {
+        commands.zrangeWithScores(EVENTS_KEY, 0, -1).whenComplete((entries, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger price-history computation failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            if (entries.isEmpty()) {
+                onResult.accept(Optional.of(List.of()));
+                return;
+            }
+            List<PriceCalculator.Event> events = new ArrayList<>(entries.size());
+            double earliestMillis = Double.MAX_VALUE;
+            for (ScoredValue<String> entry : entries) {
+                events.add(new PriceCalculator.Event(parseCost(entry.getValue()), entry.getScore()));
+                earliestMillis = Math.min(earliestMillis, entry.getScore());
+            }
+            double nowMillis = Instant.now().toEpochMilli();
+            int sampleCount = Math.max(numPoints, 2);
+            List<PricePoint> points = new ArrayList<>(sampleCount);
+            for (int i = 0; i < sampleCount; i++) {
+                double sampleMillis = (earliestMillis == nowMillis)
+                        ? nowMillis
+                        : earliestMillis + (nowMillis - earliestMillis) * i / (double) (sampleCount - 1);
+                List<PriceCalculator.Event> eventsSoFar = new ArrayList<>();
+                for (PriceCalculator.Event event : events) {
+                    if (event.timestampMillis <= sampleMillis) {
+                        eventsSoFar.add(event);
+                    }
+                }
+                double sampledPrice = PriceCalculator.compute(eventsSoFar, sampleMillis, halfLifeDays).getPriceUsd();
+                points.add(new PricePoint((long) sampleMillis, sampledPrice));
+            }
+            onResult.accept(Optional.of(points));
+        });
+    }
+
     /** Marks every API token issued for {@code address} at or before {@code nowMillis} as revoked. */
     void revokeTokensBefore(String address, long nowMillis, Consumer<Boolean> onResult) {
         commands.set(tokenRevokedBeforeKey(address), String.valueOf(nowMillis)).whenComplete((reply, err) -> {
@@ -511,6 +557,25 @@ final class AicoinLedger implements AutoCloseable {
 
         int getTransactionCount() {
             return transactionCount;
+        }
+    }
+
+    /** One sample in {@link #computePriceHistory}'s reconstructed series: what {@code price_usd} was as of {@code atMillis}. */
+    static final class PricePoint {
+        private final long atMillis;
+        private final double priceUsd;
+
+        PricePoint(long atMillis, double priceUsd) {
+            this.atMillis = atMillis;
+            this.priceUsd = priceUsd;
+        }
+
+        long getAtMillis() {
+            return atMillis;
+        }
+
+        double getPriceUsd() {
+            return priceUsd;
         }
     }
 }
