@@ -58,6 +58,7 @@ aicoin:
   freeClaimCooldownSeconds: 3600  # AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS
   signatureSkewSeconds: 120       # AICOIN_PROXY_SIGNATURE_SKEW_SECONDS
   freeCoinsPoolSize: 100          # AICOIN_PROXY_FREE_COINS_POOL_SIZE
+  adminToken: ""                  # AICOIN_PROXY_ADMIN_TOKEN (empty = admin page/API disabled)
 providers:
   openai:
     baseUrl: https://api.openai.com          # AICOIN_PROXY_OPENAI_BASEURL
@@ -306,25 +307,32 @@ repo-root `CONTRACT.md`'s "Ledger (Redis)" section — this section covers
 just the Java-side shape:
 
 - `getBalance(address, callback)` — async Redis `GET aicoin:balance:{address}`.
-- `debitForCall(address, amount, callback)` — runs a Lua `EVAL` script that
-  atomically checks the balance and, if `>= amount` (always `1.0` in
-  practice — see `ProxyFrontendHandler.CALL_COST_AICOIN`), debits it before
-  the proxy forwards to a real provider.
-- `refund(address, amount)` — fire-and-forget `INCRBYFLOAT` reversing a
-  `debitForCall` when the upstream call it paid for didn't actually succeed.
+- `debitForCall(address, amount, provider, callback)` — runs a Lua `EVAL`
+  script that atomically checks the balance and, if `>= amount` (always
+  `1.0` in practice — see `ProxyFrontendHandler.CALL_COST_AICOIN`), debits
+  it, `SADD`s the address into `aicoin:known-wallets`, and appends a
+  `debit` entry to `aicoin:tx:{address}` — all before the proxy forwards to
+  a real provider.
+- `refund(address, amount, provider)` — a Lua `EVAL` script (not a plain
+  `INCRBYFLOAT` — it also needs to append the `refund` transaction-log
+  entry atomically with the balance reversal) undoing a `debitForCall` when
+  the upstream call it paid for didn't actually succeed; fire-and-forget,
+  same contract as `recordEvent`.
 - `claimFreeCoins(address, cooldownSeconds, poolSize, claimAmount, callback)`
   — runs a Lua `EVAL` script that atomically checks both the per-wallet
   cooldown (`aicoin:lastclaim:{address}`) and the shared pool
   (`aicoin:free-coins-remaining`, lazily initialized to `poolSize`) and, if
-  both allow it, mints `claimAmount` into the balance and decrements the
-  pool by the same amount — always the fixed
+  both allow it, mints `claimAmount` into the balance, decrements the pool
+  by the same amount, `SADD`s the address into `aicoin:known-wallets`, and
+  appends a `claim` entry to `aicoin:tx:{address}` — always the fixed
   `ProxyFrontendHandler.FREE_CLAIM_AMOUNT_AICOIN` (10) in practice, never a
   partial grant.
 - `getFreeCoinsRemaining(poolSize, callback)` — async Redis `GET` on the
   shared pool key, defaulting to `poolSize` if never initialized.
 - `transfer(from, to, amount, callback)` — runs a Lua `EVAL` script that
   atomically checks the sender's balance and, if sufficient, moves the
-  amount.
+  amount, `SADD`s both addresses into `aicoin:known-wallets`, and appends a
+  `transfer_out`/`transfer_in` entry to each side's transaction log.
 - `recordEvent(provider, costUsd, timestamp)` — fire-and-forget `ZADD` into
   `aicoin:events` (member `costUsd|uuid`, score = epoch-millis) — fed only
   by genuine 2xx paid calls, never by claims/transfers/failed calls.
@@ -335,6 +343,12 @@ just the Java-side shape:
   aicoin:token-revoked-before:{address} nowMillis`.
 - `getTokenRevokedBefore(address, callback)` — Redis `GET`, `Optional.empty`
   parsed as "never revoked."
+- `listWalletSummaries(callback)` — `SMEMBERS aicoin:known-wallets`, then
+  for each address a pipelined `GET` balance + `LLEN` transaction-log-length
+  combined via `CompletableFuture.thenCombine`/`allOf`; sorted by balance
+  descending. Backs `GET /admin/wallets`.
+- `getTransactions(address, callback)` — `LRANGE aicoin:tx:{address} 0 -1`,
+  reversed to most-recent-first. Backs `GET /admin/wallets/{address}/transactions`.
 
 All operations are async (Lettuce's `RedisFuture`/`CompletableFuture`
 API), matching the rest of this codebase's non-blocking Netty style — none
@@ -388,6 +402,20 @@ of them block an event-loop thread.
 - `POST /wallet/api/claim`, `POST /wallet/api/transfer`, `POST
   /wallet/api/revoke-tokens` — live-signed, see "Auth" above for the exact
   header/canonical-message spec.
+- `GET /admin` — the operator admin page (bundled `admin.html`): lists every
+  known wallet's balance and lets you drill into one wallet's full
+  transaction log. Unlike everything else above, its two data endpoints
+  require an `X-Admin-Token` header matching `aicoin.adminToken` (empty by
+  default, which disables the whole surface with a `503` — see
+  `AdminHandler`):
+  - `GET /admin/wallets` → `{"wallets":[{"address":"...","balance":N,"transaction_count":N}, ...]}`,
+    sorted by balance descending, backed by `AicoinLedger.listWalletSummaries`.
+  - `GET /admin/wallets/{address}/transactions` → `{"address":"...","transactions":[{...}, ...]}`,
+    most-recent first, backed by `AicoinLedger.getTransactions` — each entry
+    is the raw JSON object the mutating Lua script `cjson.encode`d at the
+    time (`type` one of `claim`/`transfer_out`/`transfer_in`/`debit`/`refund`,
+    plus `amount`/`balance_after`/`at`, and either `counterparty` or
+    `provider` depending on `type`).
 
 ## Tests
 
@@ -419,9 +447,14 @@ JUnit5 pure-function tests, with no network/Redis dependency required:
 - `ProxyConfigTest` — config precedence (env var > YAML > default),
   covering `port`/`redis.*`/`aicoin.decayHalflifeDays`/
   `aicoin.freeClaimCooldownSeconds`/`aicoin.signatureSkewSeconds`/
-  `aicoin.freeCoinsPoolSize` and each of the 7 providers'
+  `aicoin.freeCoinsPoolSize`/`aicoin.adminToken` and each of the 7 providers'
   `baseUrl`/`apiKey`/`authHeader`/`authPrefix`/`authAsQueryParam`/
   `authQueryParamName`.
+- `AdminHandlerTest` — address-format validation (exactly 64 hex chars,
+  upper/lowercase both accepted, wrong length/non-hex rejected) and the
+  admin-token constant-time comparison (exact match only; the actual
+  `X-Admin-Token` header check + the empty-token-disables-everything
+  behavior need a live request/config, covered by `e2e/run.sh`).
 - `ProviderHealthTrackerTest` — the rolling-window health computation:
   `rateLimited`/`overBudget`/`healthy` derivation from a sequence of
   synthetic status codes, per-provider independence, and window-eviction
@@ -436,11 +469,14 @@ JUnit5 pure-function tests, with no network/Redis dependency required:
   verbatim.
 
 `AicoinLedger`'s Lua-script atomicity (claim cooldown + shared pool, transfer
-overdraft, per-call debit/refund) requires a live Redis/Valkey connection to
-exercise end-to-end — covered by `e2e/run.sh`, which also runs one real paid
-call through every one of the 7 configured providers (against a local mock
-upstream) to confirm each provider's specific auth injection and the 1-aicoin
-debit both work correctly, not just OpenAI's.
+overdraft, per-call debit/refund, and the known-wallets/transaction-log
+bookkeeping riding along with each) requires a live Redis/Valkey connection
+to exercise end-to-end — covered by `e2e/run.sh`, which also runs one real
+paid call through every one of the 7 configured providers (against a local
+mock upstream) to confirm each provider's specific auth injection and the
+1-aicoin debit both work correctly, not just OpenAI's, and exercises the
+admin endpoints' auth gating plus the resulting wallet list/transaction log
+against real claim/debit/refund activity.
 
 ## Assumptions made where the contract is ambiguous
 
@@ -494,7 +530,23 @@ debit both work correctly, not just OpenAI's.
   per-call debit-before-forward); Lua `EVAL` scripts were chosen because
   Redis executes a script atomically with respect to every other client,
   which is the simplest way to replicate the correctness a single-writer
-  blockchain got "for free" from having exactly one legitimate writer.
+  blockchain got "for free" from having exactly one legitimate writer. The
+  known-wallets `SADD` and transaction-log `RPUSH`/`LTRIM` the admin page
+  reads from ride along inside those same scripts, for the same reason — a
+  balance mutation and its bookkeeping must never be observably split.
+- **Transaction log is capped, not archived.** `aicoin:tx:{address}` is
+  `LTRIM`med to the 200 most recent entries on every write; there's no
+  pagination or cold-storage archive for anything older. Fine for a
+  draft/prototype's admin page, not for a wallet with genuinely high
+  transaction volume.
+- **cjson for the transaction-log entries, not the SnakeYAML-as-JSON
+  convention used elsewhere in this codebase.** Redis's embedded Lua
+  interpreter ships `cjson` built in; using it inside the Lua scripts to
+  build each transaction-log entry (rather than string-concatenating JSON
+  by hand, as the claim/pool responses do in Java) is simpler and can't
+  produce malformed JSON from an unescaped value. `AdminHandler` then
+  passes those entries through to the client byte-for-byte rather than
+  re-parsing and re-serializing them.
 - **No nonce-tracking replay store for live signatures.** A `±120s` (default)
   clock-skew window bounds how long a captured live-signed request could be
   replayed, rather than a per-signature nonce ledger — a documented,

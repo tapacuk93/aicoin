@@ -115,6 +115,19 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             requireLiveSignature(ctx, request, body, address -> handleRevokeTokens(ctx, address));
             return;
         }
+        if (request.method() == HttpMethod.GET && "/admin".equals(path)) {
+            AdminHandler.servePage(ctx);
+            return;
+        }
+        if (request.method() == HttpMethod.GET && "/admin/wallets".equals(path)) {
+            AdminHandler.serveWallets(ctx, request, ledger, config);
+            return;
+        }
+        if (request.method() == HttpMethod.GET && path.startsWith("/admin/wallets/") && path.endsWith("/transactions")) {
+            String address = path.substring("/admin/wallets/".length(), path.length() - "/transactions".length());
+            AdminHandler.serveTransactions(ctx, request, ledger, config, address);
+            return;
+        }
 
         Optional<String> apiKeyOpt = WalletValidation.extractWalletId(request.headers().get(X_API_KEY_HEADER));
         if (!apiKeyOpt.isPresent()) {
@@ -171,7 +184,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 return;
             }
             String walletAddress = authResult.getAddress();
-            ledger.debitForCall(walletAddress, CALL_COST_AICOIN, debit -> {
+            ledger.debitForCall(walletAddress, CALL_COST_AICOIN, provider, debit -> {
                 if (!debit.isReachable()) {
                     sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
                 } else if (!debit.isSuccess()) {

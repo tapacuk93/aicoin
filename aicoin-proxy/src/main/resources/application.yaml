@@ -10,6 +10,7 @@ aicoin:
   freeClaimCooldownSeconds: 3600
   signatureSkewSeconds: 120
   freeCoinsPoolSize: 100
+  adminToken: ""
 providers:
   openai:
     baseUrl: https://api.openai.com

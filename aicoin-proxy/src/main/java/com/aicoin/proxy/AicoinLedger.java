@@ -9,9 +9,12 @@ import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.async.RedisAsyncCommands;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -34,6 +37,9 @@ final class AicoinLedger implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(AicoinLedger.class.getName());
     private static final String EVENTS_KEY = "aicoin:events";
     private static final String FREE_COINS_REMAINING_KEY = "aicoin:free-coins-remaining";
+    private static final String KNOWN_WALLETS_KEY = "aicoin:known-wallets";
+    /** Per-wallet transaction logs are capped at this many most-recent entries (draft/prototype: no pagination, no archival). */
+    private static final int TX_LOG_CAP = 200;
 
     private static final String CLAIM_SCRIPT =
             "local now = tonumber(ARGV[1]) "
@@ -51,8 +57,11 @@ final class AicoinLedger implements AutoCloseable {
             + "  return {0, '0', 'exhausted'} "
             + "end "
             + "redis.call('SET', KEYS[1], ARGV[1]) "
-            + "redis.call('INCRBYFLOAT', KEYS[2], ARGV[4]) "
+            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[2], ARGV[4]) "
             + "redis.call('SET', KEYS[3], remaining - amount) "
+            + "redis.call('SADD', KEYS[4], ARGV[5]) "
+            + "redis.call('RPUSH', KEYS[5], cjson.encode({type='claim', amount=amount, balance_after=tonumber(newBalance), at=now})) "
+            + "redis.call('LTRIM', KEYS[5], -" + TX_LOG_CAP + ", -1) "
             + "return {1, tostring(now + cooldown), 'granted'}";
 
     private static final String TRANSFER_SCRIPT =
@@ -61,8 +70,15 @@ final class AicoinLedger implements AutoCloseable {
             + "if amount <= 0 or from < amount then "
             + "  return 0 "
             + "end "
-            + "redis.call('INCRBYFLOAT', KEYS[1], '-' .. ARGV[1]) "
-            + "redis.call('INCRBYFLOAT', KEYS[2], ARGV[1]) "
+            + "local newFromBalance = redis.call('INCRBYFLOAT', KEYS[1], '-' .. ARGV[1]) "
+            + "local newToBalance = redis.call('INCRBYFLOAT', KEYS[2], ARGV[1]) "
+            + "redis.call('SADD', KEYS[3], ARGV[2]) "
+            + "redis.call('SADD', KEYS[3], ARGV[3]) "
+            + "local now = tonumber(ARGV[4]) "
+            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='transfer_out', amount=amount, counterparty=ARGV[3], balance_after=tonumber(newFromBalance), at=now})) "
+            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
+            + "redis.call('RPUSH', KEYS[5], cjson.encode({type='transfer_in', amount=amount, counterparty=ARGV[2], balance_after=tonumber(newToBalance), at=now})) "
+            + "redis.call('LTRIM', KEYS[5], -" + TX_LOG_CAP + ", -1) "
             + "return 1";
 
     private static final String DEBIT_SCRIPT =
@@ -71,8 +87,18 @@ final class AicoinLedger implements AutoCloseable {
             + "if balance < amount then "
             + "  return {0, tostring(balance)} "
             + "end "
-            + "redis.call('INCRBYFLOAT', KEYS[1], '-' .. ARGV[1]) "
-            + "return {1, tostring(balance - amount)}";
+            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], '-' .. ARGV[1]) "
+            + "redis.call('SADD', KEYS[2], ARGV[2]) "
+            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='debit', amount=amount, provider=ARGV[3], balance_after=tonumber(newBalance), at=tonumber(ARGV[4])})) "
+            + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
+            + "return {1, tostring(newBalance)}";
+
+    private static final String REFUND_SCRIPT =
+            "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1]) "
+            + "redis.call('SADD', KEYS[2], ARGV[2]) "
+            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='refund', amount=tonumber(ARGV[1]), provider=ARGV[3], balance_after=tonumber(newBalance), at=tonumber(ARGV[4])})) "
+            + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
+            + "return 'OK'";
 
     private final RedisClient client;
     private final StatefulRedisConnection<String, String> connection;
@@ -104,8 +130,8 @@ final class AicoinLedger implements AutoCloseable {
         long nowMillis = Instant.now().toEpochMilli();
         long cooldownMillis = cooldownSeconds * 1000L;
         RedisFuture<List<Object>> future = commands.eval(CLAIM_SCRIPT, ScriptOutputType.MULTI,
-                new String[] {lastClaimKey(userId), balanceKey(userId), FREE_COINS_REMAINING_KEY},
-                String.valueOf(nowMillis), String.valueOf(cooldownMillis), String.valueOf(poolSize), String.valueOf(claimAmount));
+                new String[] {lastClaimKey(userId), balanceKey(userId), FREE_COINS_REMAINING_KEY, KNOWN_WALLETS_KEY, txKey(userId)},
+                String.valueOf(nowMillis), String.valueOf(cooldownMillis), String.valueOf(poolSize), String.valueOf(claimAmount), userId);
         future.whenComplete((raw, err) -> {
             if (err != null) {
                 LOG.log(Level.WARNING, "ledger claim failed for " + userId, err);
@@ -140,8 +166,10 @@ final class AicoinLedger implements AutoCloseable {
             onResult.accept(TransferResult.decided(false));
             return;
         }
+        long nowMillis = Instant.now().toEpochMilli();
         RedisFuture<Long> future = commands.eval(TRANSFER_SCRIPT, ScriptOutputType.INTEGER,
-                new String[] {balanceKey(fromUserId), balanceKey(toUserId)}, String.valueOf(amount));
+                new String[] {balanceKey(fromUserId), balanceKey(toUserId), KNOWN_WALLETS_KEY, txKey(fromUserId), txKey(toUserId)},
+                String.valueOf(amount), fromUserId, toUserId, String.valueOf(nowMillis));
         future.whenComplete((result, err) -> {
             if (err != null) {
                 LOG.log(Level.WARNING, "ledger transfer failed " + fromUserId + "->" + toUserId, err);
@@ -158,9 +186,11 @@ final class AicoinLedger implements AutoCloseable {
      * Called <em>before</em> forwarding to the real provider, so the proxy never spends its own paid provider
      * key on a call a wallet can't afford; {@link #refund} reverses this if the upstream call then fails.
      */
-    void debitForCall(String address, double amount, Consumer<DebitResult> onResult) {
+    void debitForCall(String address, double amount, String provider, Consumer<DebitResult> onResult) {
+        long nowMillis = Instant.now().toEpochMilli();
         RedisFuture<List<Object>> future = commands.eval(DEBIT_SCRIPT, ScriptOutputType.MULTI,
-                new String[] {balanceKey(address)}, String.valueOf(amount));
+                new String[] {balanceKey(address), KNOWN_WALLETS_KEY, txKey(address)},
+                String.valueOf(amount), address, provider, String.valueOf(nowMillis));
         future.whenComplete((raw, err) -> {
             if (err != null) {
                 LOG.log(Level.WARNING, "ledger debit failed for " + address, err);
@@ -174,11 +204,15 @@ final class AicoinLedger implements AutoCloseable {
     }
 
     /** Reverses a {@link #debitForCall} when the upstream call it paid for didn't actually succeed. Fire-and-forget, same contract as {@link #recordEvent}. */
-    void refund(String address, double amount) {
-        commands.incrbyfloat(balanceKey(address), amount).exceptionally(err -> {
-            LOG.log(Level.WARNING, "ledger refund failed for " + address, err);
-            return null;
-        });
+    void refund(String address, double amount, String provider) {
+        long nowMillis = Instant.now().toEpochMilli();
+        commands.eval(REFUND_SCRIPT, ScriptOutputType.STATUS,
+                new String[] {balanceKey(address), KNOWN_WALLETS_KEY, txKey(address)},
+                String.valueOf(amount), address, provider, String.valueOf(nowMillis))
+                .exceptionally(err -> {
+                    LOG.log(Level.WARNING, "ledger refund failed for " + address, err);
+                    return null;
+                });
     }
 
     /** Fire-and-forget, per the old {@code EventPublisher}'s contract: must never block or fail the client-facing response. */
@@ -231,6 +265,64 @@ final class AicoinLedger implements AutoCloseable {
         });
     }
 
+    /**
+     * Every address that has ever claimed, sent/received a transfer, or paid for a call — i.e. the
+     * {@code aicoin:known-wallets} set every mutating Lua script above {@code SADD}s into. For the admin
+     * page's wallet list; {@link Optional#empty()} means the lookup failed. Sorted by balance descending.
+     */
+    void listWalletSummaries(Consumer<Optional<List<WalletSummary>>> onResult) {
+        commands.smembers(KNOWN_WALLETS_KEY).whenComplete((members, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger known-wallets lookup failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            List<String> addresses = new ArrayList<>(members);
+            if (addresses.isEmpty()) {
+                onResult.accept(Optional.of(List.of()));
+                return;
+            }
+            List<CompletableFuture<WalletSummary>> futures = new ArrayList<>(addresses.size());
+            for (String address : addresses) {
+                CompletableFuture<String> balanceFuture = commands.get(balanceKey(address)).toCompletableFuture();
+                CompletableFuture<Long> countFuture = commands.llen(txKey(address)).toCompletableFuture();
+                futures.add(balanceFuture.thenCombine(countFuture, (balanceStr, count) -> new WalletSummary(
+                        address, balanceStr != null ? Double.parseDouble(balanceStr) : 0.0, count.intValue())));
+            }
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).whenComplete((v, joinErr) -> {
+                if (joinErr != null) {
+                    LOG.log(Level.WARNING, "ledger wallet-summary lookup failed", joinErr);
+                    onResult.accept(Optional.empty());
+                    return;
+                }
+                List<WalletSummary> summaries = new ArrayList<>(futures.size());
+                for (CompletableFuture<WalletSummary> future : futures) {
+                    summaries.add(future.join());
+                }
+                summaries.sort(Comparator.comparingDouble(WalletSummary::getBalance).reversed());
+                onResult.accept(Optional.of(summaries));
+            });
+        });
+    }
+
+    /**
+     * The given wallet's transaction log (claims, transfer in/out, debits, refunds), most-recent first,
+     * each entry a raw JSON object string exactly as the Lua scripts above {@code cjson.encode}d it — the
+     * admin page parses these client-side. {@link Optional#empty()} means the lookup failed.
+     */
+    void getTransactions(String address, Consumer<Optional<List<String>>> onResult) {
+        commands.lrange(txKey(address), 0, -1).whenComplete((entries, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger transaction-log lookup failed for " + address, err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            List<String> mostRecentFirst = new ArrayList<>(entries);
+            Collections.reverse(mostRecentFirst);
+            onResult.accept(Optional.of(mostRecentFirst));
+        });
+    }
+
     @Override
     public void close() {
         connection.close();
@@ -247,6 +339,10 @@ final class AicoinLedger implements AutoCloseable {
 
     private static String tokenRevokedBeforeKey(String address) {
         return "aicoin:token-revoked-before:" + address;
+    }
+
+    private static String txKey(String address) {
+        return "aicoin:tx:" + address;
     }
 
     private static double parseCost(String member) {
@@ -390,6 +486,31 @@ final class AicoinLedger implements AutoCloseable {
 
         double getHalfLifeDays() {
             return halfLifeDays;
+        }
+    }
+
+    /** One row of the admin page's wallet list: a known address, its current balance, and how many transaction-log entries it has. */
+    static final class WalletSummary {
+        private final String address;
+        private final double balance;
+        private final int transactionCount;
+
+        WalletSummary(String address, double balance, int transactionCount) {
+            this.address = address;
+            this.balance = balance;
+            this.transactionCount = transactionCount;
+        }
+
+        String getAddress() {
+            return address;
+        }
+
+        double getBalance() {
+            return balance;
+        }
+
+        int getTransactionCount() {
+            return transactionCount;
         }
     }
 }

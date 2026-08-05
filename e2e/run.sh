@@ -181,10 +181,12 @@ PIDS+=($!)
 wait_for "http://127.0.0.1:$MOCK_PORT/" || true
 
 log "starting aicoin-proxy on :$PROXY_PORT (free-coins pool size $FREE_COINS_POOL_SIZE, all providers -> mock)"
+ADMIN_TOKEN="e2e-admin-secret"
 AICOIN_PROXY_PORT="$PROXY_PORT" \
 AICOIN_PROXY_REDIS_HOST="127.0.0.1" \
 AICOIN_PROXY_REDIS_PORT="$REDIS_PORT" \
 AICOIN_PROXY_FREE_COINS_POOL_SIZE="$FREE_COINS_POOL_SIZE" \
+AICOIN_PROXY_ADMIN_TOKEN="$ADMIN_TOKEN" \
 AICOIN_PROXY_OPENAI_BASEURL="http://127.0.0.1:$MOCK_PORT" \
 AICOIN_PROXY_OPENAI_APIKEY="${TEST_KEYS[0]}" \
 AICOIN_PROXY_ANTHROPIC_BASEURL="http://127.0.0.1:$MOCK_PORT" \
@@ -373,6 +375,44 @@ if [ "$code" = "500" ] && [ "$bal_after_fail" = "$bal_before_fail" ]; then
   pass "failed upstream call (500, relayed verbatim) left dave's balance unchanged ($bal_after_fail) — debit was refunded, not kept as if it were a paid call"
 else
   fail "expected 500 with balance refunded to $bal_before_fail, got code=$code balance=$bal_after_fail"
+fi
+
+log "--- test 17: admin endpoints reject a missing or wrong X-Admin-Token ---"
+code=$(curl -s -o "$WORKDIR/t17a.json" -w "%{http_code}" "http://127.0.0.1:$PROXY_PORT/admin/wallets")
+[ "$code" = "401" ] && pass "401 with no X-Admin-Token" || fail "expected 401, got $code: $(cat "$WORKDIR/t17a.json")"
+code=$(curl -s -o "$WORKDIR/t17b.json" -w "%{http_code}" -H "X-Admin-Token: wrong-token" "http://127.0.0.1:$PROXY_PORT/admin/wallets")
+[ "$code" = "401" ] && pass "401 with a wrong X-Admin-Token" || fail "expected 401, got $code: $(cat "$WORKDIR/t17b.json")"
+
+log "--- test 18: admin wallet list includes known wallets with the right balance and transaction counts ---"
+code=$(curl -s -o "$WORKDIR/t18.json" -w "%{http_code}" -H "X-Admin-Token: $ADMIN_TOKEN" "http://127.0.0.1:$PROXY_PORT/admin/wallets")
+dave_balance=$(python3 -c "
+import json
+wallets = json.load(open('$WORKDIR/t18.json'))['wallets']
+byaddr = {w['address']: w for w in wallets}
+print(byaddr.get('$ADDR_DAVE', {}).get('balance'))
+")
+dave_tx_count=$(python3 -c "
+import json
+wallets = json.load(open('$WORKDIR/t18.json'))['wallets']
+byaddr = {w['address']: w for w in wallets}
+print(byaddr.get('$ADDR_DAVE', {}).get('transaction_count'))
+")
+if [ "$code" = "200" ] && [ "$dave_balance" = "$bal_after_fail" ] && [ "$dave_tx_count" = "3" ]; then
+  pass "admin wallet list shows dave with balance $dave_balance and 3 tx entries (claim, debit, refund)"
+else
+  fail "expected dave balance=$bal_after_fail tx_count=3, got code=$code balance=$dave_balance tx_count=$dave_tx_count: $(cat "$WORKDIR/t18.json")"
+fi
+
+log "--- test 19: admin transaction log for dave shows claim/debit/refund, most-recent first ---"
+code=$(curl -s -o "$WORKDIR/t19.json" -w "%{http_code}" -H "X-Admin-Token: $ADMIN_TOKEN" "http://127.0.0.1:$PROXY_PORT/admin/wallets/$ADDR_DAVE/transactions")
+types=$(python3 -c "
+import json
+print(','.join(tx['type'] for tx in json.load(open('$WORKDIR/t19.json'))['transactions']))
+")
+if [ "$code" = "200" ] && [ "$types" = "refund,debit,claim" ]; then
+  pass "dave's transaction log is [refund, debit, claim] (most-recent first): $types"
+else
+  fail "expected types=refund,debit,claim, got code=$code types=$types: $(cat "$WORKDIR/t19.json")"
 fi
 
 echo

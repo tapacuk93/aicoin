@@ -22,6 +22,7 @@ class ProxyConfigTest {
         assertEquals(3600, config.getFreeClaimCooldownSeconds());
         assertEquals(120, config.getSignatureSkewSeconds());
         assertEquals(100, config.getFreeCoinsPoolSize());
+        assertEquals("", config.getAdminToken());
 
         assertEquals("https://api.openai.com", config.getProviderBaseUrl("openai"));
         assertEquals("https://api.anthropic.com", config.getProviderBaseUrl("anthropic"));
@@ -90,6 +91,7 @@ class ProxyConfigTest {
         env.put("AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS", "60");
         env.put("AICOIN_PROXY_SIGNATURE_SKEW_SECONDS", "30");
         env.put("AICOIN_PROXY_FREE_COINS_POOL_SIZE", "5");
+        env.put("AICOIN_PROXY_ADMIN_TOKEN", "s3cret-admin-token");
 
         ProxyConfig config = ProxyConfig.load(env);
         assertEquals(16379, config.getRedisPort());
@@ -99,6 +101,7 @@ class ProxyConfigTest {
         assertEquals(60, config.getFreeClaimCooldownSeconds());
         assertEquals(30, config.getSignatureSkewSeconds());
         assertEquals(5, config.getFreeCoinsPoolSize());
+        assertEquals("s3cret-admin-token", config.getAdminToken());
     }
 
     @Test

@@ -40,6 +40,7 @@ aicoin:
   freeClaimCooldownSeconds: 3600  # AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS
   signatureSkewSeconds: 120       # AICOIN_PROXY_SIGNATURE_SKEW_SECONDS
   freeCoinsPoolSize: 100          # AICOIN_PROXY_FREE_COINS_POOL_SIZE
+  adminToken: ""                  # AICOIN_PROXY_ADMIN_TOKEN (empty = admin page/API disabled)
 providers:
   openai:
     baseUrl: https://api.openai.com          # AICOIN_PROXY_OPENAI_BASEURL
@@ -141,6 +142,8 @@ Keys, namespaced under `aicoin:`:
 | Last free-claim time | `aicoin:lastclaim:{address}` | String (epoch-millis) | read/written only inside the claim Lua script below |
 | Free-coins pool remaining | `aicoin:free-coins-remaining` | String (int) | shared across every wallet, lazily initialized to `aicoin.freeCoinsPoolSize` on first-ever claim; read/written only inside the claim Lua script |
 | Token revocation | `aicoin:token-revoked-before:{address}` | String (epoch-millis) | set by `POST /wallet/api/revoke-tokens`; missing = never revoked |
+| Known wallets | `aicoin:known-wallets` | SET | every address ever seen as a claim recipient, transfer party, or call payer — `SADD`ed inside the same Lua script as the mutation it accompanies. Powers the admin page's wallet list; nothing else reads it |
+| Transaction log | `aicoin:tx:{address}` | LIST | one JSON object per claim/transfer/debit/refund touching this address, appended (`RPUSH`) inside the same script as the balance mutation, capped to the most recent 200 (`LTRIM`) — see "Admin page" below for the exact shape |
 
 **Price (final formula, v2: smooth exponential decay)** — unchanged math from
 before, now computed by fetching the full event log rather than folding
@@ -242,8 +245,33 @@ happens to be empty.
   - `POST /wallet/api/claim`, `POST /wallet/api/transfer`, `POST /wallet/api/revoke-tokens` → live-signed, see "Auth for wallet-management actions" above.
 - The balance-lookup endpoint is checked before the generic `X-AI`-header routing/auth logic (same as `/price`, `/free-coins/available`, `/health`) — it needs no auth, since it's how a wallet checks its own state before ever claiming a free coin.
 
+### Admin page
+Every other endpoint here is either public read-only data or gated by proving
+control of one specific wallet — this is the one exception: an operator
+surface that reveals **every** known wallet's balance and full transaction
+history, so it needs its own, separate auth.
+- `GET /admin` — serves a bundled static HTML/CSS/JS page (single file, no
+  build step), same posture as `GET /wallet`: no auth on the page markup
+  itself, just an input for the admin token and a table. The page stores the
+  token in `localStorage` and sends it as `X-Admin-Token` on every data call.
+- `GET /admin/wallets` → `{"wallets":[{"address":"...","balance":N,"transaction_count":N}, ...]}`,
+  every address in `aicoin:known-wallets`, sorted by balance descending.
+- `GET /admin/wallets/{address}/transactions` → `{"address":"...","transactions":[{...}, ...]}`,
+  the full contents of `aicoin:tx:{address}` (see the Ledger table above),
+  most-recent first. Each entry is one of:
+  - `{"type":"claim","amount":N,"balance_after":N,"at":epochMillis}`
+  - `{"type":"transfer_out"|"transfer_in","amount":N,"counterparty":"<address>","balance_after":N,"at":epochMillis}`
+  - `{"type":"debit"|"refund","amount":N,"provider":"<name>","balance_after":N,"at":epochMillis}`
+- **Auth**: both data endpoints require a header `X-Admin-Token: <token>`
+  matching `aicoin.adminToken` (env `AICOIN_PROXY_ADMIN_TOKEN`), compared in
+  constant time. That config value defaults to empty, which disables this
+  entire surface — both endpoints respond `503 {"error":"admin disabled"}`
+  regardless of any header — so a freshly deployed instance never exposes
+  every wallet's balance by accident; an operator must deliberately set the
+  token. A missing/wrong token (once a real token is configured) is `401`.
+
 ### Tests to include
-- JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, and the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs) — no network/Redis needed.
+- JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs), and the admin token's constant-time comparison + address-format validation — no network/Redis needed.
 
 ## Docker / docker-compose
 - `aicoin-proxy/Dockerfile` — multi-stage: `./gradlew build` in a JDK-17 build stage, copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a JRE-17 runtime image. Entrypoint runs the generated start script.

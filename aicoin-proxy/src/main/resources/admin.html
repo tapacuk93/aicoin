@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>aicoin admin</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0b0d10;
+    --fg: #e8eaed;
+    --muted: #9aa0a6;
+    --accent: #6ee7b7;
+    --danger: #f87171;
+    --card: #14171c;
+    --border: #23262b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  main {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 4rem;
+  }
+  h1 { font-size: 1.75rem; margin: 0 0 0.25rem; letter-spacing: -0.02em; }
+  .tagline { color: var(--muted); font-size: 0.95rem; margin: 0 0 2rem; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+  }
+  .card h2 {
+    font-size: 0.95rem;
+    margin: 0 0 0.75rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.35rem; }
+  input {
+    width: 100%;
+    background: #0b0d10;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 8px;
+    padding: 0.55rem 0.7rem;
+    font-size: 0.95rem;
+    margin-bottom: 0.9rem;
+    font-family: ui-monospace, monospace;
+  }
+  input:focus { outline: 1px solid var(--accent); }
+  button {
+    background: var(--accent);
+    color: #06251a;
+    border: none;
+    border-radius: 8px;
+    padding: 0.6rem 1rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { opacity: 0.9; }
+  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--fg); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 0.5rem 0.4rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.03em; }
+  tr.wallet-row { cursor: pointer; }
+  tr.wallet-row:hover { background: rgba(255,255,255,0.03); }
+  code { font-family: ui-monospace, monospace; font-size: 0.82rem; }
+  .msg { font-size: 0.85rem; margin-top: 0.5rem; min-height: 1.2em; }
+  .msg.ok { color: var(--accent); }
+  .msg.err { color: var(--danger); }
+  .type-claim { color: var(--accent); }
+  .type-debit { color: var(--danger); }
+  .type-refund { color: var(--accent); }
+  #transactionsCard { display: none; }
+  .back-link { display: inline-block; margin-bottom: 0.75rem; font-size: 0.85rem; color: var(--muted); cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+  <h1>aicoin admin</h1>
+  <p class="tagline">Every known wallet and its transaction history. Operator-only &mdash; requires the admin token.</p>
+
+  <div class="card">
+    <h2>Admin token</h2>
+    <label for="tokenInput">X-Admin-Token</label>
+    <input id="tokenInput" type="password" placeholder="paste the admin token" autocomplete="off">
+    <button id="loadBtn">Load wallets</button>
+    <div id="loadMsg" class="msg"></div>
+  </div>
+
+  <div class="card" id="walletsCard" style="display:none;">
+    <h2>Known wallets</h2>
+    <table>
+      <thead><tr><th>Address</th><th>Balance</th><th>Transactions</th></tr></thead>
+      <tbody id="walletsBody"></tbody>
+    </table>
+  </div>
+
+  <div class="card" id="transactionsCard">
+    <span class="back-link" id="backLink">&larr; back to wallets</span>
+    <h2>Transactions for <code id="txAddress"></code></h2>
+    <table>
+      <thead><tr><th>Type</th><th>Amount</th><th>Counterparty / provider</th><th>Balance after</th><th>At</th></tr></thead>
+      <tbody id="txBody"></tbody>
+    </table>
+    <div id="txMsg" class="msg"></div>
+  </div>
+</main>
+
+<script>
+(function () {
+  const STORAGE_KEY = "aicoin.admin.token";
+  const tokenInput = document.getElementById("tokenInput");
+  const loadBtn = document.getElementById("loadBtn");
+  const loadMsg = document.getElementById("loadMsg");
+  const walletsCard = document.getElementById("walletsCard");
+  const walletsBody = document.getElementById("walletsBody");
+  const transactionsCard = document.getElementById("transactionsCard");
+  const txAddress = document.getElementById("txAddress");
+  const txBody = document.getElementById("txBody");
+  const txMsg = document.getElementById("txMsg");
+  const backLink = document.getElementById("backLink");
+
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved) tokenInput.value = saved;
+
+  function setMsg(el, text, ok) {
+    el.textContent = text || "";
+    el.className = "msg" + (text ? (ok ? " ok" : " err") : "");
+  }
+
+  function formatAt(atMillis) {
+    try { return new Date(atMillis).toISOString(); } catch (e) { return String(atMillis); }
+  }
+
+  async function fetchJson(url) {
+    const res = await fetch(url, { headers: { "X-Admin-Token": tokenInput.value } });
+    let body = null;
+    try { body = await res.json(); } catch (e) { /* no body */ }
+    return { status: res.status, body: body };
+  }
+
+  loadBtn.addEventListener("click", async function () {
+    localStorage.setItem(STORAGE_KEY, tokenInput.value);
+    setMsg(loadMsg, "Loading...", true);
+    transactionsCard.style.display = "none";
+    try {
+      const { status, body } = await fetchJson("/admin/wallets");
+      if (status !== 200 || !body) {
+        setMsg(loadMsg, (body && body.error) || "Failed to load wallets.", false);
+        walletsCard.style.display = "none";
+        return;
+      }
+      walletsBody.innerHTML = "";
+      (body.wallets || []).forEach(function (w) {
+        const row = document.createElement("tr");
+        row.className = "wallet-row";
+        row.innerHTML = "<td><code>" + w.address + "</code></td><td>" + w.balance + "</td><td>" + w.transaction_count + "</td>";
+        row.addEventListener("click", function () { loadTransactions(w.address); });
+        walletsBody.appendChild(row);
+      });
+      walletsCard.style.display = "block";
+      setMsg(loadMsg, (body.wallets || []).length + " known wallet(s).", true);
+    } catch (e) {
+      setMsg(loadMsg, "Network error — try again.", false);
+    }
+  });
+
+  async function loadTransactions(address) {
+    setMsg(txMsg, "Loading...", true);
+    txAddress.textContent = address;
+    transactionsCard.style.display = "block";
+    walletsCard.style.display = "none";
+    try {
+      const { status, body } = await fetchJson("/admin/wallets/" + encodeURIComponent(address) + "/transactions");
+      if (status !== 200 || !body) {
+        setMsg(txMsg, (body && body.error) || "Failed to load transactions.", false);
+        return;
+      }
+      txBody.innerHTML = "";
+      (body.transactions || []).forEach(function (tx) {
+        const row = document.createElement("tr");
+        const counterparty = tx.counterparty || tx.provider || "";
+        row.innerHTML = "<td class=\"type-" + tx.type + "\">" + tx.type + "</td><td>" + tx.amount + "</td>"
+          + "<td><code>" + counterparty + "</code></td><td>" + tx.balance_after + "</td><td>" + formatAt(tx.at) + "</td>";
+        txBody.appendChild(row);
+      });
+      setMsg(txMsg, (body.transactions || []).length + " transaction(s).", true);
+    } catch (e) {
+      setMsg(txMsg, "Network error — try again.", false);
+    }
+  }
+
+  backLink.addEventListener("click", function () {
+    transactionsCard.style.display = "none";
+    walletsCard.style.display = "block";
+  });
+})();
+</script>
+</body>
+</html>

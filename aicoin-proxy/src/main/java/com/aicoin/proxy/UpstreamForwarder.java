@@ -82,7 +82,7 @@ final class UpstreamForwarder {
         try {
             upstreamUri = new URI(baseUrl);
         } catch (Exception e) {
-            ledger.refund(walletAddress, callCostAicoin);
+            ledger.refund(walletAddress, callCostAicoin, provider);
             sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "invalid provider baseUrl");
             return;
         }
@@ -91,7 +91,7 @@ final class UpstreamForwarder {
         String host = upstreamUri.getHost();
         int port = upstreamUri.getPort() != -1 ? upstreamUri.getPort() : (tls ? 443 : 80);
         if (host == null) {
-            ledger.refund(walletAddress, callCostAicoin);
+            ledger.refund(walletAddress, callCostAicoin, provider);
             sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "invalid provider baseUrl");
             return;
         }
@@ -117,7 +117,7 @@ final class UpstreamForwarder {
         bootstrap.connect(host, port).addListener((ChannelFutureListener) future -> {
             if (!future.isSuccess()) {
                 LOG.log(Level.WARNING, "upstream connect failed for provider " + provider + " at " + baseUrl, future.cause());
-                ledger.refund(walletAddress, callCostAicoin);
+                ledger.refund(walletAddress, callCostAicoin, provider);
                 sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream connection failed");
                 return;
             }
@@ -134,7 +134,7 @@ final class UpstreamForwarder {
             upstreamCh.writeAndFlush(req).addListener((ChannelFutureListener) writeFuture -> {
                 if (!writeFuture.isSuccess()) {
                     LOG.log(Level.WARNING, "upstream write failed for provider " + provider, writeFuture.cause());
-                    ledger.refund(walletAddress, callCostAicoin);
+                    ledger.refund(walletAddress, callCostAicoin, provider);
                     sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream write failed");
                     upstreamCh.close();
                 }
@@ -190,7 +190,7 @@ final class UpstreamForwarder {
                         bodyStr, config.getCostPerTokenUsd(), config.getDefaultCostUsdPerCall());
                 ledger.recordEvent(provider, costUsd, Instant.now());
             } else {
-                ledger.refund(walletAddress, callCostAicoin);
+                ledger.refund(walletAddress, callCostAicoin, provider);
             }
 
             upstreamCtx.close();
@@ -199,7 +199,7 @@ final class UpstreamForwarder {
         @Override
         public void exceptionCaught(ChannelHandlerContext upstreamCtx, Throwable cause) {
             LOG.log(Level.WARNING, "upstream response handling failed for provider " + provider, cause);
-            ledger.refund(walletAddress, callCostAicoin);
+            ledger.refund(walletAddress, callCostAicoin, provider);
             sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream error");
             upstreamCtx.close();
         }

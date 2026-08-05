@@ -35,6 +35,7 @@ public final class ProxyConfig {
     private final int freeClaimCooldownSeconds;
     private final int signatureSkewSeconds;
     private final int freeCoinsPoolSize;
+    private final String adminToken;
     private final Map<String, ProviderConfig> providers;
     private final double costPerTokenUsd;
     private final double defaultCostUsdPerCall;
@@ -42,7 +43,7 @@ public final class ProxyConfig {
 
     private ProxyConfig(int port, String redisHost, int redisPort, String redisPassword, boolean redisSsl,
                          double decayHalflifeDays, int freeClaimCooldownSeconds, int signatureSkewSeconds,
-                         int freeCoinsPoolSize, Map<String, ProviderConfig> providers,
+                         int freeCoinsPoolSize, String adminToken, Map<String, ProviderConfig> providers,
                          double costPerTokenUsd, double defaultCostUsdPerCall,
                          int healthWindowSize) {
         this.port = port;
@@ -54,6 +55,7 @@ public final class ProxyConfig {
         this.freeClaimCooldownSeconds = freeClaimCooldownSeconds;
         this.signatureSkewSeconds = signatureSkewSeconds;
         this.freeCoinsPoolSize = freeCoinsPoolSize;
+        this.adminToken = adminToken;
         this.providers = providers;
         this.costPerTokenUsd = costPerTokenUsd;
         this.defaultCostUsdPerCall = defaultCostUsdPerCall;
@@ -100,6 +102,15 @@ public final class ProxyConfig {
         return freeCoinsPoolSize;
     }
 
+    /**
+     * @return {@code aicoin.adminToken}: the shared secret {@code GET /admin/*} endpoints require in an
+     * {@code X-Admin-Token} header. Empty (the default) disables the admin surface entirely — set via
+     * {@code AICOIN_PROXY_ADMIN_TOKEN} to enable it, never bundled in {@code application.yaml}.
+     */
+    public String getAdminToken() {
+        return adminToken;
+    }
+
     /** @return the full config entry for the given (already-lowercased, known) provider, or null if unknown. */
     public ProviderConfig getProvider(String provider) {
         return providers.get(provider);
@@ -141,6 +152,7 @@ public final class ProxyConfig {
         int freeClaimCooldownSeconds = getInt(yaml, "aicoin.freeClaimCooldownSeconds", 3600);
         int signatureSkewSeconds = getInt(yaml, "aicoin.signatureSkewSeconds", 120);
         int freeCoinsPoolSize = getInt(yaml, "aicoin.freeCoinsPoolSize", 100);
+        String adminToken = getString(yaml, "aicoin.adminToken", "");
 
         Map<String, ProviderConfig> defaults = new LinkedHashMap<>();
         defaults.put("openai", new ProviderConfig("https://api.openai.com", "", "Authorization", "Bearer ", false, null));
@@ -189,12 +201,13 @@ public final class ProxyConfig {
         freeClaimCooldownSeconds = envInt(env, "AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS", freeClaimCooldownSeconds);
         signatureSkewSeconds = envInt(env, "AICOIN_PROXY_SIGNATURE_SKEW_SECONDS", signatureSkewSeconds);
         freeCoinsPoolSize = envInt(env, "AICOIN_PROXY_FREE_COINS_POOL_SIZE", freeCoinsPoolSize);
+        adminToken = envStr(env, "AICOIN_PROXY_ADMIN_TOKEN", adminToken);
         costPerTokenUsd = envDouble(env, "AICOIN_PROXY_COST_PER_TOKEN_USD", costPerTokenUsd);
         defaultCostUsdPerCall = envDouble(env, "AICOIN_PROXY_DEFAULT_COST_USD", defaultCostUsdPerCall);
         healthWindowSize = envInt(env, "AICOIN_PROXY_HEALTH_WINDOW_SIZE", healthWindowSize);
 
         return new ProxyConfig(port, redisHost, redisPort, redisPassword, redisSsl,
-                decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, providers,
+                decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
                 costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize);
     }
 
