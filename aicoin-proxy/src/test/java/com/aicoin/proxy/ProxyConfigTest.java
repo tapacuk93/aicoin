@@ -76,7 +76,7 @@ class ProxyConfigTest {
 
         assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals("com.tarasmaslov.infiniteairadio.aicoin.xl")));
         assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals("com.tarasmaslov.alllanguageslearner.aicoin.medium")));
-        assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals("com.tarasmaslov.learn-it.aicoin.large")));
+        assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals("com.tarasmaslov.learnit.aicoin.large")));
 
         for (IapPackageConfig p : packages) {
             assertTrue(p.getCoins() > 0, p.getProductId());
