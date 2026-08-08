@@ -6,7 +6,7 @@
 > for the full spec, and `aicoin-proxy/README.md` for exhaustive detail.
 > This file is the practical "how do I run this" guide.
 
-Live landing page: [aicoin.oeaio.com](https://aicoin.oeaio.com) (source in [`site/`](./site/), a static page on S3+CloudFront).
+Live landing page: [aicoin.oeaio.com](https://aicoin.oeaio.com) (source in [`site/`](./site/), a static page served by Caddy — automatic Let's Encrypt TLS, HTTP redirected to HTTPS).
 
 One thing: **aicoin-proxy** — an HTTP reverse proxy you point your AI API
 calls at instead of the real provider. It forwards the request unchanged
@@ -141,5 +141,5 @@ faucet, transfer.
 - [`CONTRACT.md`](./CONTRACT.md) — the authoritative spec this project is built against.
 - [`aicoin-proxy/`](./aicoin-proxy/) — the Java/Netty proxy and the Redis-backed coin ledger. Full flag/API/config reference in its own README. Includes `scripts/set-coin-packages.sh` (admin CLI to change IAP coin packages) and `scripts/adjust-iap-prices.sh` (hourly cron job that re-derives IAP package prices from the live `/price` signal).
 - [`e2e/run.sh`](./e2e/run.sh) — the end-to-end test.
-- [`site/`](./site/) — the static landing page deployed at aicoin.oeaio.com.
+- [`site/`](./site/) — the static landing page deployed at aicoin.oeaio.com. The Caddy config that serves it lives on the host, not in this repo; DNS is a Route 53 zone for `oeaio.com` whose `aicoin`, `apps`, `www`, and apex A records all point at the same server.
 - [`ios/AICoinWallet/`](./ios/AICoinWallet/) — a native SwiftUI wallet app (bundle `com.oeaio.aicoin.wallet`) mirroring `wallet.html`'s capabilities.
