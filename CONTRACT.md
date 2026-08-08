@@ -134,7 +134,9 @@ call fails) and separately feeds the price formula with its real USD cost —
 two independent effects of the same event, never conflated with faucet
 claims or transfers.
 
-Keys, namespaced under `aicoin:`:
+**Key naming — every key carries the fixed Redis Cluster hash tag `{aicoin}`**, i.e. the real key names are `aicoin:{aicoin}:balance:<address>`, `aicoin:{aicoin}:events`, and so on. The table below omits the tag for readability; the code (`AicoinLedger.TAG`) is authoritative. This is **not** cosmetic: production runs on AWS MemoryDB, which is *always* cluster-mode even at a single shard, and Redis Cluster rejects any multi-key command whose keys span different hash slots with `CROSSSLOT` — regardless of those slots living on the same node. Every atomic operation here is inherently multi-key (a claim touches balance + lastclaim + the shared pool + known-wallets + the tx log; a transfer touches *two different wallets'* balances), so per-wallet tagging would not suffice — cross-wallet transfers would still cross slots. One fixed tag for the whole ledger is the only scheme keeping all of them single-slot. The trade-off is deliberate: a centralized ledger confined to one slot costs nothing today, but it cannot be spread across shards — scaling out would mean re-sharding the key scheme and giving up cross-wallet atomicity, a far larger change than simply using a bigger node.
+
+Keys, namespaced under `aicoin:` (each additionally carrying the `{aicoin}` hash tag described above):
 
 | Concept | Key | Type | Notes |
 |---|---|---|---|
