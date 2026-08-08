@@ -15,7 +15,46 @@ import SwiftUI
 ///     BuyAICoinSheet(iapManager: iapManager, walletStore: walletStore, identity: identity)
 /// }
 /// ```
+///
+/// ## Accessibility identifiers
+///
+/// Every addressable control here carries a stable, namespaced
+/// `aicoin.buySheet.*` accessibility identifier so host apps can drive this
+/// sheet from a UI test without matching on display copy (which is
+/// localized/server-driven and therefore not a stable test anchor). See
+/// `Identifiers` below for the full vocabulary. The root uses
+/// `.accessibilityElement(children: .contain)` rather than a bare identifier
+/// on the container, because a bare `.accessibilityIdentifier` on a non-element
+/// container propagates down onto every unnamed descendant — `.contain` keeps
+/// the root a single addressable element while leaving children individually
+/// queryable.
 public struct BuyAICoinSheet: View {
+    /// The stable accessibility identifiers this sheet exposes. Referenced by
+    /// name from host apps' UI tests; treat these strings as API.
+    public enum Identifiers {
+        /// The sheet's root container element.
+        public static let root = "aicoin.buySheet"
+        /// The Buy / Send-Receive segmented control.
+        public static let tabPicker = "aicoin.buySheet.tabPicker"
+        /// The literal "1 AICoin = 1 AI API call" exchange-rate statement.
+        public static let exchangeRate = "aicoin.buySheet.exchangeRate"
+        /// "Current balance: N AICoin" (absent until a balance is known).
+        public static let balance = "aicoin.buySheet.balance"
+        /// The purchase-failure message (absent unless a purchase failed).
+        public static let error = "aicoin.buySheet.error"
+        /// The list of purchasable packages (absent while loading/empty).
+        public static let packageList = "aicoin.buySheet.packageList"
+        /// Shown instead of `packageList` when the server returned no packages.
+        public static let emptyPackages = "aicoin.buySheet.empty"
+        /// The toolbar's dismiss button.
+        public static let close = "aicoin.buySheet.close"
+
+        /// One package row / buy button, keyed by its App Store product ID.
+        public static func package(_ productId: String) -> String {
+            "aicoin.buySheet.package.\(productId)"
+        }
+    }
+
     public enum Tab: String, CaseIterable, Identifiable {
         case buy = "Buy"
         case transfer = "Send / Receive"
@@ -54,6 +93,7 @@ public struct BuyAICoinSheet: View {
                 }
                 .pickerStyle(.segmented)
                 .padding([.horizontal, .top])
+                .accessibilityIdentifier(Identifiers.tabPicker)
 
                 switch selectedTab {
                 case .buy:
@@ -62,6 +102,11 @@ public struct BuyAICoinSheet: View {
                     SendReceiveView(identity: identity, walletClient: walletClient, walletStore: walletStore)
                 }
             }
+            // `.contain` (not a bare identifier on the VStack) so the root is
+            // one addressable element without its identifier leaking down onto
+            // every unnamed descendant.
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(Identifiers.root)
             .navigationTitle("AICoin")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -69,6 +114,7 @@ public struct BuyAICoinSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }
+                        .accessibilityIdentifier(Identifiers.close)
                 }
             }
             .task { await iapManager.loadPackages() }
@@ -80,6 +126,7 @@ public struct BuyAICoinSheet: View {
             Text("1 AICoin = 1 AI API call")
                 .font(.title3.bold())
                 .padding(.horizontal)
+                .accessibilityIdentifier(Identifiers.exchangeRate)
             Text("Buy AICoin to keep generating — no personal API keys needed.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -90,6 +137,7 @@ public struct BuyAICoinSheet: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
+                    .accessibilityIdentifier(Identifiers.balance)
             }
 
             if let errorMessage {
@@ -97,6 +145,7 @@ public struct BuyAICoinSheet: View {
                     .font(.footnote)
                     .foregroundStyle(.red)
                     .padding(.horizontal)
+                    .accessibilityIdentifier(Identifiers.error)
             }
 
             if iapManager.isLoading && iapManager.packages.isEmpty {
@@ -107,12 +156,14 @@ public struct BuyAICoinSheet: View {
                 Spacer()
                 Text("No AICoin packages are available right now.")
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(Identifiers.emptyPackages)
                 Spacer()
             } else {
                 List(iapManager.packages) { package in
                     packageRow(package)
                 }
                 .listStyle(.plain)
+                .accessibilityIdentifier(Identifiers.packageList)
             }
         }
     }
@@ -144,6 +195,9 @@ public struct BuyAICoinSheet: View {
         }
         .buttonStyle(.plain)
         .disabled(purchasingProductId != nil)
+        // Keyed by product ID so a UI test can address one specific tier
+        // without depending on row order or on the server-driven coin counts.
+        .accessibilityIdentifier(Identifiers.package(package.productId))
     }
 
     private func buy(_ package: AICoinPackage) async {

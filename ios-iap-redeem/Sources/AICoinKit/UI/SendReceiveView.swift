@@ -11,7 +11,33 @@ import AppKit
 /// faucet and IAP ("This is the *entire* buy/sell mechanism ... 'buying' is just receiving a
 /// transfer, 'selling' is sending one"). Uses `WalletClient.transfer`, which live-signs the
 /// request with `identity`'s private key per CONTRACT.md's wallet-management auth scheme.
+///
+/// ## Accessibility identifiers
+///
+/// Every field and control carries a stable, namespaced `aicoin.sendReceive.*`
+/// identifier — see `Identifiers`. Note `address` (this wallet's own address,
+/// shown for *receiving*) and `recipient` (the typed destination for *sending*)
+/// are deliberately distinct.
 public struct SendReceiveView: View {
+    /// The stable accessibility identifiers this view exposes. Referenced by
+    /// name from host apps' UI tests; treat these strings as API.
+    public enum Identifiers {
+        /// The view's root container element.
+        public static let root = "aicoin.sendReceive"
+        /// This wallet's own address, shown under "Receive".
+        public static let address = "aicoin.sendReceive.address"
+        /// The copy-own-address button.
+        public static let copyAddress = "aicoin.sendReceive.copyAddress"
+        /// The "send to" destination-address field.
+        public static let recipient = "aicoin.sendReceive.recipient"
+        /// The amount-to-send field.
+        public static let amount = "aicoin.sendReceive.amount"
+        /// The submit button (disabled until recipient + amount are valid).
+        public static let send = "aicoin.sendReceive.send"
+        /// The post-transfer result/error line (absent until a send is tried).
+        public static let status = "aicoin.sendReceive.status"
+    }
+
     private let identity: WalletIdentity
     private let walletClient: WalletClient
     @ObservedObject private var walletStore: WalletBalanceStore
@@ -34,10 +60,12 @@ public struct SendReceiveView: View {
                 Text(identity.address)
                     .font(.system(.footnote, design: .monospaced))
                     .textSelection(.enabled)
+                    .accessibilityIdentifier(Identifiers.address)
                 Button(didCopyAddress ? "Copied" : "Copy Address") {
                     copyToPasteboard(identity.address)
                     didCopyAddress = true
                 }
+                .accessibilityIdentifier(Identifiers.copyAddress)
             }
 
             Section("Send") {
@@ -46,10 +74,12 @@ public struct SendReceiveView: View {
                     .textInputAutocapitalization(.never)
                     #endif
                     .autocorrectionDisabled()
+                    .accessibilityIdentifier(Identifiers.recipient)
                 TextField("Amount", text: $amountText)
                     #if os(iOS)
                     .keyboardType(.decimalPad)
                     #endif
+                    .accessibilityIdentifier(Identifiers.amount)
 
                 Button {
                     Task { await send() }
@@ -61,6 +91,7 @@ public struct SendReceiveView: View {
                     }
                 }
                 .disabled(isSending || recipient.trimmingCharacters(in: .whitespaces).isEmpty || parsedAmount == nil)
+                .accessibilityIdentifier(Identifiers.send)
             }
 
             if let statusMessage {
@@ -68,9 +99,15 @@ public struct SendReceiveView: View {
                     Text(statusMessage)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(Identifiers.status)
                 }
             }
         }
+        // `.contain` rather than a bare identifier, for the same reason as
+        // `BuyAICoinSheet`'s root: keep the container addressable without its
+        // identifier propagating onto unnamed descendants.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Identifiers.root)
     }
 
     private var parsedAmount: Double? {
