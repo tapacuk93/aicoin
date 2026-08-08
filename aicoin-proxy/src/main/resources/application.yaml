@@ -10,7 +10,7 @@ aicoin:
   decayHalflifeDays: 110.0
   freeClaimCooldownSeconds: 3600
   signatureSkewSeconds: 120
-  freeCoinsPoolSize: 100
+  freeCoinsPoolSize: 5000
   adminToken: ""
 providers:
   openai:
