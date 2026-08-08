@@ -11,17 +11,36 @@
 # rounded to the nearest entry in the same PRICE_TIERS ladder as the Java test suite covers.
 #
 # Dependencies: curl, jq (JSON parsing — pure bash/awk can't safely walk the nested
-# /iap/packages array), awk (the price arithmetic/rounding), openssl + python3 (only for
-# build_asc_jwt's DER->raw ECDSA signature conversion — see that function's comment).
+# /iap/packages array), awk (the price arithmetic/rounding). Applying prices additionally needs
+# python3 with pyjwt/cryptography/requests, for asc_price_updater.py (see --apply below).
 #
 # Usage:
-#   ./adjust-iap-prices.sh [proxy_base_url]
-# Env vars (only required if/when update_asc_price is actually wired in — see its comment):
+#   ./adjust-iap-prices.sh [proxy_base_url]            # report only (default — safe, read-only)
+#   ./adjust-iap-prices.sh [proxy_base_url] --apply    # actually push new prices to App Store Connect
+#
+# Reporting is the default deliberately: this runs unattended on cron, and silently repricing live
+# products is not something that should happen unless explicitly asked for.
+#
+# Env vars (required only with --apply):
 #   ASC_KEY_ID, ASC_ISSUER_ID, ASC_PRIVATE_KEY_PATH
 
 set -euo pipefail
 
 BASE_URL="${1:-http://localhost:8080}"
+APPLY="${2:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# App Store Connect numeric app ids, keyed by the product-id prefix each app's packages use.
+# Note learnit (no hyphen) vs the real bundle id com.tarasmaslov.learn-it — Apple forbids hyphens
+# in productId, so the two genuinely differ for that one app. See CONTRACT.md's IAP section.
+asc_app_id_for_product() {
+  case "$1" in
+    com.tarasmaslov.infiniteairadio.*)     echo "6788594796" ;;
+    com.tarasmaslov.alllanguageslearner.*) echo "6796105967" ;;
+    com.tarasmaslov.learnit.*)             echo "6797492573" ;;
+    *)                                     echo "" ;;
+  esac
+}
 
 APPLE_CUT="0.30"
 FEE_MARGIN="0.50"
@@ -59,103 +78,83 @@ target_price() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# update_asc_price: builds a real ES256-signed App Store Connect API bearer JWT and is meant to
-# PATCH/POST the new manual price point onto an existing in-app purchase's
-# inAppPurchasePriceSchedule. The JWT construction below is real and complete (Apple's auth spec
-# is stable and well-documented: https://developer.apple.com/documentation/appstoreconnectapi/generating-tokens-for-api-requests).
-# The actual API call is INTENTIONALLY LEFT AS A STUB — see the TODO inside — because:
+# update_asc_price: pushes a new manual price onto a live App Store Connect in-app purchase.
 #
-#   1. App Store Connect API v2 in-app purchases require resolving a *price point id* per
-#      territory before you can reference it in a price schedule (GET
-#      /v1/inAppPurchases/{id}/pricePoints, filtered/matched by territory + customerPrice) — this
-#      proxy doesn't yet know the mapping from "$X.99" to the specific inAppPurchasePricePoints
-#      resource id Apple expects, which varies by territory and by the in-app purchase's own id.
-#   2. The exact current request body shape for creating/updating an
-#      inAppPurchasePriceSchedule (manualPrices relationships, startDate handling, base
-#      territory selection) is the part of Apple's API most likely to have shifted since this
-#      script was written, and getting it wrong risks silently mispricing a live product — this
-#      fails loudly (a clear log line) instead of silently doing nothing or guessing a shape.
+# The actual API work lives in asc_price_updater.py alongside this script: resolving a productId
+# to its numeric IAP resource id, walking the paginated per-territory price-point list to find the
+# id matching the target price, and POSTing the price schedule. That flow needs pagination and
+# nested JSON:API bodies, which are error-prone in shell — and its request shapes are the ones
+# verified against the live API when the twelve AICoin products were created, not guesses.
 #
-# Wiring in the real call requires: (a) one extra authenticated GET to resolve the price point id
-# for the target price + territory, then (b) a verified-against-current-docs POST/PATCH to
-# /v1/inAppPurchasePriceSchedules referencing that price point id.
+# It skips writes when the product is already at the target price, so running this hourly on cron
+# does not churn Apple's rate limits.
 # ---------------------------------------------------------------------------------------------
-build_asc_jwt() {
-  local key_id="$1" issuer_id="$2" private_key_path="$3"
-  for dep in openssl python3; do
-    if ! command -v "$dep" >/dev/null 2>&1; then
-      echo "error: required dependency '$dep' not found on PATH (needed by build_asc_jwt)" >&2
-      return 1
-    fi
-  done
-
-  local now exp header payload signing_input der_sig
-  now=$(date +%s)
-  exp=$((now + 1200)) # Apple rejects tokens with exp more than 20 minutes out.
-
-  header=$(printf '{"alg":"ES256","kid":"%s","typ":"JWT"}' "$key_id" | base64 | tr -d '=' | tr '/+' '_-' | tr -d '\n')
-  payload=$(printf '{"iss":"%s","iat":%d,"exp":%d,"aud":"appstoreconnect-v1"}' "$issuer_id" "$now" "$exp" \
-    | base64 | tr -d '=' | tr '/+' '_-' | tr -d '\n')
-  signing_input="${header}.${payload}"
-
-  # openssl's ECDSA signature output is ASN.1 DER (SEQUENCE{INTEGER r, INTEGER s}); JWS ES256
-  # requires raw big-endian r||s (32+32 bytes) instead — convert with a small, self-contained
-  # python3 snippet (no external Python packages) rather than hand-rolling ASN.1 parsing in awk.
-  der_sig=$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$private_key_path" | base64)
-
-  local jose_sig
-  jose_sig=$(python3 - "$der_sig" <<'PYEOF'
-import base64, sys
-der = base64.b64decode(sys.argv[1])
-# Minimal DER SEQUENCE{INTEGER, INTEGER} reader — exactly the shape openssl produces here.
-assert der[0] == 0x30
-idx = 2 if der[1] < 0x80 else 2 + (der[1] & 0x7f)
-def read_int(data, i):
-    assert data[i] == 0x02
-    length = data[i + 1]
-    start = i + 2
-    value = data[start:start + length]
-    value = value.lstrip(b'\x00') or b'\x00'
-    return value, start + length
-r, idx = read_int(der, idx)
-s, idx = read_int(der, idx)
-r = r.rjust(32, b'\x00')
-s = s.rjust(32, b'\x00')
-raw = r + s
-print(base64.urlsafe_b64encode(raw).rstrip(b'=').decode())
-PYEOF
-)
-
-  printf '%s.%s' "$signing_input" "$jose_sig"
-}
-
 update_asc_price() {
-  local product_id="$1" price_tier_id="$2"
-  if [[ -z "${ASC_KEY_ID:-}" || -z "${ASC_ISSUER_ID:-}" || -z "${ASC_PRIVATE_KEY_PATH:-}" ]]; then
-    echo "error: ASC_KEY_ID/ASC_ISSUER_ID/ASC_PRIVATE_KEY_PATH must all be set to call the App Store Connect API" >&2
+  local product_id="$1" target="$2"
+  local app_id
+  app_id=$(asc_app_id_for_product "$product_id")
+  if [[ -z "$app_id" ]]; then
+    echo "error: no App Store Connect app id mapped for product $product_id" >&2
     return 1
   fi
-  local jwt
-  jwt=$(build_asc_jwt "$ASC_KEY_ID" "$ASC_ISSUER_ID" "$ASC_PRIVATE_KEY_PATH")
-
-  # TODO(see comment above build_asc_jwt): the real App Store Connect API call belongs here —
-  # e.g. resolve a price point id for $price_tier_id/territory via
-  # GET https://api.appstoreconnect.apple.com/v1/inAppPurchases/{id}/pricePoints, then
-  # POST/PATCH https://api.appstoreconnect.apple.com/v1/inAppPurchasePriceSchedules with that
-  # relationship, both bearer-authenticated with "$jwt". Not implemented — see file header.
-  echo "STUB: would update App Store Connect price for $product_id to price point $price_tier_id (JWT built, API call not wired — see build_asc_jwt/update_asc_price comments in this script)"
+  if [[ -z "${ASC_KEY_ID:-}" || -z "${ASC_ISSUER_ID:-}" || -z "${ASC_PRIVATE_KEY_PATH:-}" ]]; then
+    echo "error: ASC_KEY_ID/ASC_ISSUER_ID/ASC_PRIVATE_KEY_PATH must all be set to use --apply" >&2
+    return 1
+  fi
+  python3 "$SCRIPT_DIR/asc_price_updater.py" \
+    --app-id "$app_id" --product-id "$product_id" --price "$target"
 }
 
 # ---------------------------------------------------------------------------------------------
 # Main: fetch the live price signal + current packages, log the recomputed target price for each.
 # ---------------------------------------------------------------------------------------------
-price_usd=$(curl -sS "${BASE_URL%/}/price" | jq -r '.price_usd')
+price_json=$(curl -sS "${BASE_URL%/}/price")
+price_usd=$(jq -r '.price_usd' <<<"$price_json")
+weighted_total=$(jq -r '.weighted_total // 0' <<<"$price_json")
 if [[ -z "$price_usd" || "$price_usd" == "null" ]]; then
   echo "error: could not read price_usd from ${BASE_URL%/}/price" >&2
   exit 1
 fi
 
-echo "current price_usd=$price_usd"
+echo "current price_usd=$price_usd (weighted_total=$weighted_total)"
+
+# ---------------------------------------------------------------------------------------------
+# SAFETY GUARD 1 — refuse to price off an empty or near-empty signal.
+#
+# price_usd is a recency-weighted average over recorded *paid calls*. On a fresh deploy (or after
+# a ledger wipe) there are no events, so it reports 0.0 — and the naive formula then collapses
+# EVERY package to the cheapest tier: a 5000-coin pack would be repriced from $44.99 to $0.99,
+# selling 5000 real AI calls for under a dollar. A thin sample is nearly as bad, since one
+# unusually cheap call would drag the whole ladder down. So: never auto-apply below a meaningful
+# sample size. Reporting still runs, so the cron log shows what it *would* do once data exists.
+# ---------------------------------------------------------------------------------------------
+MIN_WEIGHTED_EVENTS="${MIN_WEIGHTED_EVENTS:-50}"
+signal_usable=1
+if awk -v p="$price_usd" 'BEGIN { exit !(p <= 0) }'; then
+  echo "WARNING: price_usd is $price_usd — no usage recorded yet; refusing to apply any price change." >&2
+  signal_usable=0
+elif awk -v w="$weighted_total" -v m="$MIN_WEIGHTED_EVENTS" 'BEGIN { exit !(w < m) }'; then
+  echo "WARNING: only $weighted_total weighted events recorded (need >= $MIN_WEIGHTED_EVENTS); refusing to apply any price change." >&2
+  signal_usable=0
+fi
+if [[ "$APPLY" == "--apply" && "$signal_usable" -eq 0 ]]; then
+  echo "--apply requested but the price signal is not yet trustworthy — reporting only." >&2
+  APPLY=""
+fi
+
+# ---------------------------------------------------------------------------------------------
+# SAFETY GUARD 2 — circuit-breaker on any single large repricing.
+#
+# Even with a healthy signal, a bug upstream (or a genuinely wild swing in provider costs) should
+# not silently move a live product's price by an order of magnitude. Anything beyond this factor
+# in either direction is reported and skipped, so a human decides.
+# ---------------------------------------------------------------------------------------------
+MAX_CHANGE_FACTOR="${MAX_CHANGE_FACTOR:-2.0}"
+change_is_sane() {
+  local current="$1" target="$2"
+  awk -v c="$current" -v t="$target" -v f="$MAX_CHANGE_FACTOR" \
+    'BEGIN { if (c <= 0) { exit 1 } ; r = t / c ; exit !(r <= f && r >= 1 / f) }'
+}
 
 curl -sS "${BASE_URL%/}/iap/packages" | jq -c '.packages[]' | while IFS= read -r pkg; do
   product_id=$(jq -r '.product_id' <<<"$pkg")
@@ -165,9 +164,13 @@ curl -sS "${BASE_URL%/}/iap/packages" | jq -c '.packages[]' | while IFS= read -r
   target=$(target_price "$coins" "$price_usd")
 
   if awk -v a="$target" -v b="$current_price_hint" 'BEGIN { exit !(a == b) }'; then
-    echo "would keep $product_id at \$$current_price_hint (coins=$coins, already at the current target)"
+    echo "keep $product_id at \$$current_price_hint (coins=$coins, already at the current target)"
+  elif ! change_is_sane "$current_price_hint" "$target"; then
+    echo "SKIP $product_id: \$$current_price_hint -> \$$target exceeds the ${MAX_CHANGE_FACTOR}x circuit breaker (coins=$coins, price_usd=$price_usd) — review manually" >&2
+  elif [[ "$APPLY" == "--apply" ]]; then
+    echo "updating $product_id: \$$current_price_hint -> \$$target (coins=$coins, price_usd=$price_usd)"
+    update_asc_price "$product_id" "$target"
   else
-    echo "would update $product_id: \$$current_price_hint -> \$$target (coins=$coins, price_usd=$price_usd)"
-    # update_asc_price "$product_id" "$target"   # see update_asc_price's comment — not auto-invoked.
+    echo "would update $product_id: \$$current_price_hint -> \$$target (coins=$coins, price_usd=$price_usd)  [re-run with --apply to push]"
   fi
 done
