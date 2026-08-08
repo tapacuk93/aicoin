@@ -28,8 +28,10 @@ meant to stand on its own.
 
 ## Running
 
-You need a JDK 26 and a Redis (or Redis-compatible, e.g. Valkey) server
-reachable at `redis.host`/`redis.port` (default `localhost:6379`).
+You need a GraalVM JDK and a Redis (or Redis-compatible, e.g. Valkey) server
+reachable at `redis.host`/`redis.port` (default `localhost:6379`). `.java-version`
+and `build.gradle`'s toolchain currently pin **GraalVM 25** — see "Docker"
+below for why this isn't "GraalVM JDK 26" yet.
 
 ```
 ./gradlew run
@@ -51,8 +53,9 @@ server:
 redis:
   host: localhost                 # AICOIN_PROXY_REDIS_HOST
   port: 6379                      # AICOIN_PROXY_REDIS_PORT
+  username: ""                    # AICOIN_PROXY_REDIS_USERNAME (empty = no ACL username; production MemoryDB for Valkey requires ACL username+password auth, not just a password)
   password: ""                    # AICOIN_PROXY_REDIS_PASSWORD (empty = no AUTH)
-  ssl: false                      # AICOIN_PROXY_REDIS_SSL (true for ElastiCache in-transit encryption)
+  ssl: false                      # AICOIN_PROXY_REDIS_SSL (true for ElastiCache/MemoryDB in-transit encryption)
 aicoin:
   decayHalflifeDays: 110.0        # AICOIN_PROXY_DECAY_HALFLIFE_DAYS
   freeClaimCooldownSeconds: 3600  # AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS
@@ -354,6 +357,19 @@ just the Java-side shape:
   descending. Backs `GET /admin/wallets`.
 - `getTransactions(address, callback)` — `LRANGE aicoin:tx:{address} 0 -1`,
   reversed to most-recent-first. Backs `GET /admin/wallets/{address}/transactions`.
+- `getIapPackages(seedJsonIfUnset, callback)` — Redis `GET aicoin:iap-packages`;
+  if unset, `SETNX`s `seedJsonIfUnset` (the config's `iap.packages` list,
+  pre-rendered by `IapPackages.seedJson`) then re-`GET`s to resolve any race
+  with a concurrent first-ever seeder or admin write. Backs `GET /iap/packages`.
+- `setIapPackages(packagesJson, callback)` — a plain Redis `SET` (already
+  atomic for a single unconditional write, no Lua script needed). Backs
+  `POST /admin/iap/packages`.
+- `redeemIap(transactionId, address, productId, coins, callback)` — runs a
+  Lua `EVAL` script that `SETNX`s `aicoin:iap-redeemed:{transactionId}`; if
+  it was already set (a StoreKit retry), returns the current balance
+  unchanged; else credits `coins` via `INCRBYFLOAT`, `SADD`s the address into
+  `aicoin:known-wallets`, and appends an `iap` entry to `aicoin:tx:{address}`.
+  Backs `POST /wallet/api/redeem-iap`.
 
 All operations are async (Lettuce's `RedisFuture`/`CompletableFuture`
 API), matching the rest of this codebase's non-blocking Netty style — none
@@ -429,9 +445,56 @@ of them block an event-loop thread.
   - `GET /admin/wallets/{address}/transactions` → `{"address":"...","transactions":[{...}, ...]}`,
     most-recent first, backed by `AicoinLedger.getTransactions` — each entry
     is the raw JSON object the mutating Lua script `cjson.encode`d at the
-    time (`type` one of `claim`/`transfer_out`/`transfer_in`/`debit`/`refund`,
-    plus `amount`/`balance_after`/`at`, and either `counterparty` or
-    `provider` depending on `type`).
+    time (`type` one of `claim`/`transfer_out`/`transfer_in`/`debit`/`refund`/`iap`,
+    plus `amount`/`balance_after`/`at`, and one of `counterparty`, `provider`,
+    or `product_id` depending on `type`).
+  - `POST /admin/iap/packages` — same `X-Admin-Token` gating as the two
+    endpoints above (`IapPackagesHandler`, mirroring `AdminHandler`'s posture
+    exactly). Body: a JSON array shaped like `GET /iap/packages`'s
+    `packages` field. Validates every entry has a non-empty `product_id` and
+    a positive integer `coins` (`IapPackages.validate`) before atomically
+    overwriting `aicoin:iap-packages`; `400` with a specific reason on
+    validation failure. See `scripts/set-coin-packages.sh` for the CLI
+    wrapper around this endpoint.
+
+## IAP: buying aicoin with real money (App Store)
+
+The free faucet remains for onboarding; in-app purchase is the actual
+monetization path — see CONTRACT.md's "AICoin pricing" and "IAP: buying
+aicoin with real money" sections for the full design/pricing rationale.
+
+- `GET /iap/packages` → `{"packages":[{"product_id":"...","coins":N,"usd_price_hint":N}, ...]}`
+  — public, `Access-Control-Allow-Origin: *`, same posture as `GET /price`.
+  Backed by the single Redis string `aicoin:iap-packages`, lazily seeded from
+  config's `iap.packages` (12 entries: 4 coin tiers × the 3 client apps' real
+  bundle ids) the first time this is ever called against a fresh instance.
+- `POST /wallet/api/redeem-iap` — body `{"to_user_id":"<address>","signed_transaction":"<StoreKit2 Transaction.jwsRepresentation>"}`.
+  No live wallet signature required (crediting a wallet can't harm anyone,
+  same reasoning as the free faucet) — the entire security burden is on
+  `AppleJwsVerifier` proving the *purchase* is real:
+  1. Verifies `signed_transaction` as a genuine Apple JWS: parses the
+     compact-serialization header/payload/signature, checks `alg` is
+     `ES256`, decodes the header's `x5c` certificate chain, checks every
+     certificate's validity window, verifies each certificate's signature up
+     to the next one in the chain and the last one up to the bundled Apple
+     Root CA - G3 (`src/main/resources/apple-root-ca-g3.der` — genuinely
+     Apple's real, publicly published root certificate, fetched from
+     `https://www.apple.com/certificateauthority/AppleRootCA-G3.cer`; see
+     `AppleJwsVerifier`'s class javadoc for its SHA-256 fingerprint and a
+     re-verification pointer), then converts the JWS's raw R‖S ES256
+     signature to ASN.1 DER (`AppleJwsVerifier.joseToDer`, since Apple's JWS
+     format and Java's `Signature.verify` disagree on encoding) and verifies
+     it against the leaf certificate's public key.
+  2. Extracts `bundleId`/`productId`/`transactionId`/`quantity` from the
+     verified payload. `400` if `bundleId` isn't one of the three known apps
+     (`IapPackages.isKnownBundleId`) or `productId` isn't in the current
+     `aicoin:iap-packages` list (`IapPackages.findByProductId`).
+  3. Idempotency + credit run as one Lua script (`AicoinLedger.redeemIap`) —
+     see "The ledger" above. A retried/already-redeemed `transactionId` is a
+     safe `200` no-op with `"credited":0` and the current (unchanged)
+     balance, never an error, since StoreKit retries delivery of unfinished
+     transactions.
+  4. Response: `200 {"credited":N,"balance":N}`.
 
 ## Tests
 
@@ -463,9 +526,36 @@ JUnit5 pure-function tests, with no network/Redis dependency required:
 - `ProxyConfigTest` — config precedence (env var > YAML > default),
   covering `port`/`redis.*`/`aicoin.decayHalflifeDays`/
   `aicoin.freeClaimCooldownSeconds`/`aicoin.signatureSkewSeconds`/
-  `aicoin.freeCoinsPoolSize`/`aicoin.adminToken` and each of the 7 providers'
-  `baseUrl`/`apiKey`/`authHeader`/`authPrefix`/`authAsQueryParam`/
-  `authQueryParamName`.
+  `aicoin.freeCoinsPoolSize`/`aicoin.adminToken`/`redis.username` and each of
+  the 7 providers' `baseUrl`/`apiKey`/`authHeader`/`authPrefix`/
+  `authAsQueryParam`/`authQueryParamName`; also the bundled `iap.packages`
+  seed list (12 entries, all 3 apps × 4 tiers).
+- `AicoinLedgerTest` — `AicoinLedger.buildRedisUri`'s pure branching between
+  no-auth/password-only/ACL-username+password, and that host/port/SSL are
+  preserved regardless of auth mode (the rest of `AicoinLedger` needs a live
+  Redis connection, covered by `e2e/run.sh`).
+- `IapPackagesTest` — the `aicoin:iap-packages` JSON rendering (config seed
+  → JSON, `Entry` list → JSON), `POST /admin/iap/packages` body validation
+  (non-empty `product_id`, positive integer `coins`, optional
+  `usd_price_hint`), by-`product_id` lookup, and the three known bundle ids.
+- `AppleJwsVerifierTest` — a **genuinely-generated** test certificate chain
+  (a hand-rolled minimal X.509 v1 certificate builder using only the JDK's
+  own `Signature`/`KeyPairGenerator`/`CertificateFactory` — no bouncycastle
+  or other crypto library dependency) exercises the real verification logic:
+  a valid 2-level chain (root → intermediate → leaf) verifies and extracts
+  `bundleId`/`productId`/`transactionId`/`quantity`; a tampered payload or
+  signature, an expired or not-yet-valid certificate, a chain not rooted in
+  the given trusted root, an unsupported `alg`, and various malformed JWS
+  shapes are all rejected with a specific reason. Also confirms the bundled
+  `apple-root-ca-g3.der` resource loads and is genuinely Apple's real Root
+  CA - G3 (asserts its subject DN). The real Apple root's authenticity is
+  documented, not re-tested here — see `AppleJwsVerifier`'s class javadoc
+  for its SHA-256 fingerprint.
+- `AppStorePriceRoundingTest` — the "Automatic price adjustment" job's
+  price-point rounding math (`coins * price_usd * 1.5 / 0.7`, nearest-tier
+  rounding against the standard `$X.99` ladder), including where it does and
+  doesn't reproduce CONTRACT.md's illustrative launch-price table exactly
+  (see the note added to that table and this class's javadoc).
 - `AdminHandlerTest` — address-format validation (exactly 64 hex chars,
   upper/lowercase both accepted, wrong length/non-hex rejected) and the
   admin-token constant-time comparison (exact match only; the actual
@@ -540,11 +630,19 @@ against real claim/debit/refund activity.
   the window. Only genuine upstream responses — 2xx or not — are recorded,
   which is also exactly the status the health signals (`429`/`402`/`403`)
   are about.
-- **Toolchain.** This project targets Java 26 (`java.toolchain.languageVersion
-  = 26` in `build.gradle`), matching the repo-root `.java-version`
-  (`26.0.2`) — the latest available JDK release at the time this was
-  written, not the latest LTS (25); bump both together if that's ever a
-  problem (e.g. once `eclipse-temurin` drops image support for it).
+- **Toolchain.** This project targets GraalVM 25 (`java.toolchain.languageVersion
+  = 25` in `build.gradle`), matching the repo-root `.java-version` (`25.0.3`)
+  and the Dockerfile's `ghcr.io/graalvm/graalvm-community:25` base image —
+  **not** GraalVM JDK 26, despite CONTRACT.md's Docker section originally
+  calling for it and the rest of this codebase's "Java 26" framing: as of
+  this writing GraalVM has not published a JDK 26 build at all (verified
+  live against `ghcr.io/graalvm/graalvm-community`'s tag list and
+  graalvm.org's release calendar — see the note added to CONTRACT.md's
+  "Docker / docker-compose" section). All three of `build.gradle`'s
+  toolchain, both `.java-version` files, and the Dockerfile's image tag must
+  move together — bump them to 26 together the moment GraalVM ships that
+  build; running JDK-26-targeted bytecode on a JDK 25 JVM fails with
+  `UnsupportedClassVersionError` at startup, so these can never drift apart.
 - **Claim/transfer/per-call-debit atomicity.** The contract doesn't mandate a
   specific Redis mechanism for the check-then-mutate operations in the
   ledger (free-coins pool decrement + cooldown, transfer overdraft check,
@@ -583,19 +681,64 @@ against real claim/debit/refund activity.
   algorithm negotiation): the embedded address is always the verification
   key and Ed25519 is the only signature scheme ever used, so there's no
   algorithm-confusion surface to defend against.
+- **The Apple Root CA - G3 resource is real, not a placeholder.**
+  `src/main/resources/apple-root-ca-g3.der` was fetched directly from
+  `https://www.apple.com/certificateauthority/AppleRootCA-G3.cer` and its
+  SHA-256 fingerprint matches Apple's own published value (see
+  `AppleJwsVerifier`'s class javadoc) — this project does have outbound
+  network access in its build environment, so there was no need to stub this
+  out; re-verify the fingerprint against that URL if this resource is ever
+  regenerated.
+- **`POST /wallet/api/redeem-iap`'s `"credited"` field on an idempotent
+  replay** is `0`, not the package's coin amount — the response *shape*
+  matches a fresh credit (`{"credited":N,"balance":N}`, per CONTRACT.md),
+  but since a replay genuinely credits nothing, `credited:0` seemed more
+  honest than repeating the amount as if it had been credited again. The
+  `balance` field is always the wallet's real current balance either way.
+- **The IAP price-tier ladder** (`AppStorePriceRounding.PRICE_TIERS`,
+  mirrored in `scripts/adjust-iap-prices.sh`) is a representative subset of
+  Apple's real USD price points, not the complete ~100+-tier list across
+  every currency — sufficient to round the range this formula actually
+  produces for the launch coin amounts. See the note added to CONTRACT.md's
+  "Recommended launch packages" section for where this mechanical rule
+  diverges from that table's illustrative (hand-picked) example prices.
+- **The App Store Connect API call in `scripts/adjust-iap-prices.sh`'s
+  `update_asc_price()` is intentionally left as a documented stub, not
+  wired in.** The ES256-signed bearer JWT construction (`build_asc_jwt`) is
+  real and complete — Apple's App Store Connect API auth spec is stable and
+  well-documented. The actual price-schedule mutation is not, because (a) it
+  requires resolving a territory-specific *price point id* via a separate
+  authenticated lookup this script doesn't perform, and (b) the exact
+  current request body shape for `inAppPurchasePriceSchedules` is the part
+  of Apple's API most likely to have drifted since this was written —
+  getting it wrong risks silently mispricing a live product. The script logs
+  exactly what it *would* do instead of guessing; see the comment directly
+  above `update_asc_price` in that file for what's specifically missing.
 
 ## Docker
 
 `Dockerfile` is a multi-stage build, per `CONTRACT.md`'s "Docker /
 docker-compose" section:
 
-1. A `eclipse-temurin:17-jdk` build stage runs `./gradlew installDist`,
-   producing the `application` plugin's install output at
+1. A `ghcr.io/graalvm/graalvm-community:25` build stage runs `./gradlew
+   installDist`, producing the `application` plugin's install output at
    `build/install/aicoin-proxy/` (a `bin/aicoin-proxy` start script plus a
    `lib/` of jars — everything needed to run, no Gradle at runtime).
-2. Only that install output is copied onto an `eclipse-temurin:17-jre`
-   runtime base. The entrypoint runs the generated start script,
+2. Only that install output is copied onto the same GraalVM image as the
+   runtime base (GraalVM Community doesn't ship a separate JDK/JRE split the
+   way eclipse-temurin does). The entrypoint runs the generated start script,
    `/opt/aicoin-proxy/bin/aicoin-proxy`.
+
+**Why GraalVM 25, not "GraalVM JDK 26":** CONTRACT.md originally called for
+GraalVM JDK 26 specifically (matching the rest of the codebase's Java 26
+baseline), but GraalVM has not published a JDK 26 build as of this writing —
+verified against `ghcr.io/graalvm/graalvm-community`'s live tag list (no `26`
+tag) and graalvm.org's release calendar (no JDK 26 entry, even planned). This
+Dockerfile, `build.gradle`'s toolchain, and both `.java-version` files are
+pinned together to the latest real, published GraalVM major line (25) — all
+three must move together (running JDK-26-targeted bytecode on a JDK 25 JVM
+fails with `UnsupportedClassVersionError` at startup) — and should be bumped
+to 26 together the moment GraalVM actually ships that build.
 
 Nothing is baked into the image: `ProxyConfig` reads every setting from env
 vars first (see "Configuration" above), so the same image is reconfigured

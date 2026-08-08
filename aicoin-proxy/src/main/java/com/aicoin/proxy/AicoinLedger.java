@@ -38,6 +38,7 @@ final class AicoinLedger implements AutoCloseable {
     private static final String EVENTS_KEY = "aicoin:events";
     private static final String FREE_COINS_REMAINING_KEY = "aicoin:free-coins-remaining";
     private static final String KNOWN_WALLETS_KEY = "aicoin:known-wallets";
+    private static final String IAP_PACKAGES_KEY = "aicoin:iap-packages";
     /** Per-wallet transaction logs are capped at this many most-recent entries (draft/prototype: no pagination, no archival). */
     private static final int TX_LOG_CAP = 200;
 
@@ -93,6 +94,26 @@ final class AicoinLedger implements AutoCloseable {
             + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
             + "return {1, tostring(newBalance)}";
 
+    /**
+     * {@code SETNX} the idempotency marker and the balance credit happen in the same script, so a
+     * StoreKit retry of an already-finished transaction can never observe "not yet redeemed" and
+     * double-credit, and a crash between the two operations is impossible (there is no "between" —
+     * Redis runs the whole script atomically). Returns {@code {0, currentBalance}} on an
+     * already-redeemed replay (no-op, not an error, per CONTRACT.md) or {@code {1, newBalance}}
+     * on a fresh credit.
+     */
+    private static final String REDEEM_IAP_SCRIPT =
+            "local already = redis.call('SETNX', KEYS[1], '1') "
+            + "if already == 0 then "
+            + "  local balance = tonumber(redis.call('GET', KEYS[2]) or '0') "
+            + "  return {0, tostring(balance)} "
+            + "end "
+            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[2], ARGV[1]) "
+            + "redis.call('SADD', KEYS[3], ARGV[2]) "
+            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='iap', amount=tonumber(ARGV[1]), product_id=ARGV[3], balance_after=tonumber(newBalance), at=tonumber(ARGV[4])})) "
+            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
+            + "return {1, tostring(newBalance)}";
+
     private static final String REFUND_SCRIPT =
             "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1]) "
             + "redis.call('SADD', KEYS[2], ARGV[2]) "
@@ -105,13 +126,31 @@ final class AicoinLedger implements AutoCloseable {
     private final RedisAsyncCommands<String, String> commands;
 
     AicoinLedger(String host, int port, String password, boolean ssl) {
-        RedisURI.Builder uriBuilder = RedisURI.builder().withHost(host).withPort(port).withSsl(ssl);
-        if (password != null && !password.isEmpty()) {
-            uriBuilder.withPassword(password.toCharArray());
-        }
-        this.client = RedisClient.create(uriBuilder.build());
+        this(host, port, "", password, ssl);
+    }
+
+    /**
+     * @param username ACL username to authenticate as (production MemoryDB for Valkey requires
+     *                  ACL username+password auth, not just a password); empty means no ACL
+     *                  username — plain password-only auth (or no auth at all, if password is
+     *                  also empty), exactly the prior behavior, unchanged for every local/e2e
+     *                  Redis, which has no ACL configured.
+     */
+    AicoinLedger(String host, int port, String username, String password, boolean ssl) {
+        this.client = RedisClient.create(buildRedisUri(host, port, username, password, ssl));
         this.connection = client.connect();
         this.commands = connection.async();
+    }
+
+    /** Package-visible, pure (no connection opened), so the username/password branching is unit-testable on its own. */
+    static RedisURI buildRedisUri(String host, int port, String username, String password, boolean ssl) {
+        RedisURI.Builder uriBuilder = RedisURI.builder().withHost(host).withPort(port).withSsl(ssl);
+        if (username != null && !username.isEmpty()) {
+            uriBuilder.withAuthentication(username, password != null ? password : "");
+        } else if (password != null && !password.isEmpty()) {
+            uriBuilder.withPassword(password.toCharArray());
+        }
+        return uriBuilder.build();
     }
 
     /** {@link Optional#empty()} means the Redis call itself failed (ledger unreachable), not that the balance is unknown. */
@@ -369,6 +408,82 @@ final class AicoinLedger implements AutoCloseable {
         });
     }
 
+    /**
+     * The raw JSON array currently stored at {@code aicoin:iap-packages}, lazily seeded from
+     * {@code seedJsonIfUnset} (the config's {@code iap.packages} list, pre-rendered to the same
+     * JSON shape by {@link IapPackages#seedJson}) the first time this is ever called against a
+     * fresh instance. A plain {@code SETNX} race between two concurrent first-ever readers is
+     * harmless — both would try to seed the identical config-derived JSON, so whichever wins,
+     * the final re-{@code GET} returns the same content either way. {@link Optional#empty()}
+     * means the lookup itself failed.
+     */
+    void getIapPackages(String seedJsonIfUnset, Consumer<Optional<String>> onResult) {
+        commands.get(IAP_PACKAGES_KEY).whenComplete((value, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger iap-packages lookup failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            if (value != null) {
+                onResult.accept(Optional.of(value));
+                return;
+            }
+            commands.setnx(IAP_PACKAGES_KEY, seedJsonIfUnset).whenComplete((seeded, seedErr) -> {
+                if (seedErr != null) {
+                    LOG.log(Level.WARNING, "ledger iap-packages seed failed", seedErr);
+                    onResult.accept(Optional.empty());
+                    return;
+                }
+                // Re-GET rather than trusting seedJsonIfUnset directly: a concurrent admin
+                // POST /admin/iap/packages between the GET above and this SETNX would otherwise
+                // be silently clobbered by whichever caller lost the SETNX race.
+                commands.get(IAP_PACKAGES_KEY).whenComplete((finalValue, getErr) -> {
+                    if (getErr != null) {
+                        LOG.log(Level.WARNING, "ledger iap-packages post-seed lookup failed", getErr);
+                        onResult.accept(Optional.empty());
+                        return;
+                    }
+                    onResult.accept(Optional.of(finalValue != null ? finalValue : seedJsonIfUnset));
+                });
+            });
+        });
+    }
+
+    /** Atomically overwrites {@code aicoin:iap-packages} — a plain {@code SET} is already atomic with respect to every other client, no Lua script needed for a single unconditional write. */
+    void setIapPackages(String packagesJson, Consumer<Boolean> onResult) {
+        commands.set(IAP_PACKAGES_KEY, packagesJson).whenComplete((reply, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger iap-packages update failed", err);
+                onResult.accept(false);
+                return;
+            }
+            onResult.accept(true);
+        });
+    }
+
+    /**
+     * Credits {@code coins} aicoin to {@code address} for a verified StoreKit2 purchase, exactly
+     * once per {@code transactionId} — see {@link #REDEEM_IAP_SCRIPT}. A replay of an
+     * already-redeemed {@code transactionId} is a no-op, reported via {@link RedeemResult#isFreshCredit()}
+     * being {@code false}, carrying the wallet's current (unchanged) balance rather than an error.
+     */
+    void redeemIap(String transactionId, String address, String productId, double coins, Consumer<RedeemResult> onResult) {
+        long nowMillis = Instant.now().toEpochMilli();
+        RedisFuture<List<Object>> future = commands.eval(REDEEM_IAP_SCRIPT, ScriptOutputType.MULTI,
+                new String[] {iapRedeemedKey(transactionId), balanceKey(address), KNOWN_WALLETS_KEY, txKey(address)},
+                String.valueOf(coins), address, productId, String.valueOf(nowMillis));
+        future.whenComplete((raw, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger iap redeem failed for " + address, err);
+                onResult.accept(RedeemResult.unreachable());
+                return;
+            }
+            boolean freshCredit = ((Number) raw.get(0)).longValue() == 1L;
+            double balance = Double.parseDouble(String.valueOf(raw.get(1)));
+            onResult.accept(RedeemResult.decided(freshCredit, balance));
+        });
+    }
+
     @Override
     public void close() {
         connection.close();
@@ -389,6 +504,10 @@ final class AicoinLedger implements AutoCloseable {
 
     private static String txKey(String address) {
         return "aicoin:tx:" + address;
+    }
+
+    private static String iapRedeemedKey(String transactionId) {
+        return "aicoin:iap-redeemed:" + transactionId;
     }
 
     private static double parseCost(String member) {
@@ -470,6 +589,40 @@ final class AicoinLedger implements AutoCloseable {
 
         boolean isSuccess() {
             return success;
+        }
+
+        double getBalance() {
+            return balance;
+        }
+    }
+
+    /** Outcome of {@link #redeemIap}: ledger-unreachable, or a decided fresh-credit/already-redeemed-replay result, either way carrying the resulting/current balance. */
+    static final class RedeemResult {
+        private final boolean reachable;
+        private final boolean freshCredit;
+        private final double balance;
+
+        private RedeemResult(boolean reachable, boolean freshCredit, double balance) {
+            this.reachable = reachable;
+            this.freshCredit = freshCredit;
+            this.balance = balance;
+        }
+
+        static RedeemResult unreachable() {
+            return new RedeemResult(false, false, 0);
+        }
+
+        static RedeemResult decided(boolean freshCredit, double balance) {
+            return new RedeemResult(true, freshCredit, balance);
+        }
+
+        boolean isReachable() {
+            return reachable;
+        }
+
+        /** False for an already-redeemed {@code transactionId} replay — a safe no-op, not an error, per CONTRACT.md. */
+        boolean isFreshCredit() {
+            return freshCredit;
         }
 
         double getBalance() {

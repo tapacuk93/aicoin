@@ -3,6 +3,7 @@ package com.aicoin.proxy;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -29,6 +30,7 @@ public final class ProxyConfig {
     private final int port;
     private final String redisHost;
     private final int redisPort;
+    private final String redisUsername;
     private final String redisPassword;
     private final boolean redisSsl;
     private final double decayHalflifeDays;
@@ -40,15 +42,17 @@ public final class ProxyConfig {
     private final double costPerTokenUsd;
     private final double defaultCostUsdPerCall;
     private final int healthWindowSize;
+    private final List<IapPackageConfig> iapPackages;
 
-    private ProxyConfig(int port, String redisHost, int redisPort, String redisPassword, boolean redisSsl,
+    private ProxyConfig(int port, String redisHost, int redisPort, String redisUsername, String redisPassword, boolean redisSsl,
                          double decayHalflifeDays, int freeClaimCooldownSeconds, int signatureSkewSeconds,
                          int freeCoinsPoolSize, String adminToken, Map<String, ProviderConfig> providers,
                          double costPerTokenUsd, double defaultCostUsdPerCall,
-                         int healthWindowSize) {
+                         int healthWindowSize, List<IapPackageConfig> iapPackages) {
         this.port = port;
         this.redisHost = redisHost;
         this.redisPort = redisPort;
+        this.redisUsername = redisUsername;
         this.redisPassword = redisPassword;
         this.redisSsl = redisSsl;
         this.decayHalflifeDays = decayHalflifeDays;
@@ -60,6 +64,7 @@ public final class ProxyConfig {
         this.costPerTokenUsd = costPerTokenUsd;
         this.defaultCostUsdPerCall = defaultCostUsdPerCall;
         this.healthWindowSize = healthWindowSize;
+        this.iapPackages = iapPackages;
     }
 
     public int getPort() {
@@ -72,6 +77,17 @@ public final class ProxyConfig {
 
     public int getRedisPort() {
         return redisPort;
+    }
+
+    /**
+     * @return {@code redis.username}: the ACL username to authenticate to Redis as (env {@code
+     * AICOIN_PROXY_REDIS_USERNAME}). Empty (the default) means no ACL username — plain
+     * {@code redis.password}-only auth (or no auth at all if that's also empty), matching every
+     * local/e2e Redis, which has no ACL configured. Production MemoryDB for Valkey requires ACL
+     * username+password auth, which is why this exists separately from {@link #getRedisPassword()}.
+     */
+    public String getRedisUsername() {
+        return redisUsername;
     }
 
     public String getRedisPassword() {
@@ -135,6 +151,17 @@ public final class ProxyConfig {
         return healthWindowSize;
     }
 
+    /**
+     * @return {@code iap.packages}: the seed list of coin packages used to lazily initialize
+     * {@code aicoin:iap-packages} in Redis the first time {@code GET /iap/packages} is ever called
+     * against a fresh instance (see {@link IapPackages}). Not env-var-overridable (unlike every
+     * other config value here) — 12 structured entries don't fit a single env var; use the admin
+     * script (@code set-coin-packages.sh}) to change packages after boot instead.
+     */
+    public List<IapPackageConfig> getIapPackages() {
+        return iapPackages;
+    }
+
     public static ProxyConfig load() {
         return load(System.getenv());
     }
@@ -146,6 +173,7 @@ public final class ProxyConfig {
         int port = getInt(yaml, "server.port", 8080);
         String redisHost = getString(yaml, "redis.host", "localhost");
         int redisPort = getInt(yaml, "redis.port", 6379);
+        String redisUsername = getString(yaml, "redis.username", "");
         String redisPassword = getString(yaml, "redis.password", "");
         boolean redisSsl = getBoolean(yaml, "redis.ssl", false);
         double decayHalflifeDays = getDouble(yaml, "aicoin.decayHalflifeDays", 110.0);
@@ -190,11 +218,13 @@ public final class ProxyConfig {
         double costPerTokenUsd = getDouble(yaml, "pricing.costPerTokenUsd", 0.000002);
         double defaultCostUsdPerCall = getDouble(yaml, "pricing.defaultCostUsdPerCall", 0.001);
         int healthWindowSize = getInt(yaml, "health.windowSize", 50);
+        List<IapPackageConfig> iapPackages = getIapPackageList(yaml);
 
         // Env var overrides (highest precedence).
         port = envInt(env, "AICOIN_PROXY_PORT", port);
         redisHost = envStr(env, "AICOIN_PROXY_REDIS_HOST", redisHost);
         redisPort = envInt(env, "AICOIN_PROXY_REDIS_PORT", redisPort);
+        redisUsername = envStr(env, "AICOIN_PROXY_REDIS_USERNAME", redisUsername);
         redisPassword = envStr(env, "AICOIN_PROXY_REDIS_PASSWORD", redisPassword);
         redisSsl = envBool(env, "AICOIN_PROXY_REDIS_SSL", redisSsl);
         decayHalflifeDays = envDouble(env, "AICOIN_PROXY_DECAY_HALFLIFE_DAYS", decayHalflifeDays);
@@ -206,9 +236,40 @@ public final class ProxyConfig {
         defaultCostUsdPerCall = envDouble(env, "AICOIN_PROXY_DEFAULT_COST_USD", defaultCostUsdPerCall);
         healthWindowSize = envInt(env, "AICOIN_PROXY_HEALTH_WINDOW_SIZE", healthWindowSize);
 
-        return new ProxyConfig(port, redisHost, redisPort, redisPassword, redisSsl,
+        return new ProxyConfig(port, redisHost, redisPort, redisUsername, redisPassword, redisSsl,
                 decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
-                costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize);
+                costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages);
+    }
+
+    /**
+     * Parses {@code iap.packages}: a YAML list of {@code {productId, coins, usdPriceHint}} maps,
+     * per CONTRACT.md's "IAP coin packages" config seed. Missing/malformed entries are skipped
+     * rather than failing config load entirely — a typo in one package shouldn't take down the
+     * whole proxy, though a genuinely empty result just means {@code GET /iap/packages} seeds an
+     * empty list on first read (still valid, just not useful until an admin sets real packages).
+     */
+    @SuppressWarnings("unchecked")
+    private static List<IapPackageConfig> getIapPackageList(Map<String, Object> yaml) {
+        Object raw = getNested(yaml, "iap.packages");
+        if (!(raw instanceof List)) {
+            return Collections.emptyList();
+        }
+        List<IapPackageConfig> result = new ArrayList<>();
+        for (Object entry : (List<Object>) raw) {
+            if (!(entry instanceof Map)) {
+                continue;
+            }
+            Map<String, Object> map = (Map<String, Object>) entry;
+            Object productId = map.get("productId");
+            Object coins = map.get("coins");
+            Object usdPriceHint = map.get("usdPriceHint");
+            if (!(productId instanceof String) || ((String) productId).isEmpty() || !(coins instanceof Number)) {
+                continue;
+            }
+            double priceHint = (usdPriceHint instanceof Number) ? ((Number) usdPriceHint).doubleValue() : 0.0;
+            result.add(new IapPackageConfig((String) productId, ((Number) coins).intValue(), priceHint));
+        }
+        return Collections.unmodifiableList(result);
     }
 
     @SuppressWarnings("unchecked")

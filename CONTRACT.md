@@ -33,8 +33,9 @@ server:
 redis:
   host: localhost                 # AICOIN_PROXY_REDIS_HOST
   port: 6379                      # AICOIN_PROXY_REDIS_PORT
+  username: ""                    # AICOIN_PROXY_REDIS_USERNAME (empty = no ACL username; production MemoryDB for Valkey requires ACL username+password auth, not just a password)
   password: ""                    # AICOIN_PROXY_REDIS_PASSWORD (empty = no AUTH)
-  ssl: false                      # AICOIN_PROXY_REDIS_SSL (true for ElastiCache in-transit encryption)
+  ssl: false                      # AICOIN_PROXY_REDIS_SSL (true for ElastiCache/MemoryDB in-transit encryption)
 aicoin:
   decayHalflifeDays: 110.0        # AICOIN_PROXY_DECAY_HALFLIFE_DAYS
   freeClaimCooldownSeconds: 3600  # AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS
@@ -143,7 +144,9 @@ Keys, namespaced under `aicoin:`:
 | Free-coins pool remaining | `aicoin:free-coins-remaining` | String (int) | shared across every wallet, lazily initialized to `aicoin.freeCoinsPoolSize` on first-ever claim; read/written only inside the claim Lua script |
 | Token revocation | `aicoin:token-revoked-before:{address}` | String (epoch-millis) | set by `POST /wallet/api/revoke-tokens`; missing = never revoked |
 | Known wallets | `aicoin:known-wallets` | SET | every address ever seen as a claim recipient, transfer party, or call payer — `SADD`ed inside the same Lua script as the mutation it accompanies. Powers the admin page's wallet list; nothing else reads it |
-| Transaction log | `aicoin:tx:{address}` | LIST | one JSON object per claim/transfer/debit/refund touching this address, appended (`RPUSH`) inside the same script as the balance mutation, capped to the most recent 200 (`LTRIM`) — see "Admin page" below for the exact shape |
+| Transaction log | `aicoin:tx:{address}` | LIST | one JSON object per claim/transfer/debit/refund/iap touching this address, appended (`RPUSH`) inside the same script as the balance mutation, capped to the most recent 200 (`LTRIM`) — see "Admin page" below for the exact shape |
+| IAP coin packages | `aicoin:iap-packages` | String (JSON array) | the current `GET /iap/packages` list; lazily seeded from config's `iap.packages` on first read if unset, atomically overwritten by `POST /admin/iap/packages` — see "IAP: buying aicoin with real money" below |
+| IAP redemption idempotency marker | `aicoin:iap-redeemed:{transactionId}` | String (`"1"`) | `SETNX`-ed inside the same Lua script that credits the balance in `POST /wallet/api/redeem-iap`, so a StoreKit retry of an already-finished transaction is a safe no-op, never a double-credit |
 
 **Price (final formula, v2: smooth exponential decay)** — unchanged math from
 before, now computed by fetching the full event log rather than folding
@@ -190,13 +193,14 @@ without a live Redis connection. This is purely a market-rate *signal*, distinct
 from the fixed 1-aicoin-per-call spending rate above — a call always costs
 1.0 aicoin regardless of what the price formula currently reports.
 
-**Atomicity**: claim, transfer, and the per-call debit are all check-then-mutate
-operations that must be atomic against concurrent calls for the same wallet
-(or the same shared pool), or two concurrent claims could both mint/double-count
-the pool, two concurrent transfers could both pass a stale balance check and
-overdraw, or two concurrent calls could both debit past zero. All three run
-as single Redis Lua `EVAL` scripts, which Redis executes atomically with
-respect to every other client:
+**Atomicity**: claim, transfer, the per-call debit, and IAP redemption are all
+check-then-mutate operations that must be atomic against concurrent calls for
+the same wallet (or the same shared pool), or two concurrent claims could
+both mint/double-count the pool, two concurrent transfers could both pass a
+stale balance check and overdraw, two concurrent calls could both debit past
+zero, or two concurrent/retried IAP redemptions of the same `transactionId`
+could double-credit. All four run as single Redis Lua `EVAL` scripts, which
+Redis executes atomically with respect to every other client:
 - **Claim**: read `lastclaim:{address}`; if `now - lastclaim < cooldownMillis`
   return not-eligible (`reason:"cooldown"`). Else read the shared pool
   counter (lazily initialized to `aicoin.freeCoinsPoolSize` if never set);
@@ -212,6 +216,11 @@ respect to every other client:
   (with the current balance, for the `402` body); else `INCRBYFLOAT balance
   -1.0` and return success. A failed upstream call reverses this with a
   plain `INCRBYFLOAT balance +1.0` (no script needed for a pure increment).
+- **IAP redemption**: `SETNX iap-redeemed:{transactionId}`; if it was already
+  set (a replay), return the current balance unchanged, no credit applied.
+  Else `INCRBYFLOAT balance:{to_user_id} coins*quantity` and return the new
+  balance — same script, so the idempotency marker and the credit can never
+  observably diverge.
 
 ### Free-coin faucet
 `POST /wallet/api/claim` — live-signed, no body needed. Runs the claim script
@@ -264,6 +273,7 @@ history, so it needs its own, separate auth.
   - `{"type":"claim","amount":N,"balance_after":N,"at":epochMillis}`
   - `{"type":"transfer_out"|"transfer_in","amount":N,"counterparty":"<address>","balance_after":N,"at":epochMillis}`
   - `{"type":"debit"|"refund","amount":N,"provider":"<name>","balance_after":N,"at":epochMillis}`
+  - `{"type":"iap","amount":N,"product_id":"<id>","balance_after":N,"at":epochMillis}`
 - **Auth**: both data endpoints require a header `X-Admin-Token: <token>`
   matching `aicoin.adminToken` (env `AICOIN_PROXY_ADMIN_TOKEN`), compared in
   constant time. That config value defaults to empty, which disables this
@@ -276,5 +286,63 @@ history, so it needs its own, separate auth.
 - JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs), and the admin token's constant-time comparison + address-format validation — no network/Redis needed.
 
 ## Docker / docker-compose
-- `aicoin-proxy/Dockerfile` — multi-stage: `./gradlew build` in a JDK-26 build stage, copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a JRE-26 runtime image. Entrypoint runs the generated start script.
-- Repo-root `docker-compose.yml`: `redis` (`redis:7-alpine`, `--save 60 1000` snapshotting), `aicoin-proxy` (built from `aicoin-proxy/Dockerfile`, pointed at `redis` via `AICOIN_PROXY_REDIS_HOST`/`_PORT`). Production points those env vars at a real ElastiCache endpoint instead.
+- `aicoin-proxy/Dockerfile` — multi-stage: build stage on **GraalVM** (not vanilla OpenJDK), copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a matching GraalVM runtime image. Entrypoint runs the generated start script. GraalVM chosen for a smaller heap footprint on the cheap single-vCPU production host (see "Production hosting" below); full ahead-of-time `native-image` is a future option, not required now, since the app plugin's script + GraalVM JIT already meets the cost/perf bar.
+  **Version note (corrected from an earlier draft of this doc):** this originally called for "GraalVM JDK 26" specifically, but as of this writing (Aug 2026) GraalVM has not published a JDK 26 build at all — verified against `ghcr.io/graalvm/graalvm-community`'s live tag list (no `26` tag; latest is the 25.x line) and graalvm.org's release calendar (no JDK 26 entry, even planned). `aicoin-proxy/Dockerfile`, `build.gradle`'s toolchain, and both `.java-version` files are pinned together to the latest real, published GraalVM major line (currently **25**, e.g. `ghcr.io/graalvm/graalvm-community:25`) instead of a nonexistent tag — bump all of them to `26` together the moment GraalVM actually ships that build.
+- Repo-root `docker-compose.yml`: `redis` (`redis:7-alpine`, `--save 60 1000` snapshotting), `aicoin-proxy` (built from `aicoin-proxy/Dockerfile`, pointed at `redis` via `AICOIN_PROXY_REDIS_HOST`/`_PORT`). Local/e2e only — plain Redis snapshotting is fine for a throwaway dev container. Production points those env vars at a real MemoryDB endpoint instead (see below), never at ElastiCache.
+
+## Production hosting decision
+
+**Persistence: MemoryDB for Valkey, not ElastiCache.** ElastiCache's only durability mechanism is periodic RDB snapshots — a crash between snapshots loses every write since the last one, which is unacceptable for a ledger that *is* real user funds. MemoryDB durably commits every write to a multi-AZ distributed transaction log before acknowledging it — genuinely "all-time persistent," not just periodically persisted — while remaining an in-memory store, so read/write latency stays effectively as fast as ElastiCache (sub-millisecond). Within that "actually durable" tier, Valkey is chosen over MemoryDB's Redis-OSS-compatible option because AWS prices Valkey lower for the same node class with no functional loss (Lettuce speaks RESP either way). Cheapest viable topology: **one `db.t4g.small` node, zero replicas** (~$0.060/hr ≈ **$44/mo** in us-east-1) — MemoryDB's durability comes from the transaction-log service itself, not from having a replica, so a replica only buys HA/read-scaling, not durability, and isn't needed at this traffic level. `redis.ssl: true` is required against MemoryDB (in-transit TLS is not optional). MemoryDB for Valkey also requires ACL username+password auth rather than a bare password — `redis.username`/`AICOIN_PROXY_REDIS_USERNAME` (empty by default, matching every local/e2e Redis, which has no ACL configured) must be set to the configured ACL username in production; `AicoinLedger` uses Lettuce's `RedisURI.Builder.withAuthentication(username, password)` instead of `withPassword(...)` whenever a non-empty username is present.
+
+**Compute: a single Lightsail Linux VM, not ECS/Fargate/App Runner/Lightsail Container Service.** All of those managed-container options carry either a per-vCPU-second premium or a higher fixed floor (Container Service nano ≈ $7/mo, App Runner's baseline is pricier still) than simply running Docker Engine directly on the cheapest Lightsail VM with a public IPv4 (the $5/mo "nano" plan: 512MB/2vCPU/20GB SSD/1TB transfer — the $3.50/mo tier is IPv6-only, which risks unreachability for clients on IPv4-only networks, so it's not used). `docker compose up -d` on that box runs `aicoin-proxy` plus a small Caddy container in front of it for automatic Let's Encrypt TLS + reverse proxy to `apps.oeaio.com`. Total steady-state infra cost: **≈ $44 (MemoryDB) + $5 (Lightsail) + ~$1 (Route53 hosted zone + query volume) ≈ $50/mo**, before AI provider spend itself (which is pass-through, funded by aicoin sales).
+
+## AICoin pricing (IAP packages) and provider prediction
+
+**1 aicoin is fixed at exactly 1 paid AI call, always** (see Balance gate above) — the *market* `/price` (real recency-weighted USD cost) is a separate, informational signal used only to decide what to *charge* for a package of coins, never to change the 1-coin-per-call spend rate.
+
+**Cost-per-call estimate**: none of the three client apps default to the cheapest possible model — all three market themselves around Anthropic Claude specifically (Infinite AI Radio's tagline is "powered by Claude"; it and All Languages Learner both wire `ClaudeClient` as their one dedicated/primary text client; Learn Its' `AIProviderRegistry` lists Anthropic alongside OpenAI-compatible options but Claude is the natural default for the same reason). **Prediction: Anthropic Claude will be the most-selected provider in aggregate usage** — it's the only provider all three apps are built and marketed around; the others (OpenAI/Gemini/Mistral/etc.) exist as user-chosen alternatives, not defaults. Blended call cost, assuming a Claude Haiku-class model and the token mix these apps actually generate (a several-hundred-word passage/lesson/monologue segment, ~1,000–2,000 tokens total in+out): **≈ $0.003–0.006/call** — above the proxy's `defaultCostUsdPerCall` fallback (0.001, deliberately conservative) and consistent with `costPerTokenUsd` (0.000002/token × ~1,500 tokens ≈ $0.003). Once real traffic flows, `/price` supersedes this estimate automatically — it's a live number, not a fixed config.
+
+**Recommended launch packages** (coins fixed, USD price derived as `coins × cost_per_call × (1 + feeMargin) / (1 − appleCut)`, `appleCut = 0.30` flat for consumable IAP regardless of app age, `feeMargin = 0.50`, then rounded to a normal-looking App Store price point), using the $0.004/call midpoint of the estimate above:
+
+| Package | Coins | Raw formula | Launch price |
+|---|---|---|---|
+| Small | 50 | $0.43 | **$0.99** |
+| Medium | 200 | $1.71 | **$2.99** |
+| Large | 1,000 | $8.57 | **$9.99** |
+| XL | 5,000 | $42.86 | **$44.99** |
+
+These are *starting* prices, seeded into `aicoin:iap-packages` at first boot and adjustable at any time via the admin script (see "IAP coin packages" below) or automatically (see "Automatic price adjustment" below) as real `/price` data replaces the estimate.
+
+**Rounding rule note (added for implementation clarity):** the four launch prices above ($0.99/$2.99/$9.99/$44.99) are the literal, hardcoded seed values in `iap.packages`/`application.yaml` — they are not recomputed at runtime and always match this table exactly regardless of any rounding function. The *mechanical* "round to a normal-looking App Store price point" rule used by the automatic-adjustment job below (`AppStorePriceRounding.java`, mirrored in `adjust-iap-prices.sh`) is nearest-tier rounding against a standard ladder of `$X.99` price points. Applied to this table's own raw values, nearest-tier rounding reproduces the Small ($0.43→$0.99) and XL ($42.86→$44.99) rows exactly, but would round Medium and Large one tier lower than shown here ($1.71→$1.99, not $2.99; $8.57→$8.99, not $9.99) — those two entries were chosen as clean, memorable launch numbers rather than mechanically derived. This is a documented, intentional discrepancy between the illustrative table above and the mechanical rule the automatic job actually runs going forward; it only matters once real `/price` data starts moving prices away from these seed values.
+
+## IAP: buying aicoin with real money (App Store)
+
+There are now exactly two ways to *acquire* aicoin: the existing peer transfer (unchanged), and a real in-app purchase. The free faucet remains for onboarding; IAP is the actual monetization path.
+
+### Coin packages (server-configured, client-agnostic)
+- `GET /iap/packages` → `{"packages":[{"product_id":"...","coins":N,"usd_price_hint":N}, ...]}` — public, `Access-Control-Allow-Origin: *`, same posture as `/price`. Backed by a single Redis string key `aicoin:iap-packages` (JSON array), lazily seeded from the config's `iap.packages` YAML list (below) on first read if unset. Every client app fetches this list at launch/paywall-open time instead of hardcoding coin amounts — "number of coins available to buy varies depending on what's set on the server" is this one key, nothing client-side. `usd_price_hint` is informational display copy only; the *actual* charged price is always whatever App Store Connect has configured for that `product_id` in each app, since Apple — not this server — collects payment.
+- Because Apple in-app purchase product IDs are scoped to one app each, the same four coin tiers exist as **separate product IDs per app**, all listed in the one `aicoin:iap-packages` JSON array (12 entries total: 4 tiers × 3 apps): `com.tarasmaslov.infiniteairadio.aicoin.{small,medium,large,xl}`, `com.tarasmaslov.alllanguageslearner.aicoin.{small,medium,large,xl}`, `com.tarasmaslov.learn-it.aicoin.{small,medium,large,xl}`. A client only ever needs the subset whose `product_id` starts with its own bundle ID.
+- Config seed (YAML, mirrors the launch prices above):
+  ```yaml
+  iap:
+    packages:
+      - { productId: com.tarasmaslov.infiniteairadio.aicoin.small,  coins: 50,   usdPriceHint: 0.99 }
+      - { productId: com.tarasmaslov.infiniteairadio.aicoin.medium, coins: 200,  usdPriceHint: 2.99 }
+      - { productId: com.tarasmaslov.infiniteairadio.aicoin.large,  coins: 1000, usdPriceHint: 9.99 }
+      - { productId: com.tarasmaslov.infiniteairadio.aicoin.xl,     coins: 5000, usdPriceHint: 44.99 }
+      # ...same four tiers, repeated for alllanguageslearner and learn-it bundle IDs
+  ```
+- **Admin script**: `aicoin-proxy/scripts/set-coin-packages.sh <packages.json>` — reads a JSON file in the same shape as `GET /iap/packages`'s `packages` array and `PUT`s it to `POST /admin/iap/packages` (`X-Admin-Token` gated, same posture as the rest of `/admin/*`), which atomically overwrites `aicoin:iap-packages` after validating every entry has a non-empty `product_id` and a positive integer `coins`. This is the one place "currently available coins" is set — a single source of truth every app reads.
+
+### Redeeming a purchase (`POST /wallet/api/redeem-iap`)
+Body: `{"to_user_id":"<address>","signed_transaction":"<StoreKit2 Transaction.jwsRepresentation>"}`. No live wallet signature required — crediting a wallet can't harm anyone, same reasoning as the free faucet, so the security burden is entirely on proving the *purchase* is real, not on proving control of the destination address:
+1. Verify `signed_transaction` as a genuine Apple JWS: validate the x5c certificate chain up to Apple's bundled Root CA - G3 (no network call needed — this is why it's secure server-to-server without a shared secret: Apple's signature is the trust anchor, not a bearer secret that could leak), and check it hasn't expired.
+2. Extract `bundleId`, `productId`, `transactionId`, `quantity` from the verified payload. Reject (`400`) if `bundleId` isn't one of the three known apps, or `productId` isn't in the current `aicoin:iap-packages` list.
+3. Idempotency: `SETNX aicoin:iap-redeemed:{transactionId} 1` (Lua-atomic alongside the credit, same shape as the other ledger scripts) — a `transactionId` that's already been redeemed is a no-op `200` (not an error — StoreKit retries delivery of unfinished transactions, so this must be safely repeatable), never a double-credit.
+4. Credit `to_user_id`'s balance by `coins * quantity`, log a `{"type":"iap","amount":N,"product_id":"...","balance_after":N,"at":epochMillis}` entry into `aicoin:tx:{to_user_id}`, `SADD` into `aicoin:known-wallets`.
+5. Response: `200 {"credited":N,"balance":N}` (or the already-redeemed no-op's current balance, same shape).
+This endpoint is why HTTPS between every app and `apps.oeaio.com` is non-negotiable in production (TLS via the Lightsail Caddy front-end) — the JWS itself is tamper-evident, but the wallet address it's credited to travels in the clear otherwise.
+
+## Automatic price adjustment
+
+A small scheduled job (cron on the Lightsail host, `aicoin-proxy/scripts/adjust-iap-prices.sh`, hourly) re-derives each package's target USD price from the *current* `/price` signal (not the launch estimate above) using the same formula (`coins × price_usd × 1.5 / 0.7`, rounded to the nearest App Store price point), and — where the App Store Connect API supports it (manual price schedules on an existing in-app purchase's `inAppPurchasePriceSchedule`) — pushes the new price point automatically via the App Store Connect API, one call per product ID, only when the computed price point differs from the currently-scheduled one (avoids no-op API churn/rate limits). Coin *amounts* per package never change automatically, only price — keeps the on-screen "50 coins" etc. stable for users while the $ cost of that package tracks real AI spend plus the fixed fee margin.

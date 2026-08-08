@@ -8,7 +8,15 @@ repositories {
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(26)
+        // NOTE: CONTRACT.md's Docker section calls for "GraalVM JDK 26"; as of this writing (Aug
+        // 2026) GraalVM has not published a JDK 26 build at all — the latest available is the
+        // GraalVM-for-JDK-25 line (25.0.3 at time of writing; verified against
+        // ghcr.io/graalvm/graalvm-community's live tag list and graalvm.org's release calendar,
+        // which shows no JDK 26 entry even in planned future releases). This toolchain version
+        // must stay in lockstep with aicoin-proxy/Dockerfile's GraalVM base image tag (running
+        // JDK-26-targeted bytecode on a JDK 25 JVM would fail with UnsupportedClassVersionError
+        // at startup) — bump both together the moment GraalVM ships a 26 build.
+        languageVersion = JavaLanguageVersion.of(25)
     }
 }
 

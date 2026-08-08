@@ -3,6 +3,7 @@ server:
 redis:
   host: localhost
   port: 6379
+  username: ""
   password: ""
   ssl: false
 aicoin:
@@ -52,3 +53,17 @@ pricing:
   defaultCostUsdPerCall: 0.001
 health:
   windowSize: 50
+iap:
+  packages:
+    - { productId: com.tarasmaslov.infiniteairadio.aicoin.small,       coins: 50,   usdPriceHint: 0.99 }
+    - { productId: com.tarasmaslov.infiniteairadio.aicoin.medium,      coins: 200,  usdPriceHint: 2.99 }
+    - { productId: com.tarasmaslov.infiniteairadio.aicoin.large,       coins: 1000, usdPriceHint: 9.99 }
+    - { productId: com.tarasmaslov.infiniteairadio.aicoin.xl,          coins: 5000, usdPriceHint: 44.99 }
+    - { productId: com.tarasmaslov.alllanguageslearner.aicoin.small,   coins: 50,   usdPriceHint: 0.99 }
+    - { productId: com.tarasmaslov.alllanguageslearner.aicoin.medium,  coins: 200,  usdPriceHint: 2.99 }
+    - { productId: com.tarasmaslov.alllanguageslearner.aicoin.large,   coins: 1000, usdPriceHint: 9.99 }
+    - { productId: com.tarasmaslov.alllanguageslearner.aicoin.xl,      coins: 5000, usdPriceHint: 44.99 }
+    - { productId: com.tarasmaslov.learn-it.aicoin.small,              coins: 50,   usdPriceHint: 0.99 }
+    - { productId: com.tarasmaslov.learn-it.aicoin.medium,             coins: 200,  usdPriceHint: 2.99 }
+    - { productId: com.tarasmaslov.learn-it.aicoin.large,              coins: 1000, usdPriceHint: 9.99 }
+    - { productId: com.tarasmaslov.learn-it.aicoin.xl,                 coins: 5000, usdPriceHint: 44.99 }

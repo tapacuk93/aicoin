@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -16,6 +17,7 @@ class ProxyConfigTest {
         assertEquals(8080, config.getPort());
         assertEquals("localhost", config.getRedisHost());
         assertEquals(6379, config.getRedisPort());
+        assertEquals("", config.getRedisUsername());
         assertEquals("", config.getRedisPassword());
         assertFalse(config.isRedisSsl());
         assertEquals(110.0, config.getDecayHalflifeDays(), 1e-12);
@@ -59,6 +61,27 @@ class ProxyConfigTest {
         assertEquals(0.000002, config.getCostPerTokenUsd(), 1e-12);
         assertEquals(0.001, config.getDefaultCostUsdPerCall(), 1e-12);
         assertEquals(50, config.getHealthWindowSize());
+
+        assertEquals(12, config.getIapPackages().size());
+        IapPackageConfig first = config.getIapPackages().get(0);
+        assertEquals("com.tarasmaslov.infiniteairadio.aicoin.small", first.getProductId());
+        assertEquals(50, first.getCoins());
+        assertEquals(0.99, first.getUsdPriceHint(), 1e-12);
+    }
+
+    @Test
+    void bundledIapPackagesCoverAllThreeAppsAtAllFourTiers() {
+        ProxyConfig config = ProxyConfig.load(new HashMap<>());
+        List<IapPackageConfig> packages = config.getIapPackages();
+
+        assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals("com.tarasmaslov.infiniteairadio.aicoin.xl")));
+        assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals("com.tarasmaslov.alllanguageslearner.aicoin.medium")));
+        assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals("com.tarasmaslov.learn-it.aicoin.large")));
+
+        for (IapPackageConfig p : packages) {
+            assertTrue(p.getCoins() > 0, p.getProductId());
+            assertTrue(p.getUsdPriceHint() > 0, p.getProductId());
+        }
     }
 
     @Test
@@ -85,6 +108,7 @@ class ProxyConfigTest {
     void envVarsOverrideRedisAndLedgerSettings() {
         Map<String, String> env = new HashMap<>();
         env.put("AICOIN_PROXY_REDIS_PORT", "16379");
+        env.put("AICOIN_PROXY_REDIS_USERNAME", "aicoin-proxy");
         env.put("AICOIN_PROXY_REDIS_PASSWORD", "s3cret");
         env.put("AICOIN_PROXY_REDIS_SSL", "true");
         env.put("AICOIN_PROXY_DECAY_HALFLIFE_DAYS", "30");
@@ -95,6 +119,7 @@ class ProxyConfigTest {
 
         ProxyConfig config = ProxyConfig.load(env);
         assertEquals(16379, config.getRedisPort());
+        assertEquals("aicoin-proxy", config.getRedisUsername());
         assertEquals("s3cret", config.getRedisPassword());
         assertTrue(config.isRedisSsl());
         assertEquals(30.0, config.getDecayHalflifeDays(), 1e-12);

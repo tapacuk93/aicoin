@@ -42,8 +42,11 @@ Provider API keys aren't set by default — pass them as env vars (see
 
 ## Manual setup (no Docker)
 
-You need a JDK 26 and a local Redis (or Redis-compatible, e.g. Valkey)
-server.
+You need a GraalVM JDK and a local Redis (or Redis-compatible, e.g. Valkey)
+server. The Docker image and `build.gradle`'s toolchain currently pin
+**GraalVM 25** (see `.java-version`) — CONTRACT.md's "Docker / docker-compose"
+section explains why this isn't "GraalVM JDK 26" yet (GraalVM hasn't
+published a JDK 26 build as of this writing).
 
 **1. Start Redis:**
 
@@ -136,7 +139,7 @@ faucet, transfer.
 ## Repo layout
 
 - [`CONTRACT.md`](./CONTRACT.md) — the authoritative spec this project is built against.
-- [`aicoin-proxy/`](./aicoin-proxy/) — the Java/Netty proxy and the Redis-backed coin ledger. Full flag/API/config reference in its own README.
+- [`aicoin-proxy/`](./aicoin-proxy/) — the Java/Netty proxy and the Redis-backed coin ledger. Full flag/API/config reference in its own README. Includes `scripts/set-coin-packages.sh` (admin CLI to change IAP coin packages) and `scripts/adjust-iap-prices.sh` (hourly cron job that re-derives IAP package prices from the live `/price` signal).
 - [`e2e/run.sh`](./e2e/run.sh) — the end-to-end test.
 - [`site/`](./site/) — the static landing page deployed at aicoin.oeaio.com.
 - [`ios/AICoinWallet/`](./ios/AICoinWallet/) — a native SwiftUI wallet app (bundle `com.oeaio.aicoin.wallet`) mirroring `wallet.html`'s capabilities.
