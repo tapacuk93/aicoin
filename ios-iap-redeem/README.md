@@ -84,7 +84,9 @@ let identity = try keychainStore.loadOrCreateIdentity()
 
 // 2. Wrap your existing HTTP transport so AI-provider calls route through the proxy.
 let tokenCache = AICoinTokenCache(identity: identity)
-let transport = AICoinRouter(underlying: URLSessionHTTPTransport(), tokenProvider: tokenCache.currentToken)
+// `URLSession` conforms to `HTTPTransport` directly (see HTTPTransport.swift), so pass it as-is —
+// there is no separate wrapper type to construct.
+let transport = AICoinRouter(underlying: URLSession.shared, tokenProvider: tokenCache.currentToken)
 // Use `transport` (or decorate it further) everywhere you currently call
 // api.anthropic.com / api.openai.com / api.elevenlabs.io / etc. directly.
 
