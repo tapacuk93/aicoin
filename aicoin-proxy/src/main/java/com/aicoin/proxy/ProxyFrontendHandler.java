@@ -87,6 +87,14 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             sendFreeCoinsAvailable(ctx);
             return;
         }
+        if (request.method() == HttpMethod.GET && "/iap/packages".equals(path)) {
+            IapPackagesHandler.servePackages(ctx, ledger, config);
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/admin/iap/packages".equals(path)) {
+            IapPackagesHandler.serveAdminSet(ctx, request, ledger, config);
+            return;
+        }
         if (request.method() == HttpMethod.GET && "/health".equals(path)) {
             HealthHandler.respond(ctx, healthTracker, config);
             return;
@@ -121,6 +129,10 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         if (request.method() == HttpMethod.POST && "/wallet/api/revoke-tokens".equals(path)) {
             byte[] body = ByteBufUtil.getBytes(request.content());
             requireLiveSignature(ctx, request, body, address -> handleRevokeTokens(ctx, address));
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/wallet/api/redeem-iap".equals(path)) {
+            handleRedeemIap(ctx, ByteBufUtil.getBytes(request.content()));
             return;
         }
         if (request.method() == HttpMethod.GET && "/admin".equals(path)) {
@@ -317,6 +329,72 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             } else {
                 sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "insufficient balance");
             }
+        });
+    }
+
+    /**
+     * {@code POST /wallet/api/redeem-iap}, per CONTRACT.md's "Redeeming a purchase" section: no
+     * live wallet signature required (crediting a wallet can't harm anyone, same reasoning as the
+     * free faucet) — the entire security burden is on {@link AppleJwsVerifier} proving the
+     * <em>purchase</em> is real. Idempotent: a StoreKit retry of an already-redeemed {@code
+     * transactionId} returns {@code 200} with the current (unchanged) balance and {@code
+     * "credited":0}, never an error.
+     */
+    private void handleRedeemIap(ChannelHandlerContext ctx, byte[] body) {
+        Object parsed;
+        try {
+            parsed = new Yaml().load(new String(body, CharsetUtil.UTF_8));
+        } catch (Exception e) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "invalid request body");
+            return;
+        }
+        if (!(parsed instanceof Map)) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "invalid request body");
+            return;
+        }
+        Map<?, ?> map = (Map<?, ?>) parsed;
+        Object toRaw = map.get("to_user_id");
+        Object signedTransactionRaw = map.get("signed_transaction");
+        if (!(toRaw instanceof String) || ((String) toRaw).isEmpty()
+                || !(signedTransactionRaw instanceof String) || ((String) signedTransactionRaw).isEmpty()) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "to_user_id and signed_transaction are required");
+            return;
+        }
+        String toUserId = (String) toRaw;
+
+        AppleJwsVerifier.VerifyResult verified = AppleJwsVerifier.verify(
+                (String) signedTransactionRaw, Instant.now().toEpochMilli());
+        if (!verified.isValid()) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, verified.getFailureReason());
+            return;
+        }
+        if (!IapPackages.isKnownBundleId(verified.getBundleId())) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "unknown bundleId");
+            return;
+        }
+
+        String seedJson = IapPackages.seedJson(config.getIapPackages());
+        ledger.getIapPackages(seedJson, packagesJson -> {
+            if (!packagesJson.isPresent()) {
+                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
+                return;
+            }
+            Optional<IapPackages.Entry> pkg = IapPackages.findByProductId(packagesJson.get(), verified.getProductId());
+            if (!pkg.isPresent()) {
+                sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "unknown productId");
+                return;
+            }
+            double coins = pkg.get().getCoins() * (double) verified.getQuantity();
+            ledger.redeemIap(verified.getTransactionId(), toUserId, verified.getProductId(), coins, redeemResult -> {
+                if (!redeemResult.isReachable()) {
+                    sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
+                    return;
+                }
+                double credited = redeemResult.isFreshCredit() ? coins : 0.0;
+                byte[] bytes = ("{\"credited\":" + formatNumber(credited)
+                        + ",\"balance\":" + formatNumber(redeemResult.getBalance()) + "}").getBytes(CharsetUtil.UTF_8);
+                sendJson(ctx, HttpResponseStatus.OK, bytes);
+            });
         });
     }
 

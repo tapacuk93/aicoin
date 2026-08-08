@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>aicoin</title>
+<title>AICoin — pay-per-call currency for AI apps</title>
+<meta name="description" content="AICoin: 1 coin = 1 AI provider API call. Buy it with an in-app purchase or receive a transfer, spend it across Infinite AI Radio, All Languages Learner, and Learn Its.">
 <style>
   :root {
     color-scheme: light dark;
@@ -23,7 +24,7 @@
     line-height: 1.55;
   }
   main {
-    max-width: 720px;
+    max-width: 760px;
     margin: 0 auto;
     padding: 4rem 1.5rem 5rem;
   }
@@ -49,10 +50,13 @@
     margin: 0 0 0.4rem;
     color: var(--accent);
   }
-  .card p {
-    margin: 0;
+  .card h3 {
+    font-size: 0.95rem;
+    margin: 1.1rem 0 0.3rem;
     color: var(--fg);
   }
+  .card p { margin: 0; color: var(--fg); }
+  .card p + p { margin-top: 0.6rem; }
   code {
     background: rgba(255,255,255,0.06);
     padding: 0.15em 0.4em;
@@ -143,63 +147,102 @@
   .steps { margin: 0; padding-left: 1.2rem; }
   .steps li { margin-bottom: 0.5rem; }
   .steps li:last-child { margin-bottom: 0; }
+  table.packages { width: 100%; border-collapse: collapse; margin-top: 0.75rem; font-size: 0.9rem; }
+  table.packages th, table.packages td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); }
+  table.packages th { color: var(--muted); font-weight: 500; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  .apps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
+  .app-tile { border: 1px solid var(--border); border-radius: 10px; padding: 0.9rem 1rem; }
+  .app-tile h3 { margin: 0 0 0.3rem; font-size: 0.95rem; color: var(--fg); }
+  .app-tile p { color: var(--muted); font-size: 0.85rem; margin: 0; }
+  .app-tile .links { margin-top: 0.5rem; font-size: 0.82rem; }
+  .app-tile .links a { margin-right: 0.75rem; }
 </style>
 </head>
 <body>
 <main>
-  <span class="status">draft / prototype</span>
-  <h1>aicoin</h1>
-  <p class="tagline">A reverse proxy for AI provider APIs, and the coin priced off real usage.</p>
+  <span class="status">live</span>
+  <h1>AICoin</h1>
+  <p class="tagline">1 AICoin = 1 AI provider API call. Buy it or receive a transfer, spend it from any app that supports it — no personal API keys, ever.</p>
 
   <div class="card price-card">
     <div>
-      <h2>Current price</h2>
-      <p class="price-value">$<span id="priceValue">&mdash;</span> <span class="unit">per aicoin</span></p>
+      <h2>Current market rate</h2>
+      <p class="price-value">$<span id="priceValue">&mdash;</span> <span class="unit">per AICoin (real recent cost, informational)</span></p>
       <p class="price-meta" id="priceMeta">Loading&hellip;</p>
-      <p class="price-meta"><a href="https://proxy.aicoin.oeaio.com/price/chart">see how it's changed &rarr;</a></p>
+      <p class="price-meta"><a href="https://apps.oeaio.com/price/chart">see how it's changed &rarr;</a></p>
     </div>
-    <a class="wallet-btn" href="https://proxy.aicoin.oeaio.com/wallet">Open wallet</a>
+    <a class="wallet-btn" href="https://apps.oeaio.com/wallet">Open wallet</a>
   </div>
 
   <div class="card">
-    <h2>How to use it</h2>
-    <ol class="steps">
-      <li><a href="https://proxy.aicoin.oeaio.com/wallet">Open the wallet</a> and generate a new keypair &mdash; your address (public key) is what receives coins; your private key never leaves your browser.</li>
-      <li>Claim free coins (up to 10 per wallet per hour, while the shared pool lasts &mdash; <span id="freeCoinsRemaining">&hellip;</span> left) so your balance is positive.</li>
-      <li>Generate an API token from the wallet &mdash; a bearer credential you can use in scripts, no signing needed per call.</li>
-      <li>Call any supported provider through the proxy, same request path as the real API, with two headers:</li>
-    </ol>
-    <pre><code>curl https://proxy.aicoin.oeaio.com/v1/chat/completions \
-  -H "X-AI: openai" \
-  -H "X-Api-Key: &lt;token from the wallet&gt;" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'</code></pre>
-    <p class="price-meta" style="margin-top: 0.6rem;"><code>X-AI</code> selects the upstream (see supported providers below); the proxy injects its own paid key so you never need your own. A <code>402</code> response means your aicoin balance ran out &mdash; claim more or buy some from another wallet.</p>
+    <h2>What's an AICoin?</h2>
+    <p><strong>1 AICoin always buys exactly 1 paid AI API call</strong> — a chat completion, an image generation, a text-to-speech clip — through <a href="https://apps.oeaio.com">apps.oeaio.com</a>, our relay (aicoin-proxy) that holds its own paid provider credentials so you never need your own OpenAI/Anthropic/Google/etc. key. That 1-coin-per-call rate is fixed and enforced server-side, not a suggestion.</p>
+    <p>The "current market rate" above is a <em>separate</em>, informational number: a recency-weighted average of what a call has actually cost us in real provider spend recently. It's what we use to price coin packages fairly — it has no effect on the fixed 1-coin-per-call spend rate.</p>
   </div>
 
   <div class="card">
-    <h2>Supported providers</h2>
-    <p class="price-meta">Green = the proxy holds a paid API key for this provider right now, so calls with that <code>X-AI</code> value will actually reach the upstream. Gray = not configured yet.</p>
+    <h2>Getting AICoin</h2>
+    <p>There are exactly two ways to acquire AICoin:</p>
+    <h3>1. Buy it (in-app purchase)</h3>
+    <p>Inside any app that supports AICoin, open the wallet/buy screen — the available coin packages and their App Store prices are set here on the server and can change at any time, so what you see in the app is always current. Payment is processed entirely by Apple through StoreKit; we never see your payment details. A successful purchase credits your wallet immediately.</p>
+    <table class="packages" id="packagesTable" style="display:none">
+      <thead><tr><th>Package</th><th>Coins</th><th>Typical price</th></tr></thead>
+      <tbody id="packagesBody"></tbody>
+    </table>
+    <h3>2. Receive a transfer</h3>
+    <p>Anyone can send AICoin to your wallet address, from the <a href="https://apps.oeaio.com/wallet">wallet page</a> or from within a supporting app. There's no real-money rail on this path — it's a direct peer-to-peer balance transfer, the same way you'd hand someone cash.</p>
+    <p class="price-meta">A small free-coin faucet also exists for trying things out (up to 10 coins per wallet per hour, while the shared pool lasts — <span id="freeCoinsRemaining">&hellip;</span> left) — it's for onboarding, not a way to fund real usage.</p>
+  </div>
+
+  <div class="card">
+    <h2>Used in these apps</h2>
+    <p>AICoin is the same wallet and the same balance everywhere — buy once, spend it in any of these:</p>
+    <div class="apps-grid">
+      <div class="app-tile">
+        <h3>Infinite AI Radio</h3>
+        <p>An endless, ever-deepening spoken monologue on any topic you tune to.</p>
+        <div class="links">
+          <a href="https://tapacuk93.github.io/infinite-ai-radio-support/">Support</a>
+          <a href="https://tapacuk93.github.io/infinite-ai-radio-support/PRIVACY">Privacy</a>
+        </div>
+      </div>
+      <div class="app-tile">
+        <h3>All Languages Learner</h3>
+        <p>Short AI-generated passages in the language you're learning, with translation and narration.</p>
+        <div class="links">
+          <a href="https://tapacuk93.github.io/alllanguageslearner-support/">Support</a>
+          <a href="https://tapacuk93.github.io/alllanguageslearner-support/PRIVACY">Privacy</a>
+        </div>
+      </div>
+      <div class="app-tile">
+        <h3>Learn Its</h3>
+        <p>A fresh, multi-screen AI lesson on any topic, with illustrations and narration.</p>
+        <div class="links">
+          <a href="https://tapacuk93.github.io/learn-it-support/">Support</a>
+          <a href="https://tapacuk93.github.io/learn-it-support/PRIVACY">Privacy</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Supported AI providers</h2>
+    <p class="price-meta">Green = the relay holds a paid API key for this provider right now, so calls routed to it will actually reach the upstream. Gray = not configured yet.</p>
     <div class="backends" id="backendsList">
       <span class="backend-pill"><span class="dot"></span>Loading&hellip;</span>
     </div>
   </div>
 
   <div class="card">
-    <h2>What&rsquo;s an aicoin?</h2>
-    <p>1 aicoin is worth 1 paid AI call through
-    <a href="https://proxy.aicoin.oeaio.com">proxy.aicoin.oeaio.com</a> &mdash;
-    the proxy holds the real paid provider key, so you spend aicoin instead
-    of your own OpenAI/Anthropic/etc. key. The price above tracks a
-    recency-weighted average of real recent AI spend, so it falls over time
-    as inference gets cheaper.</p>
-  </div>
-
-  <div class="card">
-    <h2>aicoin</h2>
-    <p>A centralized coin ledger backed by Redis: a 10-coin-per-hour
-    faucet, peer-to-peer transfers, and a price that decays smoothly with
-    the real historical drop in AI inference cost.</p>
+    <h2>Integrate AICoin (for developers)</h2>
+    <p>Building an iOS/macOS app? The shared <code>AICoinKit</code> Swift package (in the <a href="https://github.com/tapacuk93/aicoin">aicoin</a> repo, under <code>ios-iap-redeem/</code>) bundles wallet keys, StoreKit purchase → wallet-credit flow, transfer UI, and the provider-routing HTTP transport used by our own apps above — that's the fastest path in.</p>
+    <p>For any other client, or to call it directly, it's a plain HTTP relay: same request path as the real provider, one header to pick the upstream, an API token instead of your own provider key:</p>
+    <pre><code>curl https://apps.oeaio.com/v1/chat/completions \
+  -H "X-AI: openai" \
+  -H "X-Api-Key: &lt;token from the wallet&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'</code></pre>
+    <p class="price-meta" style="margin-top: 0.6rem;">A <code>402</code> response means the wallet's balance ran out — prompt the user to buy more or ask someone to send a transfer; never fall back to asking for their own provider key. Full API/config reference, the ledger's data model, and the IAP-redeem flow are documented in <a href="https://github.com/tapacuk93/aicoin/blob/main/CONTRACT.md">CONTRACT.md</a>.</p>
   </div>
 
   <footer>
@@ -210,9 +253,11 @@
 
 <script>
 (function () {
+  var API = "https://apps.oeaio.com";
+
   var priceValue = document.getElementById("priceValue");
   var priceMeta = document.getElementById("priceMeta");
-  fetch("https://proxy.aicoin.oeaio.com/price")
+  fetch(API + "/price")
     .then(function (res) { return res.json(); })
     .then(function (body) {
       priceValue.textContent = Number(body.price_usd).toFixed(6);
@@ -222,9 +267,8 @@
       priceMeta.textContent = "Price unavailable right now.";
     });
 
-  var backendsList = document.getElementById("backendsList");
   var freeCoinsRemaining = document.getElementById("freeCoinsRemaining");
-  fetch("https://proxy.aicoin.oeaio.com/free-coins/available")
+  fetch(API + "/free-coins/available")
     .then(function (res) { return res.json(); })
     .then(function (body) {
       freeCoinsRemaining.textContent = body.available;
@@ -233,6 +277,26 @@
       freeCoinsRemaining.textContent = "?";
     });
 
+  var packagesTable = document.getElementById("packagesTable");
+  var packagesBody = document.getElementById("packagesBody");
+  fetch(API + "/iap/packages")
+    .then(function (res) { return res.json(); })
+    .then(function (body) {
+      var seen = {};
+      (body.packages || []).forEach(function (p) {
+        var key = p.coins + "|" + p.usd_price_hint;
+        if (seen[key]) return;
+        seen[key] = true;
+        var tr = document.createElement("tr");
+        var label = p.coins >= 1000 ? (p.coins / 1000) + "k coins" : p.coins + " coins";
+        tr.innerHTML = "<td>" + label + "</td><td>" + p.coins + "</td><td>$" + Number(p.usd_price_hint).toFixed(2) + "</td>";
+        packagesBody.appendChild(tr);
+      });
+      if (Object.keys(seen).length) packagesTable.style.display = "table";
+    })
+    .catch(function () { /* leave table hidden */ });
+
+  var backendsList = document.getElementById("backendsList");
   var LABELS = {
     openai: "OpenAI",
     anthropic: "Anthropic",
@@ -242,7 +306,7 @@
     elevenlabs: "ElevenLabs",
     stability: "Stability"
   };
-  fetch("https://proxy.aicoin.oeaio.com/health")
+  fetch(API + "/health")
     .then(function (res) { return res.json(); })
     .then(function (body) {
       backendsList.innerHTML = "";
@@ -263,4 +327,3 @@
 </script>
 </body>
 </html>
-

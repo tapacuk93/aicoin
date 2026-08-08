@@ -22,8 +22,8 @@ public final class ProxyMain {
     public static void main(String[] args) throws InterruptedException {
         ProxyConfig config = ProxyConfig.load();
         ProviderHealthTracker healthTracker = new ProviderHealthTracker(config.getHealthWindowSize());
-        AicoinLedger ledger = new AicoinLedger(
-                config.getRedisHost(), config.getRedisPort(), config.getRedisPassword(), config.isRedisSsl());
+        AicoinLedger ledger = new AicoinLedger(config.getRedisHost(), config.getRedisPort(),
+                config.getRedisUsername(), config.getRedisPassword(), config.isRedisSsl());
 
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
         EventLoopGroup workerGroup = new NioEventLoopGroup();
