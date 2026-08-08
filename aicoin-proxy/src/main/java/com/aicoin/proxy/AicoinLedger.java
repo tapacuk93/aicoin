@@ -35,10 +35,30 @@ import java.util.logging.Logger;
 final class AicoinLedger implements AutoCloseable {
 
     private static final Logger LOG = Logger.getLogger(AicoinLedger.class.getName());
-    private static final String EVENTS_KEY = "aicoin:events";
-    private static final String FREE_COINS_REMAINING_KEY = "aicoin:free-coins-remaining";
-    private static final String KNOWN_WALLETS_KEY = "aicoin:known-wallets";
-    private static final String IAP_PACKAGES_KEY = "aicoin:iap-packages";
+
+    /**
+     * Redis Cluster hash tag applied to <em>every</em> ledger key, so they all hash to one slot.
+     *
+     * <p>Required because production runs on AWS MemoryDB, which is <b>always</b> cluster-mode
+     * (even at one shard) — and Redis Cluster rejects any multi-key command whose keys span
+     * different slots with {@code CROSSSLOT}, regardless of whether those slots happen to live on
+     * the same node. Every atomic operation here is inherently multi-key (a claim touches the
+     * wallet's balance + last-claim time + the shared pool counter + the known-wallets set + the
+     * wallet's tx log; a transfer touches two different wallets' balances), so per-wallet tagging
+     * would not be enough — a transfer between two wallets would still cross slots. One fixed tag
+     * for the whole ledger is the only scheme that keeps all of them single-slot.
+     *
+     * <p>The trade-off is deliberate and matches the design: this is a single centralized ledger
+     * (see CONTRACT.md), so confining it to one slot costs nothing today. It does mean the ledger
+     * cannot be spread across multiple shards — scaling out would require re-sharding the key
+     * scheme and giving up cross-wallet atomicity, which is a much larger design change than a
+     * bigger node.
+     */
+    private static final String TAG = "{aicoin}";
+    private static final String EVENTS_KEY = "aicoin:" + TAG + ":events";
+    private static final String FREE_COINS_REMAINING_KEY = "aicoin:" + TAG + ":free-coins-remaining";
+    private static final String KNOWN_WALLETS_KEY = "aicoin:" + TAG + ":known-wallets";
+    private static final String IAP_PACKAGES_KEY = "aicoin:" + TAG + ":iap-packages";
     /** Per-wallet transaction logs are capped at this many most-recent entries (draft/prototype: no pagination, no archival). */
     private static final int TX_LOG_CAP = 200;
 
@@ -491,23 +511,23 @@ final class AicoinLedger implements AutoCloseable {
     }
 
     private static String balanceKey(String userId) {
-        return "aicoin:balance:" + userId;
+        return "aicoin:" + TAG + ":balance:" + userId;
     }
 
     private static String lastClaimKey(String userId) {
-        return "aicoin:lastclaim:" + userId;
+        return "aicoin:" + TAG + ":lastclaim:" + userId;
     }
 
     private static String tokenRevokedBeforeKey(String address) {
-        return "aicoin:token-revoked-before:" + address;
+        return "aicoin:" + TAG + ":token-revoked-before:" + address;
     }
 
     private static String txKey(String address) {
-        return "aicoin:tx:" + address;
+        return "aicoin:" + TAG + ":tx:" + address;
     }
 
     private static String iapRedeemedKey(String transactionId) {
-        return "aicoin:iap-redeemed:" + transactionId;
+        return "aicoin:" + TAG + ":iap-redeemed:" + transactionId;
     }
 
     private static double parseCost(String member) {
