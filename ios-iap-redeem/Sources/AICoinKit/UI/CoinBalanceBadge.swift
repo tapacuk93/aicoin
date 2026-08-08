@@ -46,8 +46,7 @@ public struct CoinBalanceBadge: View {
             onTap?()
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "bitcoinsign.circle.fill")
-                    .imageScale(.medium)
+                AICoinMark()
                 balanceLabel
             }
             .font(.subheadline.weight(.medium))
