@@ -13,7 +13,11 @@ import java.util.Map;
  * the cheapest input and the dearest output, before considering that ElevenLabs bills by character
  * and image models bill by image and report no tokens at all. Recording every call at one flat rate
  * made {@code GET /price} a number with no relationship to what the calls actually cost, which
- * matters because the App Store price ladder is derived from it.
+ * matters because the coin price and the IAP price ladder are both derived from it.
+ *
+ * <p>The proxy is client-agnostic: any wallet may route any supported provider's traffic
+ * through it, so this table is keyed by what the response reports — provider and model — never
+ * by which app sent the request.
  *
  * <p>Rates live in {@code application.yaml} under {@code pricing.providers} so they can be corrected
  * without a rebuild — provider list prices change more often than this code does.
@@ -110,7 +114,8 @@ final class ModelPricing {
      * predates the `pricing.providers` block still prices calls sensibly rather than silently
      * reverting to one blended rate.
      *
-     * <p>Anthropic figures are list prices as published for the models this app actually sends.
+     * <p>Anthropic figures are list prices as published, seeded for the models clients currently
+     * ask for; an unlisted model falls back to the provider's own rates.
      * Claude Sonnet 5 carries introductory pricing of $2/$10 through 2026-08-31; the standard
      * $3/$15 is used here on purpose, since under-recording cost is the failure this whole change
      * exists to fix and the introductory rate expires shortly.
