@@ -25,8 +25,8 @@ class ModelPricingTest {
     }
 
     @Test
-    void anthropicSegmentPricesAtSonnetRates() {
-        // 10,000 in / 1,000 out — the shape of a real broadcast segment deep into a station.
+    void anthropicCallPricesAtItsModelsRates() {
+        // 10,000 in / 1,000 out — a long-context turn, the input-heavy end of the range.
         double cost = CostCalculator.computeCostUsd("anthropic",
                 anthropicBody("claude-sonnet-5", 10_000, 1_000), pricing);
         // 10k * $3/M + 1k * $15/M

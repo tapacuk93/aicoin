@@ -39,8 +39,9 @@ public final class CostCalculator {
      * <p>Input and output are counted separately because every provider charges a multiple for
      * output — 5x on Anthropic's current models. Summing them and applying one rate, as the
      * blended path above does, misprices any call whose input/output ratio isn't the one the
-     * blended rate was fitted to, and every call in this app has a heavily input-weighted ratio
-     * (each broadcast segment resends the whole conversation so far).
+     * blended rate was fitted to. Callers differ sharply here and the proxy serves all of them:
+     * a chat turn is roughly balanced, a long-context or conversation-replaying client is heavily
+     * input-weighted, a generation client heavily output-weighted. No single rate fits that range.
      *
      * <p>Falls back in order: model rates -> provider default rates -> the provider's flat
      * per-call figure (for speech and image APIs, which report no tokens at all) -> the global

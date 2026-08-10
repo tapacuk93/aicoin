@@ -66,9 +66,11 @@ pricing:
   defaultCostUsdPerCall: 0.001
   # Per-provider, per-model list prices in USD per million tokens. One blended rate cannot be
   # right for more than one model at a time — Sonnet bills output at 5x its input rate, Haiku at
-  # a third of Sonnet's, and speech and image APIs report no tokens at all. Longest matching
-  # model prefix wins, then the provider's own input/output rates, then `usdPerCall`, then the
-  # fallbacks above. Rates are config, not code: correct them here when a provider reprices.
+  # a third of Sonnet's, and speech and image APIs report no tokens at all. Nor can one rate fit
+  # every client: input/output ratios differ sharply between chat, long-context, and generation
+  # workloads, and this proxy serves all of them. Longest matching model prefix wins, then the
+  # provider's own input/output rates, then `usdPerCall`, then the fallbacks above. Rates are
+  # config, not code: correct them here when a provider reprices.
   providers:
     anthropic:
       inputUsdPerMillionTokens: 3.00
