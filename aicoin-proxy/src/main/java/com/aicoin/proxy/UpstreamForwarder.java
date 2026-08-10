@@ -246,7 +246,6 @@ final class UpstreamForwarder {
             FullHttpResponse toClient = new DefaultFullHttpResponse(
                     HttpVersion.HTTP_1_1, status, Unpooled.wrappedBuffer(bodyBytes));
             copyHeaders(response.headers(), toClient.headers());
-            clientCtx.writeAndFlush(toClient);
 
             if (status.code() >= 200 && status.code() < 300) {
                 // A free target's upstream cost really is zero, so it must not feed the price
@@ -256,8 +255,23 @@ final class UpstreamForwarder {
                     String bodyStr = decodedForPricing(response.headers(), bodyBytes);
                     double costUsd = CostCalculator.computeCostUsd(provider, bodyStr, config.getModelPricing());
                     ledger.recordEvent(provider, costUsd, Instant.now());
+
+                    // Metering settles AFTER the upstream answers, because that answer is the only
+                    // place the call's real cost exists. The gate up front still holds exactly one
+                    // coin, so "one coin is enough to make a call" stays true and an empty wallet
+                    // is still refused before any provider is touched; this takes the remainder.
+                    long charged = 1L;
+                    if (config.isMeteredBilling()) {
+                        charged = CoinMeter.coinsFor(costUsd, config.getCoinValueUsd());
+                        ledger.settleCall(walletAddress, charged - callCostAicoin, provider);
+                    }
+                    // Told to the client either way, so a caller can show what a call cost and can
+                    // tell metered from flat billing without being configured for it.
+                    toClient.headers().set("X-Aicoin-Charged", Long.toString(charged));
                 }
+                clientCtx.writeAndFlush(toClient);
             } else {
+                clientCtx.writeAndFlush(toClient);
                 refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
             }
 

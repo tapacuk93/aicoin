@@ -61,6 +61,16 @@ providers:
     authPrefix: "Bearer "
     freePaths: ["GET /v1/engines/list", "GET /v1/user/account", "GET /v1/user/balance"]
 pricing:
+  # Charge each call what it actually cost, rounded up to whole coins with a floor of one,
+  # instead of a flat coin per call. OFF by default and deliberately so: every shipped client
+  # states "1 AICoin = 1 AI API call" in its own UI and store copy, so enabling this changes a
+  # user-visible pricing promise and has to be coordinated with those apps, not picked up
+  # silently by a deployment. Env: AICOIN_PROXY_METERED.
+  metered: false
+  # What one coin is worth when metering. Defaults to the per-coin price of the largest IAP pack
+  # — the cheapest a coin is ever sold for — so metering against it never under-charges a bulk
+  # buyer. Env: AICOIN_PROXY_COIN_VALUE_USD.
+  coinValueUsd: 0.009
   # Fallbacks only, for a provider or model with no entry under `providers` below.
   costPerTokenUsd: 0.000002
   defaultCostUsdPerCall: 0.001

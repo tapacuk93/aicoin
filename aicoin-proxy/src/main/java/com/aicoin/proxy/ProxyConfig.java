@@ -40,6 +40,8 @@ public final class ProxyConfig {
     private final String adminToken;
     private final Map<String, ProviderConfig> providers;
     private final ModelPricing modelPricing;
+    private final double coinValueUsd;
+    private final boolean meteredBilling;
     private final double costPerTokenUsd;
     private final double defaultCostUsdPerCall;
     private final int healthWindowSize;
@@ -50,7 +52,7 @@ public final class ProxyConfig {
                          int freeCoinsPoolSize, String adminToken, Map<String, ProviderConfig> providers,
                          double costPerTokenUsd, double defaultCostUsdPerCall,
                          int healthWindowSize, List<IapPackageConfig> iapPackages,
-                         ModelPricing modelPricing) {
+                         ModelPricing modelPricing, double coinValueUsd, boolean meteredBilling) {
         this.port = port;
         this.redisHost = redisHost;
         this.redisPort = redisPort;
@@ -68,6 +70,29 @@ public final class ProxyConfig {
         this.healthWindowSize = healthWindowSize;
         this.iapPackages = iapPackages;
         this.modelPricing = modelPricing;
+        this.coinValueUsd = coinValueUsd;
+        this.meteredBilling = meteredBilling;
+    }
+
+    /**
+     * @return {@code pricing.coinValueUsd}: what one aicoin is taken to be worth when metering a
+     * call's cost into coins (env {@code AICOIN_PROXY_COIN_VALUE_USD}). Defaults to the price of a
+     * coin in the largest IAP pack — the cheapest a coin is ever sold for, so metering against it
+     * never under-charges a bulk buyer.
+     */
+    public double getCoinValueUsd() {
+        return coinValueUsd;
+    }
+
+    /**
+     * @return {@code pricing.metered}: whether a call is charged what it cost, rounded up to whole
+     * coins (env {@code AICOIN_PROXY_METERED}). <b>Off by default.</b> Every shipped client states
+     * "1 AICoin = 1 AI API call" in its own UI and store copy, so turning this on changes a
+     * user-visible pricing promise and must be a deliberate, coordinated act — not something a
+     * deployment picks up silently. See {@link CoinMeter} for the rounding rule.
+     */
+    public boolean isMeteredBilling() {
+        return meteredBilling;
     }
 
     /** Per-provider, per-model rates for pricing recorded calls — see {@link ModelPricing}. */
@@ -238,6 +263,8 @@ public final class ProxyConfig {
                     authAsQueryParam, authQueryParamName, freePaths));
         }
 
+        double coinValueUsd = getDouble(yaml, "pricing.coinValueUsd", 0.009);
+        boolean meteredBilling = getBoolean(yaml, "pricing.metered", false);
         double costPerTokenUsd = getDouble(yaml, "pricing.costPerTokenUsd", 0.000002);
         double defaultCostUsdPerCall = getDouble(yaml, "pricing.defaultCostUsdPerCall", 0.001);
         int healthWindowSize = getInt(yaml, "health.windowSize", 50);
@@ -257,13 +284,16 @@ public final class ProxyConfig {
         adminToken = envStr(env, "AICOIN_PROXY_ADMIN_TOKEN", adminToken);
         costPerTokenUsd = envDouble(env, "AICOIN_PROXY_COST_PER_TOKEN_USD", costPerTokenUsd);
         defaultCostUsdPerCall = envDouble(env, "AICOIN_PROXY_DEFAULT_COST_USD", defaultCostUsdPerCall);
+        coinValueUsd = envDouble(env, "AICOIN_PROXY_COIN_VALUE_USD", coinValueUsd);
+        meteredBilling = envBool(env, "AICOIN_PROXY_METERED", meteredBilling);
         healthWindowSize = envInt(env, "AICOIN_PROXY_HEALTH_WINDOW_SIZE", healthWindowSize);
 
         ModelPricing modelPricing = parseModelPricing(yaml, costPerTokenUsd, defaultCostUsdPerCall);
 
         return new ProxyConfig(port, redisHost, redisPort, redisUsername, redisPassword, redisSsl,
                 decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
-                costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages, modelPricing);
+                costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages, modelPricing,
+                coinValueUsd, meteredBilling);
     }
 
     /**
