@@ -61,8 +61,39 @@ providers:
     authPrefix: "Bearer "
     freePaths: ["GET /v1/engines/list", "GET /v1/user/account", "GET /v1/user/balance"]
 pricing:
+  # Fallbacks only, for a provider or model with no entry under `providers` below.
   costPerTokenUsd: 0.000002
   defaultCostUsdPerCall: 0.001
+  # Per-provider, per-model list prices in USD per million tokens. One blended rate cannot be
+  # right for more than one model at a time — Sonnet bills output at 5x its input rate, Haiku at
+  # a third of Sonnet's, and speech and image APIs report no tokens at all. Longest matching
+  # model prefix wins, then the provider's own input/output rates, then `usdPerCall`, then the
+  # fallbacks above. Rates are config, not code: correct them here when a provider reprices.
+  providers:
+    anthropic:
+      inputUsdPerMillionTokens: 3.00
+      outputUsdPerMillionTokens: 15.00
+      models:
+        # Sonnet 5 also has introductory pricing of 2.00/10.00 running to 2026-08-31; the standard
+        # rate is used here deliberately, since under-recording cost is the failure this table
+        # exists to prevent and the introductory rate lapses shortly.
+        claude-sonnet-5:  { inputUsdPerMillionTokens: 3.00, outputUsdPerMillionTokens: 15.00 }
+        claude-haiku-4-5: { inputUsdPerMillionTokens: 1.00, outputUsdPerMillionTokens: 5.00 }
+        claude-opus-5:    { inputUsdPerMillionTokens: 5.00, outputUsdPerMillionTokens: 25.00 }
+    # Non-Anthropic rates below are unverified starting points — check each provider's own pricing
+    # page and correct them here.
+    openai:
+      inputUsdPerMillionTokens: 2.50
+      outputUsdPerMillionTokens: 10.00
+    google:
+      inputUsdPerMillionTokens: 0.30
+      outputUsdPerMillionTokens: 2.50
+    # Billed per character and per image respectively, and neither reports token usage, so both
+    # get a flat per-call figure instead of token rates.
+    elevenlabs:
+      usdPerCall: 0.03
+    stability:
+      usdPerCall: 0.03
 health:
   windowSize: 50
 iap:
