@@ -153,6 +153,49 @@ final class UpstreamForwarder {
      * {@link FreeTargets free target}: nothing was debited, so nothing may be refunded (a 0-amount
      * refund would still append a bogus {@code refund} entry to the wallet's transaction log).
      */
+    /**
+     * The response body as text for {@link CostCalculator} — decompressed first when the upstream
+     * sent it compressed.
+     *
+     * <p>Without this, every real call was priced at {@code defaultCostUsdPerCall}. Clients send
+     * {@code Accept-Encoding: gzip} by default (URLSession does, so every call from the apps did),
+     * the provider honours it, and this proxy forwards the bytes untouched — so what reached the
+     * cost calculator was gzip, no {@code usage} object could be parsed out of it, and the flat
+     * default was recorded every single time. Measured against production before the fix: an
+     * Anthropic call of 16 tokens recorded $0.001000 with gzip and $0.000032 — 16 x the per-token
+     * rate, i.e. the correct figure — with {@code Accept-Encoding: identity}. Roughly a 30x
+     * over-estimate on a tiny call, and `GET /price` is what the App Store price ladder is derived
+     * from, so it mattered well beyond the dashboard.
+     *
+     * <p>Only the copy used for pricing is decoded; the client still receives the original bytes
+     * and headers exactly as the provider sent them. Failing to decode falls back to the raw bytes,
+     * which is what the old behaviour was — a wrong price is better than a dropped response.
+     */
+    static String decodedForPricing(HttpHeaders headers, byte[] bodyBytes) {
+        String encoding = headers.get(HttpHeaderNames.CONTENT_ENCODING);
+        if (encoding == null || bodyBytes.length == 0) {
+            return new String(bodyBytes, CharsetUtil.UTF_8);
+        }
+        String normalized = encoding.trim().toLowerCase(java.util.Locale.ROOT);
+        try {
+            if (normalized.contains("gzip")) {
+                try (java.util.zip.GZIPInputStream in =
+                             new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(bodyBytes))) {
+                    return new String(in.readAllBytes(), CharsetUtil.UTF_8);
+                }
+            }
+            if (normalized.contains("deflate")) {
+                try (java.util.zip.InflaterInputStream in =
+                             new java.util.zip.InflaterInputStream(new java.io.ByteArrayInputStream(bodyBytes))) {
+                    return new String(in.readAllBytes(), CharsetUtil.UTF_8);
+                }
+            }
+        } catch (java.io.IOException e) {
+            LOG.log(Level.FINE, "could not decode " + normalized + " body for pricing", e);
+        }
+        return new String(bodyBytes, CharsetUtil.UTF_8);
+    }
+
     private static void refundIfBilled(AicoinLedger ledger, String walletAddress, double callCostAicoin, String provider) {
         if (callCostAicoin > 0) {
             ledger.refund(walletAddress, callCostAicoin, provider);
@@ -210,7 +253,7 @@ final class UpstreamForwarder {
                 // formula — recording defaultCostUsdPerCall for a model listing would inflate
                 // GET /price with spend the proxy was never billed for.
                 if (callCostAicoin > 0) {
-                    String bodyStr = new String(bodyBytes, CharsetUtil.UTF_8);
+                    String bodyStr = decodedForPricing(response.headers(), bodyBytes);
                     double costUsd = CostCalculator.computeCostUsd(
                             bodyStr, config.getCostPerTokenUsd(), config.getDefaultCostUsdPerCall());
                     ledger.recordEvent(provider, costUsd, Instant.now());
