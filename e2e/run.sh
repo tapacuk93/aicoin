@@ -9,7 +9,11 @@
 # "1 aicoin is worth 1 paid AI call," enforced, not just a tagline. Free-coin
 # claims draw from a shared, atomically-decremented pool across every
 # wallet, separate from both the price event log and the debit/refund
-# balance mutations. All 7 providers point at the local mock so every paid
+# balance mutations. Calls to a provider's free targets (model/voice
+# listings, token counting — the endpoints the provider doesn't bill the
+# proxy for) are forwarded with the proxy's key but cost no coin and record
+# no price event; tests 21-23 pin that boundary, including that it fails
+# closed on a path that would normalize onto a billed endpoint. All 7 providers point at the local mock so every paid
 # call — including the one-per-provider sweep — is exercised deterministically,
 # with no dependency on real provider network/credentials. See CONTRACT.md
 # for the exact API/behavior this asserts against.
@@ -438,6 +442,48 @@ if [ "$code" = "200" ] && [ "$history_check" = "ok" ]; then
   pass "price history has 5 chronologically-ordered points, last one matching live /price ($current_price)"
 else
   fail "expected ok, got code=$code check=$history_check: $(cat "$WORKDIR/t20.json")"
+fi
+
+log "--- test 21: a free target (GET /v1/models) is forwarded without debiting a coin or recording a price event ---"
+bal_before_free=$(balance_of "$ADDR_DAVE")
+weighted_before_free=$(curl -s "http://127.0.0.1:$PROXY_PORT/price" | python3 -c "import json,sys;print(json.load(sys.stdin)['weighted_total'])")
+FREE_TOKEN=$(build_token "$KEY_DAVE" "$ADDR_DAVE" "$(epoch_seconds)" "$(($(epoch_seconds) + 3600))")
+code=$(curl -s -o "$WORKDIR/t21.json" -w "%{http_code}" "http://127.0.0.1:$PROXY_PORT/v1/models" \
+  -H "X-Api-Key: $FREE_TOKEN" -H "X-AI: openai")
+bal_after_free=$(balance_of "$ADDR_DAVE")
+weighted_after_free=$(curl -s "http://127.0.0.1:$PROXY_PORT/price" | python3 -c "import json,sys;print(json.load(sys.stdin)['weighted_total'])")
+# The mock echoes the injected key back, so this also confirms a free target still goes out with
+# the proxy's own paid credential — free to the wallet, not unauthenticated upstream.
+injected=$(python3 -c "import json;print(json.load(open('$WORKDIR/t21.json')).get('received_authorization'))")
+if [ "$code" = "200" ] && [ "$bal_after_free" = "$bal_before_free" ] \
+   && [ "$weighted_after_free" = "$weighted_before_free" ] && [ "$injected" = "${AUTH_PREFIXES[0]}${TEST_KEYS[0]}" ]; then
+  pass "free target relayed (200, key injected) with balance unchanged ($bal_after_free) and no price event (weighted_total still $weighted_after_free)"
+else
+  fail "expected 200 with balance $bal_before_free and weighted_total $weighted_before_free, got code=$code balance=$bal_after_free weighted=$weighted_after_free injected=$injected"
+fi
+
+log "--- test 22: a free target works at a zero balance, while a paid call at the same balance still 402s ---"
+bal_frank_now=$(balance_of "$ADDR_FRANK")
+code=$(curl -s -o "$WORKDIR/t22a.json" -w "%{http_code}" "http://127.0.0.1:$PROXY_PORT/v1/models" \
+  -H "X-Api-Key: $FRANK_TOKEN" -H "X-AI: openai")
+[ "$bal_frank_now" = "0" ] && [ "$code" = "200" ] \
+  && pass "free target succeeded on a 0-balance wallet (no coin required to list models)" \
+  || fail "expected 200 for a free target at balance 0, got code=$code balance=$bal_frank_now"
+code=$(curl -s -o "$WORKDIR/t22b.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
+  -H "X-Api-Key: $FRANK_TOKEN" -H "X-AI: openai" -H "Content-Type: application/json" -d '{"model":"test"}')
+[ "$code" = "402" ] && pass "paid call at the same 0 balance still 402s — free targets didn't weaken the balance gate" \
+  || fail "expected 402 for a paid call at balance 0, got $code: $(cat "$WORKDIR/t22b.json")"
+
+log "--- test 23: a traversal path that would normalize onto a billed endpoint is not treated as free ---"
+bal_before_traversal=$(balance_of "$ADDR_DAVE")
+code=$(curl -s -o "$WORKDIR/t23.json" -w "%{http_code}" --path-as-is \
+  "http://127.0.0.1:$PROXY_PORT/v1/models/../chat/completions" -H "X-Api-Key: $FREE_TOKEN" -H "X-AI: openai")
+bal_after_traversal=$(balance_of "$ADDR_DAVE")
+spent=$(python3 -c "print(round(float('$bal_before_traversal') - float('$bal_after_traversal'), 6))")
+if [ "$code" = "200" ] && [ "$spent" = "1.0" ]; then
+  pass "/v1/models/../chat/completions was billed 1 aicoin (fails closed to paid, no free ride)"
+else
+  fail "expected a 1-aicoin debit for the traversal path, got code=$code spent=$spent"
 fi
 
 echo

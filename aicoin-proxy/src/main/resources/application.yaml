@@ -12,42 +12,54 @@ aicoin:
   signatureSkewSeconds: 120
   freeCoinsPoolSize: 5000
   adminToken: ""
+# freePaths: endpoints the provider does not bill the proxy for. A matching call is
+# forwarded (with the proxy's key, after the usual token auth) but costs no aicoin and
+# records no price event. Syntax: "[METHOD ]path-glob", where * matches any characters.
 providers:
   openai:
     baseUrl: https://api.openai.com
     apiKey: ""
     authHeader: Authorization
     authPrefix: "Bearer "
+    freePaths: ["GET /v1/models", "GET /v1/models/*"]
   anthropic:
     baseUrl: https://api.anthropic.com
     apiKey: ""
     authHeader: x-api-key
     authPrefix: ""
+    freePaths: ["GET /v1/models", "GET /v1/models/*", "POST /v1/messages/count_tokens"]
   google:
     baseUrl: https://generativelanguage.googleapis.com
     apiKey: ""
     authAsQueryParam: true
     authQueryParamName: key
+    freePaths: ["GET /v1/models", "GET /v1/models/*", "GET /v1beta/models", "GET /v1beta/models/*",
+                "POST /v1/models/*:countTokens", "POST /v1beta/models/*:countTokens"]
   mistral:
     baseUrl: https://api.mistral.ai
     apiKey: ""
     authHeader: Authorization
     authPrefix: "Bearer "
+    freePaths: ["GET /v1/models", "GET /v1/models/*"]
   cohere:
     baseUrl: https://api.cohere.ai
     apiKey: ""
     authHeader: Authorization
     authPrefix: "Bearer "
+    freePaths: ["GET /v1/models", "GET /v1/models/*", "POST /v1/tokenize", "POST /v1/detokenize",
+                "POST /v1/check-api-key"]
   elevenlabs:
     baseUrl: https://api.elevenlabs.io
     apiKey: ""
     authHeader: xi-api-key
     authPrefix: ""
+    freePaths: ["GET /v1/models", "GET /v1/voices", "GET /v1/voices/*", "GET /v1/user", "GET /v1/user/subscription"]
   stability:
     baseUrl: https://api.stability.ai
     apiKey: ""
     authHeader: Authorization
     authPrefix: "Bearer "
+    freePaths: ["GET /v1/engines/list", "GET /v1/user/account", "GET /v1/user/balance"]
 pricing:
   costPerTokenUsd: 0.000002
   defaultCostUsdPerCall: 0.001

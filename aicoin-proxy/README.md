@@ -68,36 +68,46 @@ providers:
     apiKey: ""                               # AICOIN_PROXY_OPENAI_APIKEY  (proxy's own paid key, injected into every forwarded request)
     authHeader: Authorization                # AICOIN_PROXY_OPENAI_AUTHHEADER
     authPrefix: "Bearer "                    # AICOIN_PROXY_OPENAI_AUTHPREFIX
+    freePaths: ["GET /v1/models", "GET /v1/models/*"]   # AICOIN_PROXY_OPENAI_FREEPATHS
   anthropic:
     baseUrl: https://api.anthropic.com       # AICOIN_PROXY_ANTHROPIC_BASEURL
     apiKey: ""                               # AICOIN_PROXY_ANTHROPIC_APIKEY
     authHeader: x-api-key                    # AICOIN_PROXY_ANTHROPIC_AUTHHEADER
     authPrefix: ""                           # AICOIN_PROXY_ANTHROPIC_AUTHPREFIX
+    freePaths: ["GET /v1/models", "GET /v1/models/*", "POST /v1/messages/count_tokens"]   # AICOIN_PROXY_ANTHROPIC_FREEPATHS
   google:
     baseUrl: https://generativelanguage.googleapis.com  # AICOIN_PROXY_GOOGLE_BASEURL
     apiKey: ""                               # AICOIN_PROXY_GOOGLE_APIKEY
     authAsQueryParam: true                   # AICOIN_PROXY_GOOGLE_AUTHASQUERYPARAM
     authQueryParamName: key                  # AICOIN_PROXY_GOOGLE_AUTHQUERYPARAMNAME
+    freePaths: ["GET /v1/models", "GET /v1/models/*", "GET /v1beta/models", "GET /v1beta/models/*",
+                "POST /v1/models/*:countTokens", "POST /v1beta/models/*:countTokens"]   # AICOIN_PROXY_GOOGLE_FREEPATHS
   mistral:
     baseUrl: https://api.mistral.ai          # AICOIN_PROXY_MISTRAL_BASEURL
     apiKey: ""                               # AICOIN_PROXY_MISTRAL_APIKEY
     authHeader: Authorization                # AICOIN_PROXY_MISTRAL_AUTHHEADER
     authPrefix: "Bearer "                    # AICOIN_PROXY_MISTRAL_AUTHPREFIX
+    freePaths: ["GET /v1/models", "GET /v1/models/*"]   # AICOIN_PROXY_MISTRAL_FREEPATHS
   cohere:
     baseUrl: https://api.cohere.ai           # AICOIN_PROXY_COHERE_BASEURL
     apiKey: ""                               # AICOIN_PROXY_COHERE_APIKEY
     authHeader: Authorization                # AICOIN_PROXY_COHERE_AUTHHEADER
     authPrefix: "Bearer "                    # AICOIN_PROXY_COHERE_AUTHPREFIX
+    freePaths: ["GET /v1/models", "GET /v1/models/*", "POST /v1/tokenize", "POST /v1/detokenize",
+                "POST /v1/check-api-key"]     # AICOIN_PROXY_COHERE_FREEPATHS
   elevenlabs:
     baseUrl: https://api.elevenlabs.io        # AICOIN_PROXY_ELEVENLABS_BASEURL
     apiKey: ""                               # AICOIN_PROXY_ELEVENLABS_APIKEY
     authHeader: xi-api-key                   # AICOIN_PROXY_ELEVENLABS_AUTHHEADER
     authPrefix: ""                           # AICOIN_PROXY_ELEVENLABS_AUTHPREFIX
+    freePaths: ["GET /v1/models", "GET /v1/voices", "GET /v1/voices/*", "GET /v1/user",
+                "GET /v1/user/subscription"]  # AICOIN_PROXY_ELEVENLABS_FREEPATHS
   stability:
     baseUrl: https://api.stability.ai        # AICOIN_PROXY_STABILITY_BASEURL
     apiKey: ""                               # AICOIN_PROXY_STABILITY_APIKEY
     authHeader: Authorization                # AICOIN_PROXY_STABILITY_AUTHHEADER
     authPrefix: "Bearer "                    # AICOIN_PROXY_STABILITY_AUTHPREFIX
+    freePaths: ["GET /v1/engines/list", "GET /v1/user/account", "GET /v1/user/balance"]   # AICOIN_PROXY_STABILITY_FREEPATHS
 pricing:
   costPerTokenUsd: 0.000002       # AICOIN_PROXY_COST_PER_TOKEN_USD
   defaultCostUsdPerCall: 0.001    # AICOIN_PROXY_DEFAULT_COST_USD
@@ -218,8 +228,52 @@ headers; the generic proxy path accepts only a token. `GET /wallet/api/
 balance/{address}` requires neither — a public address's balance is
 inherently public info, like a blockchain explorer.
 
-Before forwarding to the upstream AI provider, once either scheme verifies
-an address, the proxy atomically checks and debits **exactly 1.0 aicoin**
+## Paid targets vs free targets
+
+Not every endpoint a provider exposes is one it bills the proxy for. Listing
+models, listing ElevenLabs voices, counting tokens (Anthropic's
+`/v1/messages/count_tokens`, Google's `:countTokens`), reading an account
+balance — those cost the proxy nothing upstream, so they cost the wallet
+nothing here. Each provider's `freePaths` names them; anything not matched is
+a **paid target** and goes through the full balance gate below.
+
+A free target is still a real forwarded call: it needs a valid API token, the
+`X-AI` header, and it goes out with the proxy's own paid credential injected,
+exactly like a paid one. What's different is only the money: **no debit, no
+refund, and no price event.** Recording `defaultCostUsdPerCall` for a model
+listing would inflate `GET /price` with spend that never happened. It also
+means an app with a zero balance can still list models or voices — only the
+inference call itself needs a coin. (`GET /health` still records the upstream
+status either way; provider health is about reachability, not billing.)
+
+Pattern syntax is an optional method, a space, then a path glob where `*`
+matches any run of characters:
+
+```
+GET /v1/models                     exact path, GET only
+GET /v1/models/*                   anything under /v1/models
+POST /v1beta/models/*:countTokens  Google's countTokens on any model
+/v1/voices                         any method
+```
+
+Methods compare case-insensitively, paths case-sensitively; the query string
+is never part of the match. Matching **fails closed**: a path containing a
+percent-escape or a `.`/`..` segment is treated as paid no matter what the
+patterns say, since an upstream would normalize
+`/v1/models/../chat/completions` onto a billed endpoint that the glob alone
+would have waved through for free.
+
+Set `AICOIN_PROXY_<PROVIDER>_FREEPATHS` to a comma-separated pattern list to
+override a provider's defaults, or to the literal `none` to bill every one of
+its endpoints again. (An empty env var means "unset" everywhere else in this
+config, hence the `none` sentinel.) These defaults track what the providers
+bill today — if a provider starts charging for one of them, drop it from that
+provider's list.
+
+## Balance gate
+
+Before forwarding a **paid target** to the upstream AI provider, once either
+scheme verifies an address, the proxy atomically checks and debits **exactly 1.0 aicoin**
 from that wallet's balance (`AicoinLedger.debitForCall`, a single Redis Lua
 script — no separate read-then-write, so two concurrent calls can't both
 pass a stale check and overdraw). **1 aicoin is worth 1 paid AI call —
@@ -250,10 +304,12 @@ enforced, not just a tagline**; this replaced an earlier binary
   proxy forwards the request. If the upstream call then fails (non-2xx or a
   connection failure), the debit is **refunded** (`AicoinLedger.refund`) —
   see "Forwarding pipeline" below — since the proxy was never actually
-  billed by the real provider for a call that didn't complete. This is also
-  what keeps *paid* calls (successful, billed, feeding the price formula)
-  cleanly separated from *free* activity: a faucet claim mints coins but is
-  never treated as a call, and a failed call never counts as paid.
+  billed by the real provider for a call that didn't complete. This is one of
+  the two boundaries that keep *paid* calls (successful, billed, feeding the
+  price formula) cleanly separated from *free* activity: a faucet claim mints
+  coins but is never treated as a call, and a failed call never counts as
+  paid. The other is target-side — a call to a `freePaths` endpoint never
+  reaches this gate at all (see "Paid targets vs free targets" above).
 
 ## How to use a token from a script
 
@@ -300,6 +356,11 @@ even if it hasn't expired yet.
    anything either. Non-2xx upstream responses are still relayed to the
    client byte-for-byte (same as step 3); connection failures get a
    synthetic `502` (there's no real status to relay).
+6. A **free target** (step 4/5's money handling only): nothing was debited
+   before forwarding, so nothing is refunded on failure and no price event is
+   recorded on success — `UpstreamForwarder` is handed a call cost of `0` and
+   skips both. Relaying, header handling, and `/health` recording are
+   identical to any other call.
 
 ## The ledger (`AicoinLedger`)
 
@@ -338,7 +399,8 @@ just the Java-side shape:
   `transfer_out`/`transfer_in` entry to each side's transaction log.
 - `recordEvent(provider, costUsd, timestamp)` — fire-and-forget `ZADD` into
   `aicoin:events` (member `costUsd|uuid`, score = epoch-millis) — fed only
-  by genuine 2xx paid calls, never by claims/transfers/failed calls.
+  by genuine 2xx paid calls, never by claims/transfers/failed calls or by
+  free targets.
 - `computePrice(halfLifeDays, callback)` — `ZRANGE ... WITHSCORES` over
   `aicoin:events`, then folds the recency-weighted average via the pure
   `PriceCalculator.compute` (no Redis dependency, fully unit-tested).

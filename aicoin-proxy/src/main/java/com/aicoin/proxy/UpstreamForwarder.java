@@ -51,6 +51,12 @@ import java.util.logging.Logger;
  * synthetic 502 (there is no real upstream status to relay in that case —
  * see README.md for this assumption).
  *
+ * A {@code callCostAicoin} of 0 means the caller identified a {@link
+ * FreeTargets free target} and deliberately skipped the debit: such a call is
+ * relayed exactly like any other, but neither branch above applies — there is
+ * no debit to refund on failure, and no provider bill to feed the price
+ * formula on success.
+ *
  * Every real upstream response — 2xx or not — is also recorded into that
  * provider's {@link ProviderHealthTracker} rolling window, feeding {@code
  * GET /health} (see CONTRACT.md's "Additional proxy-side endpoints"
@@ -82,7 +88,7 @@ final class UpstreamForwarder {
         try {
             upstreamUri = new URI(baseUrl);
         } catch (Exception e) {
-            ledger.refund(walletAddress, callCostAicoin, provider);
+            refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
             sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "invalid provider baseUrl");
             return;
         }
@@ -91,7 +97,7 @@ final class UpstreamForwarder {
         String host = upstreamUri.getHost();
         int port = upstreamUri.getPort() != -1 ? upstreamUri.getPort() : (tls ? 443 : 80);
         if (host == null) {
-            ledger.refund(walletAddress, callCostAicoin, provider);
+            refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
             sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "invalid provider baseUrl");
             return;
         }
@@ -117,7 +123,7 @@ final class UpstreamForwarder {
         bootstrap.connect(host, port).addListener((ChannelFutureListener) future -> {
             if (!future.isSuccess()) {
                 LOG.log(Level.WARNING, "upstream connect failed for provider " + provider + " at " + baseUrl, future.cause());
-                ledger.refund(walletAddress, callCostAicoin, provider);
+                refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
                 sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream connection failed");
                 return;
             }
@@ -134,12 +140,23 @@ final class UpstreamForwarder {
             upstreamCh.writeAndFlush(req).addListener((ChannelFutureListener) writeFuture -> {
                 if (!writeFuture.isSuccess()) {
                     LOG.log(Level.WARNING, "upstream write failed for provider " + provider, writeFuture.cause());
-                    ledger.refund(walletAddress, callCostAicoin, provider);
+                    refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
                     sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream write failed");
                     upstreamCh.close();
                 }
             });
         });
+    }
+
+    /**
+     * Reverses the pre-forward debit — unless there wasn't one. {@code callCostAicoin} is 0 for a
+     * {@link FreeTargets free target}: nothing was debited, so nothing may be refunded (a 0-amount
+     * refund would still append a bogus {@code refund} entry to the wallet's transaction log).
+     */
+    private static void refundIfBilled(AicoinLedger ledger, String walletAddress, double callCostAicoin, String provider) {
+        if (callCostAicoin > 0) {
+            ledger.refund(walletAddress, callCostAicoin, provider);
+        }
     }
 
     private static void sendSynthetic(ChannelHandlerContext clientCtx, HttpResponseStatus status, String message) {
@@ -151,7 +168,11 @@ final class UpstreamForwarder {
         clientCtx.writeAndFlush(response);
     }
 
-    /** Relays the upstream response back to the client; on 2xx keeps the debit and fires the price-formula event, otherwise refunds it. */
+    /**
+     * Relays the upstream response back to the client; on 2xx keeps the debit and fires the
+     * price-formula event, otherwise refunds it. Both are skipped when {@code callCostAicoin} is 0
+     * (a free target — nothing was debited and the provider bills nothing).
+     */
     private static final class UpstreamResponseHandler extends SimpleChannelInboundHandler<FullHttpResponse> {
         private final ProxyConfig config;
         private final ProviderHealthTracker healthTracker;
@@ -185,12 +206,17 @@ final class UpstreamForwarder {
             clientCtx.writeAndFlush(toClient);
 
             if (status.code() >= 200 && status.code() < 300) {
-                String bodyStr = new String(bodyBytes, CharsetUtil.UTF_8);
-                double costUsd = CostCalculator.computeCostUsd(
-                        bodyStr, config.getCostPerTokenUsd(), config.getDefaultCostUsdPerCall());
-                ledger.recordEvent(provider, costUsd, Instant.now());
+                // A free target's upstream cost really is zero, so it must not feed the price
+                // formula — recording defaultCostUsdPerCall for a model listing would inflate
+                // GET /price with spend the proxy was never billed for.
+                if (callCostAicoin > 0) {
+                    String bodyStr = new String(bodyBytes, CharsetUtil.UTF_8);
+                    double costUsd = CostCalculator.computeCostUsd(
+                            bodyStr, config.getCostPerTokenUsd(), config.getDefaultCostUsdPerCall());
+                    ledger.recordEvent(provider, costUsd, Instant.now());
+                }
             } else {
-                ledger.refund(walletAddress, callCostAicoin, provider);
+                refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
             }
 
             upstreamCtx.close();
@@ -199,7 +225,7 @@ final class UpstreamForwarder {
         @Override
         public void exceptionCaught(ChannelHandlerContext upstreamCtx, Throwable cause) {
             LOG.log(Level.WARNING, "upstream response handling failed for provider " + provider, cause);
-            ledger.refund(walletAddress, callCostAicoin, provider);
+            refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
             sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream error");
             upstreamCtx.close();
         }

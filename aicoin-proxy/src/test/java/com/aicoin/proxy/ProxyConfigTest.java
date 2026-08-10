@@ -23,7 +23,7 @@ class ProxyConfigTest {
         assertEquals(110.0, config.getDecayHalflifeDays(), 1e-12);
         assertEquals(3600, config.getFreeClaimCooldownSeconds());
         assertEquals(120, config.getSignatureSkewSeconds());
-        assertEquals(100, config.getFreeCoinsPoolSize());
+        assertEquals(5000, config.getFreeCoinsPoolSize());
         assertEquals("", config.getAdminToken());
 
         assertEquals("https://api.openai.com", config.getProviderBaseUrl("openai"));
@@ -82,6 +82,50 @@ class ProxyConfigTest {
             assertTrue(p.getCoins() > 0, p.getProductId());
             assertTrue(p.getUsdPriceHint() > 0, p.getProductId());
         }
+    }
+
+    @Test
+    void bundledFreePathsCoverEachProvidersNonBilledEndpoints() {
+        ProxyConfig config = ProxyConfig.load(new HashMap<>());
+
+        assertTrue(FreeTargets.isFree("GET", "/v1/models", config.getProvider("openai").getFreePaths()));
+        assertTrue(FreeTargets.isFree("POST", "/v1/messages/count_tokens", config.getProvider("anthropic").getFreePaths()));
+        assertTrue(FreeTargets.isFree("POST", "/v1beta/models/gemini-2.0-flash:countTokens",
+                config.getProvider("google").getFreePaths()));
+        assertTrue(FreeTargets.isFree("GET", "/v1/models", config.getProvider("mistral").getFreePaths()));
+        assertTrue(FreeTargets.isFree("POST", "/v1/tokenize", config.getProvider("cohere").getFreePaths()));
+        assertTrue(FreeTargets.isFree("GET", "/v1/voices", config.getProvider("elevenlabs").getFreePaths()));
+        assertTrue(FreeTargets.isFree("GET", "/v1/user/balance", config.getProvider("stability").getFreePaths()));
+
+        // The actual inference endpoints stay billed for every provider.
+        assertFalse(FreeTargets.isFree("POST", "/v1/chat/completions", config.getProvider("openai").getFreePaths()));
+        assertFalse(FreeTargets.isFree("POST", "/v1/messages", config.getProvider("anthropic").getFreePaths()));
+        assertFalse(FreeTargets.isFree("POST", "/v1beta/models/gemini-2.0-flash:generateContent",
+                config.getProvider("google").getFreePaths()));
+        assertFalse(FreeTargets.isFree("POST", "/v1/chat/completions", config.getProvider("mistral").getFreePaths()));
+        assertFalse(FreeTargets.isFree("POST", "/v1/chat", config.getProvider("cohere").getFreePaths()));
+        assertFalse(FreeTargets.isFree("POST", "/v1/text-to-speech/voice-id",
+                config.getProvider("elevenlabs").getFreePaths()));
+        assertFalse(FreeTargets.isFree("POST", "/v1/generation/engine/text-to-image",
+                config.getProvider("stability").getFreePaths()));
+    }
+
+    @Test
+    void envVarOverridesFreePathsAndNoneDisablesThem() {
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_OPENAI_FREEPATHS", "GET /v1/models,GET /v1/files");
+        env.put("AICOIN_PROXY_ANTHROPIC_FREEPATHS", "none");
+
+        ProxyConfig config = ProxyConfig.load(env);
+
+        assertEquals(List.of("GET /v1/models", "GET /v1/files"), config.getProvider("openai").getFreePaths());
+        assertTrue(config.getProvider("anthropic").getFreePaths().isEmpty());
+        // "none" means everything anthropic is billed again, count_tokens included.
+        assertFalse(FreeTargets.isFree("POST", "/v1/messages/count_tokens",
+                config.getProvider("anthropic").getFreePaths()));
+
+        // Unrelated providers keep their bundled free paths.
+        assertTrue(FreeTargets.isFree("GET", "/v1/voices", config.getProvider("elevenlabs").getFreePaths()));
     }
 
     @Test
