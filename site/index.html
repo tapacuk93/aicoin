@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AICoin — pay-per-call currency for AI apps</title>
 <meta name="description" content="AICoin: 1 coin = 1 AI provider API call. Buy it with an in-app purchase or receive a transfer, spend it across Infinite AI Radio, All Languages Learner, and Learn Its.">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <style>
   :root {
     color-scheme: light dark;
@@ -12,6 +15,8 @@
     --fg: #e8eaed;
     --muted: #9aa0a6;
     --accent: #6ee7b7;
+    --warn: #fbbf24;
+    --bad: #f87171;
     --card: #14171c;
     --border: #23262b;
   }
@@ -128,11 +133,27 @@
     background: var(--muted);
     flex-shrink: 0;
   }
-  .backend-pill.enabled {
+  .backend-pill .state {
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+  .backend-pill.live {
     color: var(--fg);
     border-color: var(--accent);
   }
-  .backend-pill.enabled .dot { background: var(--accent); }
+  .backend-pill.live .dot { background: var(--accent); }
+  .backend-pill.warn {
+    color: var(--fg);
+    border-color: var(--warn);
+  }
+  .backend-pill.warn .dot { background: var(--warn); }
+  .backend-pill.warn .state { color: var(--warn); }
+  .backend-pill.bad {
+    color: var(--fg);
+    border-color: var(--bad);
+  }
+  .backend-pill.bad .dot { background: var(--bad); }
+  .backend-pill.bad .state { color: var(--bad); }
   pre {
     background: #0b0d10;
     border: 1px solid var(--border);
@@ -169,14 +190,14 @@
       <h2>Current market rate</h2>
       <p class="price-value">$<span id="priceValue">&mdash;</span> <span class="unit">per AICoin (real recent cost, informational)</span></p>
       <p class="price-meta" id="priceMeta">Loading&hellip;</p>
-      <p class="price-meta"><a href="https://apps.oeaio.com/price/chart">see how it's changed &rarr;</a></p>
+      <p class="price-meta"><a href="https://proxy.aicoin.oeaio.com/price/chart">see how it's changed &rarr;</a></p>
     </div>
-    <a class="wallet-btn" href="https://apps.oeaio.com/wallet">Open wallet</a>
+    <a class="wallet-btn" href="https://proxy.aicoin.oeaio.com/wallet">Open wallet</a>
   </div>
 
   <div class="card">
     <h2>What's an AICoin?</h2>
-    <p><strong>1 AICoin always buys exactly 1 paid AI API call</strong> — a chat completion, an image generation, a text-to-speech clip — through <a href="https://apps.oeaio.com">apps.oeaio.com</a>, our relay (aicoin-proxy) that holds its own paid provider credentials so you never need your own OpenAI/Anthropic/Google/etc. key. That 1-coin-per-call rate is fixed and enforced server-side, not a suggestion.</p>
+    <p><strong>1 AICoin always buys exactly 1 paid AI API call</strong> — a chat completion, an image generation, a text-to-speech clip — through <a href="https://proxy.aicoin.oeaio.com">proxy.aicoin.oeaio.com</a>, our relay (aicoin-proxy) that holds its own paid provider credentials so you never need your own OpenAI/Anthropic/Google/etc. key. That 1-coin-per-call rate is fixed and enforced server-side, not a suggestion.</p>
     <p>The "current market rate" above is a <em>separate</em>, informational number: a recency-weighted average of what a call has actually cost us in real provider spend recently. It's what we use to price coin packages fairly — it has no effect on the fixed 1-coin-per-call spend rate.</p>
   </div>
 
@@ -190,7 +211,7 @@
       <tbody id="packagesBody"></tbody>
     </table>
     <h3>2. Receive a transfer</h3>
-    <p>Anyone can send AICoin to your wallet address, from the <a href="https://apps.oeaio.com/wallet">wallet page</a> or from within a supporting app. There's no real-money rail on this path — it's a direct peer-to-peer balance transfer, the same way you'd hand someone cash.</p>
+    <p>Anyone can send AICoin to your wallet address, from the <a href="https://proxy.aicoin.oeaio.com/wallet">wallet page</a> or from within a supporting app. There's no real-money rail on this path — it's a direct peer-to-peer balance transfer, the same way you'd hand someone cash.</p>
     <p class="price-meta">A small free-coin faucet also exists for trying things out (up to 10 coins per wallet per hour, while the shared pool lasts — <span id="freeCoinsRemaining">&hellip;</span> left) — it's for onboarding, not a way to fund real usage.</p>
   </div>
 
@@ -226,18 +247,19 @@
   </div>
 
   <div class="card">
-    <h2>Supported AI providers</h2>
-    <p class="price-meta">Green = the relay holds a paid API key for this provider right now, so calls routed to it will actually reach the upstream. Gray = not configured yet.</p>
+    <h2>Supported AI providers &mdash; live connection health</h2>
+    <p class="price-meta">Live status of the relay's own connection to each provider, from its rolling window of recent forwarded calls. <strong>Live</strong> = the relay holds a paid key and recent calls came back clean. <strong>Rate limited</strong> = the upstream has been returning 429s. <strong>Over budget</strong> = the upstream has been rejecting calls for billing/permission reasons (402/403). <strong>Not configured</strong> = no key for this provider yet.</p>
     <div class="backends" id="backendsList">
       <span class="backend-pill"><span class="dot"></span>Loading&hellip;</span>
     </div>
+    <p class="price-meta" id="backendsMeta">Checking&hellip;</p>
   </div>
 
   <div class="card">
     <h2>Integrate AICoin (for developers)</h2>
-    <p>Building an iOS/macOS app? The shared <code>AICoinKit</code> Swift package (in the <a href="https://github.com/tapacuk93/aicoin">aicoin</a> repo, under <code>ios-iap-redeem/</code>) bundles wallet keys, StoreKit purchase → wallet-credit flow, transfer UI, and the provider-routing HTTP transport used by our own apps above — that's the fastest path in.</p>
+    <p>Building an iOS/macOS app? The shared <code>AICoinKit</code> Swift package (in the <a href="https://github.com/tapacuk93/aicoin">aicoin</a> repo, under <code>mobile-purchase/ios/</code>) bundles wallet keys, StoreKit purchase → wallet-credit flow, transfer UI, and the provider-routing HTTP transport used by our own apps above — that's the fastest path in.</p>
     <p>For any other client, or to call it directly, it's a plain HTTP relay: same request path as the real provider, one header to pick the upstream, an API token instead of your own provider key:</p>
-    <pre><code>curl https://apps.oeaio.com/v1/chat/completions \
+    <pre><code>curl https://proxy.aicoin.oeaio.com/v1/chat/completions \
   -H "X-AI: openai" \
   -H "X-Api-Key: &lt;token from the wallet&gt;" \
   -H "Content-Type: application/json" \
@@ -253,7 +275,7 @@
 
 <script>
 (function () {
-  var API = "https://apps.oeaio.com";
+  var API = "https://proxy.aicoin.oeaio.com";
 
   var priceValue = document.getElementById("priceValue");
   var priceMeta = document.getElementById("priceMeta");
@@ -306,23 +328,59 @@
     elevenlabs: "ElevenLabs",
     stability: "Stability"
   };
-  fetch(API + "/health")
-    .then(function (res) { return res.json(); })
-    .then(function (body) {
-      backendsList.innerHTML = "";
-      (body.providers || []).forEach(function (p) {
-        var pill = document.createElement("span");
-        pill.className = "backend-pill" + (p.enabled ? " enabled" : "");
-        var dot = document.createElement("span");
-        dot.className = "dot";
-        pill.appendChild(dot);
-        pill.appendChild(document.createTextNode(LABELS[p.name] || p.name));
-        backendsList.appendChild(pill);
-      });
-    })
-    .catch(function () {
-      backendsList.innerHTML = '<span class="backend-pill"><span class="dot"></span>Unavailable right now.</span>';
+  var backendsMeta = document.getElementById("backendsMeta");
+
+  // Mirrors the proxy's own health semantics: healthy == !rateLimited && !overBudget,
+  // and a provider with no key configured is reported but never routed to.
+  function statusOf(p) {
+    if (!p.enabled) return { cls: "", text: "not configured" };
+    if (p.overBudget && p.rateLimited) return { cls: "bad", text: "over budget · rate limited" };
+    if (p.overBudget) return { cls: "bad", text: "over budget" };
+    if (p.rateLimited) return { cls: "warn", text: "rate limited" };
+    return { cls: "live", text: "live" };
+  }
+
+  function renderHealth(body) {
+    var providers = body.providers || [];
+    backendsList.innerHTML = "";
+    providers.forEach(function (p) {
+      var status = statusOf(p);
+      var pill = document.createElement("span");
+      pill.className = "backend-pill" + (status.cls ? " " + status.cls : "");
+      var dot = document.createElement("span");
+      dot.className = "dot";
+      pill.appendChild(dot);
+      pill.appendChild(document.createTextNode(LABELS[p.name] || p.name));
+      var state = document.createElement("span");
+      state.className = "state";
+      state.textContent = status.text;
+      pill.appendChild(state);
+      backendsList.appendChild(pill);
     });
+    var live = providers.filter(function (p) { return statusOf(p).cls === "live"; }).length;
+    var degraded = providers.filter(function (p) {
+      var cls = statusOf(p).cls;
+      return cls === "warn" || cls === "bad";
+    }).length;
+    var summary = live + " of " + providers.length + " provider connections live";
+    if (degraded) summary += ", " + degraded + " degraded";
+    backendsMeta.textContent = summary + " — checked " +
+      new Date().toLocaleTimeString() + ", refreshes every 30s.";
+  }
+
+  function loadHealth() {
+    fetch(API + "/health")
+      .then(function (res) { return res.json(); })
+      .then(renderHealth)
+      .catch(function () {
+        backendsList.innerHTML = '<span class="backend-pill bad"><span class="dot"></span>Relay unreachable<span class="state">status unknown</span></span>';
+        backendsMeta.textContent = "Could not reach the relay at " + API + " — last checked " +
+          new Date().toLocaleTimeString() + ".";
+      });
+  }
+
+  loadHealth();
+  setInterval(loadHealth, 30000);
 })();
 </script>
 </body>

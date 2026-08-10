@@ -140,6 +140,7 @@ faucet, transfer.
 
 - [`CONTRACT.md`](./CONTRACT.md) — the authoritative spec this project is built against.
 - [`aicoin-proxy/`](./aicoin-proxy/) — the Java/Netty proxy and the Redis-backed coin ledger. Full flag/API/config reference in its own README. Includes `scripts/set-coin-packages.sh` (admin CLI to change IAP coin packages) and `scripts/adjust-iap-prices.sh` (hourly cron job that re-derives IAP package prices from the live `/price` signal).
+- [`mobile-purchase/`](./mobile-purchase/) — client-side purchase → wallet-credit integration, one directory per platform: [`ios/`](./mobile-purchase/ios/) is the `AICoinKit` Swift package every app here builds on (previously `ios-iap-redeem/`); `android/` is where a Play Billing counterpart would go.
 - [`e2e/run.sh`](./e2e/run.sh) — the end-to-end test.
-- [`site/`](./site/) — the static landing page deployed at aicoin.oeaio.com. The Caddy config that serves it lives on the host, not in this repo; DNS is a Route 53 zone for `oeaio.com` whose `aicoin`, `apps`, `www`, and apex A records all point at the same server.
+- [`site/`](./site/) — the static landing page deployed at aicoin.oeaio.com. The Caddy config that serves it lives on the host, not in this repo; DNS is a Route 53 zone for `oeaio.com` whose `proxy.aicoin`, `aicoin`, `apps`, `www`, and apex A records all point at the same server. `proxy.aicoin` is the proxy's canonical host; `apps` is the previous one, kept resolving so already-shipped app builds keep working.
 - [`ios/AICoinWallet/`](./ios/AICoinWallet/) — a native SwiftUI wallet app (bundle `com.oeaio.aicoin.wallet`) mirroring `wallet.html`'s capabilities.
