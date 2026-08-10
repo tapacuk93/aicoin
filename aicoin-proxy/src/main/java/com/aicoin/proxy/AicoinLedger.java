@@ -135,6 +135,31 @@ final class AicoinLedger implements AutoCloseable {
             + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
             + "return {1, tostring(newBalance)}";
 
+    /**
+     * Takes the balance of a metered call once its real cost is known — the amount over the one
+     * coin already held at the gate.
+     *
+     * <p>Unlike {@link #DEBIT_SCRIPT} this cannot refuse: the upstream call has already been made
+     * and its response already sent, so there is nothing left to gate. It therefore takes what it
+     * can and floors at zero rather than driving a wallet negative — a wallet that could not cover
+     * the settlement is short by at most one call, because the gate rejects the next one. The
+     * shortfall is recorded on the entry so it is visible in the ledger rather than silently
+     * absorbed.
+     */
+    private static final String SETTLE_SCRIPT =
+            "local requested = tonumber(ARGV[1]) "
+            + "local balance = tonumber(redis.call('GET', KEYS[1]) or '0') "
+            + "local taken = requested "
+            + "if balance < requested then taken = balance end "
+            + "if taken < 0 then taken = 0 end "
+            + "local newBalance = balance "
+            + "if taken > 0 then newBalance = tonumber(redis.call('INCRBYFLOAT', KEYS[1], '-' .. taken)) end "
+            + "redis.call('SADD', KEYS[2], ARGV[2]) "
+            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='debit_settlement', amount=taken, "
+            + "shortfall=requested - taken, provider=ARGV[3], balance_after=newBalance, at=tonumber(ARGV[4])})) "
+            + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
+            + "return tostring(taken)";
+
     private static final String REFUND_SCRIPT =
             "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1]) "
             + "redis.call('SADD', KEYS[2], ARGV[2]) "
@@ -261,6 +286,25 @@ final class AicoinLedger implements AutoCloseable {
             double balance = Double.parseDouble(String.valueOf(raw.get(1)));
             onResult.accept(success ? DebitResult.success(balance) : DebitResult.insufficient(balance));
         });
+    }
+
+    /**
+     * Charges the remainder of a metered call — see {@link #SETTLE_SCRIPT}. Fire-and-forget, same
+     * contract as {@link #recordEvent}: the client's response has already gone out, so a ledger
+     * problem here must never surface as a failed API call.
+     */
+    void settleCall(String address, double extraCoins, String provider) {
+        if (extraCoins <= 0) {
+            return;
+        }
+        long nowMillis = Instant.now().toEpochMilli();
+        commands.eval(SETTLE_SCRIPT, ScriptOutputType.VALUE,
+                new String[] {balanceKey(address), KNOWN_WALLETS_KEY, txKey(address)},
+                String.valueOf(extraCoins), address, provider, String.valueOf(nowMillis))
+                .exceptionally(err -> {
+                    LOG.log(Level.WARNING, "ledger settlement failed for " + address, err);
+                    return null;
+                });
     }
 
     /** Reverses a {@link #debitForCall} when the upstream call it paid for didn't actually succeed. Fire-and-forget, same contract as {@link #recordEvent}. */
