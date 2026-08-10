@@ -222,8 +222,22 @@ public struct BuyAICoinSheet: View {
             let outcome = try await iapManager.purchase(package, address: identity.address)
             switch outcome {
             case .success:
+                // Refresh first, then close: the sheet is usually presented
+                // *because* something ran out of coins, so the thing the user
+                // came back to — the badge, the segment that 402'd — should
+                // already be showing the new balance as the sheet goes away.
                 await walletStore.refresh()
+                // Bought and credited, so this screen has nothing left to say.
+                // Leaving it up made the purchase feel unfinished — the one
+                // clear signal of success was a number changing behind a sheet
+                // the user then had to dismiss by hand.
+                dismiss()
             case .pending, .userCancelled:
+                // `.pending` is Ask-to-Buy/SCA — the purchase isn't done and
+                // may never be, so the sheet stays; `IAPManager`'s unfinished-
+                // transaction observer credits it whenever it does clear.
+                // `.userCancelled` means they backed out of Apple's own sheet,
+                // which shouldn't take this one down with it.
                 break
             }
         } catch {
