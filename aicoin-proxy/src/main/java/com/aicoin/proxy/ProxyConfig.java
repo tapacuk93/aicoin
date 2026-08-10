@@ -183,13 +183,22 @@ public final class ProxyConfig {
         String adminToken = getString(yaml, "aicoin.adminToken", "");
 
         Map<String, ProviderConfig> defaults = new LinkedHashMap<>();
-        defaults.put("openai", new ProviderConfig("https://api.openai.com", "", "Authorization", "Bearer ", false, null));
-        defaults.put("anthropic", new ProviderConfig("https://api.anthropic.com", "", "x-api-key", "", false, null));
-        defaults.put("google", new ProviderConfig("https://generativelanguage.googleapis.com", "", null, null, true, "key"));
-        defaults.put("mistral", new ProviderConfig("https://api.mistral.ai", "", "Authorization", "Bearer ", false, null));
-        defaults.put("cohere", new ProviderConfig("https://api.cohere.ai", "", "Authorization", "Bearer ", false, null));
-        defaults.put("elevenlabs", new ProviderConfig("https://api.elevenlabs.io", "", "xi-api-key", "", false, null));
-        defaults.put("stability", new ProviderConfig("https://api.stability.ai", "", "Authorization", "Bearer ", false, null));
+        defaults.put("openai", new ProviderConfig("https://api.openai.com", "", "Authorization", "Bearer ", false, null,
+                List.of("GET /v1/models", "GET /v1/models/*")));
+        defaults.put("anthropic", new ProviderConfig("https://api.anthropic.com", "", "x-api-key", "", false, null,
+                List.of("GET /v1/models", "GET /v1/models/*", "POST /v1/messages/count_tokens")));
+        defaults.put("google", new ProviderConfig("https://generativelanguage.googleapis.com", "", null, null, true, "key",
+                List.of("GET /v1/models", "GET /v1/models/*", "GET /v1beta/models", "GET /v1beta/models/*",
+                        "POST /v1/models/*:countTokens", "POST /v1beta/models/*:countTokens")));
+        defaults.put("mistral", new ProviderConfig("https://api.mistral.ai", "", "Authorization", "Bearer ", false, null,
+                List.of("GET /v1/models", "GET /v1/models/*")));
+        defaults.put("cohere", new ProviderConfig("https://api.cohere.ai", "", "Authorization", "Bearer ", false, null,
+                List.of("GET /v1/models", "GET /v1/models/*", "POST /v1/tokenize", "POST /v1/detokenize",
+                        "POST /v1/check-api-key")));
+        defaults.put("elevenlabs", new ProviderConfig("https://api.elevenlabs.io", "", "xi-api-key", "", false, null,
+                List.of("GET /v1/models", "GET /v1/voices", "GET /v1/voices/*", "GET /v1/user", "GET /v1/user/subscription")));
+        defaults.put("stability", new ProviderConfig("https://api.stability.ai", "", "Authorization", "Bearer ", false, null,
+                List.of("GET /v1/engines/list", "GET /v1/user/account", "GET /v1/user/balance")));
 
         Map<String, ProviderConfig> providers = new LinkedHashMap<>();
         for (String provider : PROVIDERS) {
@@ -202,6 +211,8 @@ public final class ProxyConfig {
             String authPrefix = getString(yaml, prefix + "authPrefix", def.getAuthPrefix());
             boolean authAsQueryParam = getBoolean(yaml, prefix + "authAsQueryParam", def.isAuthAsQueryParam());
             String authQueryParamName = getString(yaml, prefix + "authQueryParamName", def.getAuthQueryParamName());
+            List<String> yamlFreePaths = FreeTargets.parseYamlList(getNested(yaml, prefix + "freePaths"));
+            List<String> freePaths = yamlFreePaths != null ? yamlFreePaths : def.getFreePaths();
 
             String envPrefix = "AICOIN_PROXY_" + provider.toUpperCase(java.util.Locale.ROOT) + "_";
             baseUrl = envStr(env, envPrefix + "BASEURL", baseUrl);
@@ -210,9 +221,13 @@ public final class ProxyConfig {
             authPrefix = envStr(env, envPrefix + "AUTHPREFIX", authPrefix);
             authAsQueryParam = envBool(env, envPrefix + "AUTHASQUERYPARAM", authAsQueryParam);
             authQueryParamName = envStr(env, envPrefix + "AUTHQUERYPARAMNAME", authQueryParamName);
+            String envFreePaths = env.get(envPrefix + "FREEPATHS");
+            if (envFreePaths != null && !envFreePaths.isEmpty()) {
+                freePaths = FreeTargets.parseEnvList(envFreePaths);
+            }
 
             providers.put(provider, new ProviderConfig(baseUrl, apiKey, authHeader, authPrefix,
-                    authAsQueryParam, authQueryParamName));
+                    authAsQueryParam, authQueryParamName, freePaths));
         }
 
         double costPerTokenUsd = getDouble(yaml, "pricing.costPerTokenUsd", 0.000002);

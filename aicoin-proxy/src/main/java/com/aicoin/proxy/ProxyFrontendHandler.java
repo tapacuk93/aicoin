@@ -52,6 +52,12 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
 
     /** 1 aicoin is worth 1 paid AI call — the currency's fixed exchange rate, not a tunable. */
     private static final double CALL_COST_AICOIN = 1.0;
+    /**
+     * What a call to a {@link FreeTargets free target} costs: nothing. Passed to {@link
+     * UpstreamForwarder} in place of {@link #CALL_COST_AICOIN} so it knows there is no debit to
+     * refund on failure and no paid call to feed the price formula on success.
+     */
+    private static final double FREE_TARGET_COST_AICOIN = 0.0;
     private static final double FREE_CLAIM_AMOUNT_AICOIN = 10.0;
 
     private final ProxyConfig config;
@@ -196,6 +202,11 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         byte[] bodyBytes = ByteBufUtil.getBytes(request.content());
         HttpMethod method = request.method();
 
+        // A free target (model/voice listing, token counting, account lookup) costs the proxy
+        // nothing upstream, so it costs the wallet nothing here — see FreeTargets. Auth still
+        // applies: it's the proxy's own paid key going out either way.
+        boolean freeTarget = FreeTargets.isFree(method.name(), path, providerConfig.getFreePaths());
+
         ledger.getTokenRevokedBefore(peekedAddress.get(), revokedBefore -> {
             WalletSignature.AuthResult authResult = WalletSignature.verifyToken(
                     apiKeyHeader, Instant.now().toEpochMilli(), revokedBefore.orElse(null));
@@ -204,6 +215,12 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 return;
             }
             String walletAddress = authResult.getAddress();
+            if (freeTarget) {
+                UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, finalForwardUri,
+                        forwardHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
+                        walletAddress, FREE_TARGET_COST_AICOIN);
+                return;
+            }
             ledger.debitForCall(walletAddress, CALL_COST_AICOIN, provider, debit -> {
                 if (!debit.isReachable()) {
                     sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");

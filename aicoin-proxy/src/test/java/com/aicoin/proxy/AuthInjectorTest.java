@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -15,7 +16,7 @@ class AuthInjectorTest {
     @Test
     void headerFormInjectsAuthorizationBearerForOpenAiLikeProvider() {
         ProviderConfig openai = new ProviderConfig(
-                "https://api.openai.com", "test-key-123", "Authorization", "Bearer ", false, null);
+                "https://api.openai.com", "test-key-123", "Authorization", "Bearer ", false, null, List.of());
 
         AuthInjector.Injection injection = AuthInjector.compute(openai);
 
@@ -27,7 +28,7 @@ class AuthInjectorTest {
     @Test
     void headerFormInjectsXApiKeyWithNoPrefixForAnthropic() {
         ProviderConfig anthropic = new ProviderConfig(
-                "https://api.anthropic.com", "anthropic-secret", "x-api-key", "", false, null);
+                "https://api.anthropic.com", "anthropic-secret", "x-api-key", "", false, null, List.of());
 
         AuthInjector.Injection injection = AuthInjector.compute(anthropic);
 
@@ -39,7 +40,7 @@ class AuthInjectorTest {
     @Test
     void queryParamFormInjectsKeyForGoogle() {
         ProviderConfig google = new ProviderConfig(
-                "https://generativelanguage.googleapis.com", "google-secret", null, null, true, "key");
+                "https://generativelanguage.googleapis.com", "google-secret", null, null, true, "key", List.of());
 
         AuthInjector.Injection injection = AuthInjector.compute(google);
 
@@ -51,7 +52,7 @@ class AuthInjectorTest {
     @Test
     void headerFormInjectsXiApiKeyWithNoPrefixForElevenLabs() {
         ProviderConfig elevenlabs = new ProviderConfig(
-                "https://api.elevenlabs.io", "elevenlabs-secret", "xi-api-key", "", false, null);
+                "https://api.elevenlabs.io", "elevenlabs-secret", "xi-api-key", "", false, null, List.of());
 
         AuthInjector.Injection injection = AuthInjector.compute(elevenlabs);
 
@@ -63,7 +64,7 @@ class AuthInjectorTest {
     @Test
     void headerFormInjectsAuthorizationBearerForStability() {
         ProviderConfig stability = new ProviderConfig(
-                "https://api.stability.ai", "stability-secret", "Authorization", "Bearer ", false, null);
+                "https://api.stability.ai", "stability-secret", "Authorization", "Bearer ", false, null, List.of());
 
         AuthInjector.Injection injection = AuthInjector.compute(stability);
 
