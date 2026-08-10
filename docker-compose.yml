@@ -11,6 +11,19 @@ services:
       AICOIN_PROXY_PORT: "8080"
       AICOIN_PROXY_REDIS_HOST: "redis"
       AICOIN_PROXY_REDIS_PORT: "6379"
+      # Provider credentials and the admin token come from the deploying
+      # shell's environment — never from this file or `application.yaml`, so
+      # nothing secret is ever committed. Each maps a conventional
+      # `<PROVIDER>_API_KEY` name onto the `AICOIN_PROXY_<PROVIDER>_APIKEY`
+      # override `ProxyConfig.load` looks for. An unset one leaves the YAML
+      # default (empty) in place, and that provider simply fails auth upstream
+      # rather than silently routing somewhere unexpected.
+      AICOIN_PROXY_ANTHROPIC_APIKEY: "${ANTHROPIC_API_KEY:-}"
+      AICOIN_PROXY_OPENAI_APIKEY: "${OPENAI_API_KEY:-}"
+      AICOIN_PROXY_GOOGLE_APIKEY: "${GEMINI_API_KEY:-}"
+      AICOIN_PROXY_ELEVENLABS_APIKEY: "${ELEVENLABS_API_KEY:-}"
+      AICOIN_PROXY_STABILITY_APIKEY: "${STABILITY_API_KEY:-}"
+      AICOIN_PROXY_ADMIN_TOKEN: "${AICOIN_ADMIN_TOKEN:-}"
     ports:
       - "8080:8080"
     depends_on:

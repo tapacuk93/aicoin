@@ -34,6 +34,13 @@ final class AdminHandler {
 
     private static final String RESOURCE_NAME = "/admin.html";
     private static final String ADMIN_TOKEN_HEADER = "X-Admin-Token";
+    /** How many merged entries {@code /admin/activity} returns. */
+    private static final int ACTIVITY_LIMIT = 200;
+    /**
+     * How many of each wallet's most recent entries the merge considers. Above the per-page limit
+     * on purpose, so one busy wallet can't crowd every other wallet out of the feed.
+     */
+    private static final int ACTIVITY_PER_WALLET_SCAN = 50;
 
     private AdminHandler() {
     }
@@ -67,6 +74,42 @@ final class AdminHandler {
                 sb.append("{\"address\":\"").append(summary.getAddress()).append("\",")
                         .append("\"balance\":").append(formatNumber(summary.getBalance())).append(",")
                         .append("\"transaction_count\":").append(summary.getTransactionCount()).append("}");
+            }
+            sb.append("]}");
+            sendJson(ctx, sb.toString());
+        });
+    }
+
+    /**
+     * {@code GET /admin/activity} — every wallet's recent transactions in one newest-first feed,
+     * each entry carrying the wallet it belongs to. Paid calls are in here as their {@code debit}
+     * entries, so this is the call log as well as the money log.
+     *
+     * <p>Answers the question the per-wallet view can't: what is happening across the whole system
+     * right now, without knowing which address to look at first.
+     */
+    static void serveActivity(ChannelHandlerContext ctx, FullHttpRequest request, AicoinLedger ledger,
+                              ProxyConfig config) {
+        if (!isAuthorized(request, config, ctx)) {
+            return;
+        }
+        ledger.listRecentTransactions(ACTIVITY_LIMIT, ACTIVITY_PER_WALLET_SCAN, entries -> {
+            if (!entries.isPresent()) {
+                sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not load activity");
+                return;
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("{\"activity\":[");
+            boolean first = true;
+            for (AicoinLedger.GlobalTxEntry entry : entries.get()) {
+                if (!first) {
+                    sb.append(",");
+                }
+                first = false;
+                // The stored entry is already a JSON object; splice the wallet
+                // in rather than re-encoding what the ledger wrote.
+                sb.append("{\"address\":\"").append(entry.getAddress()).append("\",\"tx\":")
+                        .append(entry.getJson()).append("}");
             }
             sb.append("]}");
             sendJson(ctx, sb.toString());

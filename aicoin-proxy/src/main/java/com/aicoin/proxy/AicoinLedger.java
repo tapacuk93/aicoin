@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -415,6 +416,83 @@ final class AicoinLedger implements AutoCloseable {
      * each entry a raw JSON object string exactly as the Lua scripts above {@code cjson.encode}d it — the
      * admin page parses these client-side. {@link Optional#empty()} means the lookup failed.
      */
+    /**
+     * Every wallet's recent transactions merged into one newest-first feed, each entry tagged with
+     * the wallet it belongs to — the admin page's "what is happening right now" view, as opposed to
+     * {@link #getTransactions} which answers "what has this one wallet done".
+     *
+     * <p>Every paid call appears here as its {@code type=debit} entry, so this doubles as the call
+     * log: provider, amount and resulting balance are already in the entry the debit script writes.
+     *
+     * <p>Reads at most {@code perWalletScan} entries per wallet before merging. The per-wallet logs
+     * are capped ({@code TX_LOG_CAP}) and there is no global time index, so a genuinely complete
+     * cross-wallet history would mean reading every log in full on every page load. Scanning a
+     * bounded tail of each and then sorting gives the newest activity — which is what the page is
+     * for — at a cost that grows with wallet count rather than with total history.
+     *
+     * @param limit          maximum entries to return after merging
+     * @param perWalletScan  how many of each wallet's most recent entries to consider
+     */
+    void listRecentTransactions(int limit, int perWalletScan, Consumer<Optional<List<GlobalTxEntry>>> onResult) {
+        commands.smembers(KNOWN_WALLETS_KEY).whenComplete((members, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger known-wallets lookup failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            List<String> addresses = new ArrayList<>(members);
+            if (addresses.isEmpty()) {
+                onResult.accept(Optional.of(List.of()));
+                return;
+            }
+            List<CompletableFuture<List<GlobalTxEntry>>> futures = new ArrayList<>(addresses.size());
+            for (String address : addresses) {
+                futures.add(commands.lrange(txKey(address), -perWalletScan, -1).toCompletableFuture()
+                        .thenApply(entries -> {
+                            List<GlobalTxEntry> tagged = new ArrayList<>(entries.size());
+                            for (String entry : entries) {
+                                tagged.add(new GlobalTxEntry(address, entry, timestampOf(entry)));
+                            }
+                            return tagged;
+                        }));
+            }
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).whenComplete((v, joinErr) -> {
+                if (joinErr != null) {
+                    LOG.log(Level.WARNING, "ledger cross-wallet transaction lookup failed", joinErr);
+                    onResult.accept(Optional.empty());
+                    return;
+                }
+                List<GlobalTxEntry> merged = new ArrayList<>();
+                for (CompletableFuture<List<GlobalTxEntry>> future : futures) {
+                    merged.addAll(future.join());
+                }
+                merged.sort(Comparator.comparingDouble(GlobalTxEntry::getAt).reversed());
+                onResult.accept(Optional.of(merged.subList(0, Math.min(limit, merged.size()))));
+            });
+        });
+    }
+
+    /**
+     * The {@code at} field of a transaction entry, or 0 for one that can't be parsed — an
+     * unparseable entry sorts to the end of the feed rather than taking the whole page down with it.
+     * Parsed with SnakeYAML, which reads JSON as a subset of YAML, the same way
+     * {@link CostCalculator} reads provider usage bodies.
+     */
+    private static double timestampOf(String entryJson) {
+        try {
+            Object parsed = new org.yaml.snakeyaml.Yaml().load(entryJson);
+            if (parsed instanceof Map) {
+                Object at = ((Map<?, ?>) parsed).get("at");
+                if (at instanceof Number) {
+                    return ((Number) at).doubleValue();
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // Fall through to 0 — see the doc comment.
+        }
+        return 0;
+    }
+
     void getTransactions(String address, Consumer<Optional<List<String>>> onResult) {
         commands.lrange(txKey(address), 0, -1).whenComplete((entries, err) -> {
             if (err != null) {
@@ -709,6 +787,32 @@ final class AicoinLedger implements AutoCloseable {
     }
 
     /** One row of the admin page's wallet list: a known address, its current balance, and how many transaction-log entries it has. */
+    /** One wallet's transaction, tagged with whose it is — see {@link #listRecentTransactions}. */
+    static final class GlobalTxEntry {
+        private final String address;
+        private final String json;
+        private final double at;
+
+        GlobalTxEntry(String address, String json, double at) {
+            this.address = address;
+            this.json = json;
+            this.at = at;
+        }
+
+        String getAddress() {
+            return address;
+        }
+
+        /** The entry exactly as the Lua scripts {@code cjson.encode}d it. */
+        String getJson() {
+            return json;
+        }
+
+        double getAt() {
+            return at;
+        }
+    }
+
     static final class WalletSummary {
         private final String address;
         private final double balance;

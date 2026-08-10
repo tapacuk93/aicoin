@@ -145,6 +145,10 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             AdminHandler.servePage(ctx);
             return;
         }
+        if (request.method() == HttpMethod.GET && "/admin/activity".equals(path)) {
+            AdminHandler.serveActivity(ctx, request, ledger, config);
+            return;
+        }
         if (request.method() == HttpMethod.GET && "/admin/wallets".equals(path)) {
             AdminHandler.serveWallets(ctx, request, ledger, config);
             return;

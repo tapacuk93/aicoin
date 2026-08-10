@@ -100,10 +100,22 @@
 
   <div class="card" id="walletsCard" style="display:none;">
     <h2>Known wallets</h2>
+    <p class="tagline" id="walletsTotals"></p>
     <table>
       <thead><tr><th>Address</th><th>Balance</th><th>Transactions</th></tr></thead>
       <tbody id="walletsBody"></tbody>
     </table>
+  </div>
+
+  <div class="card" id="activityCard" style="display:none">
+    <h2>Recent activity &mdash; all wallets</h2>
+    <p class="tagline">Newest first, across every wallet. Paid AI calls appear as <code>debit</code>
+      rows, so this is the call log as well as the money log. Click a wallet to see only its own.</p>
+    <table>
+      <thead><tr><th>At</th><th>Wallet</th><th>Type</th><th>Amount</th><th>Counterparty / provider</th><th>Balance after</th></tr></thead>
+      <tbody id="activityBody"></tbody>
+    </table>
+    <p class="msg" id="activityMsg"></p>
   </div>
 
   <div class="card" id="transactionsCard">
@@ -125,6 +137,10 @@
   const loadMsg = document.getElementById("loadMsg");
   const walletsCard = document.getElementById("walletsCard");
   const walletsBody = document.getElementById("walletsBody");
+  const walletsTotals = document.getElementById("walletsTotals");
+  const activityCard = document.getElementById("activityCard");
+  const activityBody = document.getElementById("activityBody");
+  const activityMsg = document.getElementById("activityMsg");
   const transactionsCard = document.getElementById("transactionsCard");
   const txAddress = document.getElementById("txAddress");
   const txBody = document.getElementById("txBody");
@@ -170,17 +186,60 @@
         walletsBody.appendChild(row);
       });
       walletsCard.style.display = "block";
-      setMsg(loadMsg, (body.wallets || []).length + " known wallet(s).", true);
+      const wallets = body.wallets || [];
+      const totalBalance = wallets.reduce(function (sum, w) { return sum + Number(w.balance || 0); }, 0);
+      const totalTx = wallets.reduce(function (sum, w) { return sum + Number(w.transaction_count || 0); }, 0);
+      // Outstanding balance is the liability side of the ledger — coins sold or
+      // granted that nobody has spent yet — so it's worth seeing without
+      // adding up a column by hand.
+      walletsTotals.textContent = wallets.length + " wallets · "
+        + (Math.round(totalBalance * 100) / 100) + " aicoin outstanding · "
+        + totalTx + " transactions recorded";
+      setMsg(loadMsg, wallets.length + " known wallet(s).", true);
+      loadActivity();
     } catch (e) {
       setMsg(loadMsg, "Network error — try again.", false);
     }
   });
+
+  async function loadActivity() {
+    try {
+      const { status, body } = await fetchJson("/admin/activity");
+      if (status !== 200 || !body) {
+        activityCard.style.display = "none";
+        return;
+      }
+      activityBody.innerHTML = "";
+      const entries = body.activity || [];
+      entries.forEach(function (entry) {
+        const tx = entry.tx || {};
+        const counterparty = tx.counterparty || tx.provider || "";
+        const short = entry.address.slice(0, 10) + "…";
+        const row = document.createElement("tr");
+        row.className = "wallet-row";
+        row.innerHTML = "<td>" + formatAt(tx.at) + "</td>"
+          + "<td><code title=\"" + entry.address + "\">" + short + "</code></td>"
+          + "<td class=\"type-" + tx.type + "\">" + tx.type + "</td>"
+          + "<td>" + tx.amount + "</td>"
+          + "<td><code>" + counterparty + "</code></td>"
+          + "<td>" + tx.balance_after + "</td>";
+        row.addEventListener("click", function () { loadTransactions(entry.address); });
+        activityBody.appendChild(row);
+      });
+      activityCard.style.display = "block";
+      const debits = entries.filter(function (e) { return (e.tx || {}).type === "debit"; }).length;
+      setMsg(activityMsg, entries.length + " recent entries, " + debits + " of them paid calls.", true);
+    } catch (e) {
+      activityCard.style.display = "none";
+    }
+  }
 
   async function loadTransactions(address) {
     setMsg(txMsg, "Loading...", true);
     txAddress.textContent = address;
     transactionsCard.style.display = "block";
     walletsCard.style.display = "none";
+    activityCard.style.display = "none";
     try {
       const { status, body } = await fetchJson("/admin/wallets/" + encodeURIComponent(address) + "/transactions");
       if (status !== 200 || !body) {
@@ -204,6 +263,7 @@
   backLink.addEventListener("click", function () {
     transactionsCard.style.display = "none";
     walletsCard.style.display = "block";
+    activityCard.style.display = "block";
   });
 })();
 </script>
