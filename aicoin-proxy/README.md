@@ -276,7 +276,7 @@ Before forwarding a **paid target** to the upstream AI provider, once either
 scheme verifies an address, the proxy atomically checks and debits **exactly 1.0 aicoin**
 from that wallet's balance (`AicoinLedger.debitForCall`, a single Redis Lua
 script — no separate read-then-write, so two concurrent calls can't both
-pass a stale check and overdraw). **1 aicoin is worth 1 paid AI call —
+pass a stale check and overdraw). **A paid call costs at least 1 aicoin, and what it cost to run when metered —
 enforced, not just a tagline**; this replaced an earlier binary
 "balance > 0" gate that never actually debited anything.
 
