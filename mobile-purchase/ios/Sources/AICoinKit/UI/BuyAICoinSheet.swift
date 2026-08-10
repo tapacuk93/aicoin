@@ -86,20 +86,34 @@ public struct BuyAICoinSheet: View {
     public var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                Picker("", selection: $selectedTab) {
-                    ForEach(Tab.allCases) { tab in
-                        Text(tab.rawValue).tag(tab)
+                // A one-tab segmented control is just a mislabelled header, so
+                // the picker disappears entirely with the transfer tab rather
+                // than sitting there with nothing to switch between. See
+                // `AICoinConfig.isPeerTransferEnabled` for why it's off.
+                if AICoinConfig.isPeerTransferEnabled {
+                    Picker("", selection: $selectedTab) {
+                        ForEach(Tab.allCases) { tab in
+                            Text(tab.rawValue).tag(tab)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .padding([.horizontal, .top])
+                    .accessibilityIdentifier(Identifiers.tabPicker)
                 }
-                .pickerStyle(.segmented)
-                .padding([.horizontal, .top])
-                .accessibilityIdentifier(Identifiers.tabPicker)
 
                 switch selectedTab {
                 case .buy:
                     buyTab
                 case .transfer:
-                    SendReceiveView(identity: identity, walletClient: walletClient, walletStore: walletStore)
+                    // Unreachable while transfers are off — `selectedTab`
+                    // starts on `.buy` and nothing can move it without the
+                    // picker above — but kept exhaustive rather than
+                    // force-unwrapped so re-enabling is a one-line change.
+                    if AICoinConfig.isPeerTransferEnabled {
+                        SendReceiveView(identity: identity, walletClient: walletClient, walletStore: walletStore)
+                    } else {
+                        buyTab
+                    }
                 }
             }
             // `.contain` (not a bare identifier on the VStack) so the root is
