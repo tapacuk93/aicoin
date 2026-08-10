@@ -1,4 +1,4 @@
-"""End-to-end production smoke test against apps.oeaio.com.
+"""End-to-end production smoke test against proxy.aicoin.oeaio.com.
 
 Exercises the full real path: generate an Ed25519 wallet, claim free coins with a
 live signature, issue an API token, make a genuine Anthropic call through the
@@ -10,7 +10,7 @@ import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-BASE = "https://apps.oeaio.com"
+BASE = "https://proxy.aicoin.oeaio.com"
 IP = "100.51.144.4"
 
 sess = requests.Session()
