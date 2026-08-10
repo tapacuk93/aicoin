@@ -58,7 +58,7 @@ CASES = [
       "messages": [{"role": "user", "content": "Say hi."}]},
      None, 1, "AIProviderClient — OpenAI as main narrator"),
 
-    ("gemini narration", "google", "POST", "/v1beta/models/gemini-2.0-flash:generateContent",
+    ("gemini narration", "google", "POST", "/v1beta/models/gemini-flash-latest:generateContent",
      {"contents": [{"role": "user", "parts": [{"text": "Say hi."}]}]},
      None, 1, "AIProviderClient — Gemini as main narrator"),
 
@@ -73,8 +73,8 @@ CASES = [
 ]
 
 IMAGE_CASES = [
-    ("dall-e image", "openai", "POST", "/v1/images/generations",
-     {"model": "dall-e-3", "prompt": "A lighthouse at dusk.", "n": 1, "size": "1024x1024"},
+    ("gpt-image-1 image", "openai", "POST", "/v1/images/generations",
+     {"model": "gpt-image-1", "prompt": "A lighthouse at dusk.", "n": 1, "size": "1024x1024"},
      None, 1, "DalleClient.generateImage"),
 
     ("stability image", "stability", "POST", "/v2beta/stable-image/generate/core",
