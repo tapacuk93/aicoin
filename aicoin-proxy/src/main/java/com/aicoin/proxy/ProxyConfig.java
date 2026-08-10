@@ -86,10 +86,10 @@ public final class ProxyConfig {
 
     /**
      * @return {@code pricing.metered}: whether a call is charged what it cost, rounded up to whole
-     * coins (env {@code AICOIN_PROXY_METERED}). <b>Off by default.</b> Every shipped client states
-     * "1 AICoin = 1 AI API call" in its own UI and store copy, so turning this on changes a
-     * user-visible pricing promise and must be a deliberate, coordinated act — not something a
-     * deployment picks up silently. See {@link CoinMeter} for the rounding rule.
+     * coins (env {@code AICOIN_PROXY_METERED}). <b>On by default</b> — this is the billing model,
+     * and the flag exists so a deployment or a test run can turn it off, not as an opt-in. Every
+     * client's copy is written for it: a call costs "from 1 AICoin, more if it's a long one". See
+     * {@link CoinMeter} for the rounding rule.
      */
     public boolean isMeteredBilling() {
         return meteredBilling;
@@ -264,7 +264,7 @@ public final class ProxyConfig {
         }
 
         double coinValueUsd = getDouble(yaml, "pricing.coinValueUsd", 0.009);
-        boolean meteredBilling = getBoolean(yaml, "pricing.metered", false);
+        boolean meteredBilling = getBoolean(yaml, "pricing.metered", true);
         double costPerTokenUsd = getDouble(yaml, "pricing.costPerTokenUsd", 0.000002);
         double defaultCostUsdPerCall = getDouble(yaml, "pricing.defaultCostUsdPerCall", 0.001);
         int healthWindowSize = getInt(yaml, "health.windowSize", 50);

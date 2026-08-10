@@ -62,11 +62,14 @@ providers:
     freePaths: ["GET /v1/engines/list", "GET /v1/user/account", "GET /v1/user/balance"]
 pricing:
   # Charge each call what it actually cost, rounded up to whole coins with a floor of one,
-  # instead of a flat coin per call. OFF by default and deliberately so: every shipped client
-  # states "1 AICoin = 1 AI API call" in its own UI and store copy, so enabling this changes a
-  # user-visible pricing promise and has to be coordinated with those apps, not picked up
-  # silently by a deployment. Env: AICOIN_PROXY_METERED.
-  metered: false
+  # instead of a flat coin per call. This is the billing model — the flag exists so it can be
+  # turned OFF (per deployment, or for a test run) rather than as an opt-in.
+  #
+  # Turning it off again is a user-visible pricing change in the other direction: every client's
+  # copy says a call costs "from 1 AICoin, more if it's a long one", so a deployment that flips
+  # this to false is charging less than it says, not more. Harmless to users, but don't leave it
+  # there by accident. Env: AICOIN_PROXY_METERED.
+  metered: true
   # What one coin is worth when metering. Defaults to the per-coin price of the largest IAP pack
   # — the cheapest a coin is ever sold for — so metering against it never under-charges a bulk
   # buyer. Env: AICOIN_PROXY_COIN_VALUE_USD.
