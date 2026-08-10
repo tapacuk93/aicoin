@@ -43,6 +43,13 @@ public struct CoinBalanceBadge: View {
 
     public var body: some View {
         Button {
+            // A tap on a badge showing "—" is, more often than not, someone
+            // asking why it says that — so take it as a retry as well as
+            // whatever the host wired `onTap` to. Harmless when a balance is
+            // already known (`WalletBalanceStore.refresh` is idempotent), and
+            // it means the failed-read state is never more than one tap from
+            // resolving itself even if every automatic retry has been spent.
+            Task { await store.refresh() }
             onTap?()
         } label: {
             HStack(spacing: 4) {
