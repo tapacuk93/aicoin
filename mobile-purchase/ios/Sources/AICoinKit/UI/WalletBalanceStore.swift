@@ -1,5 +1,10 @@
 import Foundation
 import Combine
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 /// Holds the current balance for one address and keeps it fresh by subscribing to
 /// `AICoinEventBus` — refreshes automatically after any paid AI call (`.paidCallSucceeded`), any
@@ -17,6 +22,27 @@ public final class WalletBalanceStore: ObservableObject {
     private let address: String
     private let walletClient: WalletClient
     private var cancellable: AnyCancellable?
+    private var foregroundCancellable: AnyCancellable?
+
+    /// Backoff schedule for retrying a balance read that threw. Deliberately
+    /// short and finite: this exists to survive a blip (no signal at launch, a
+    /// DNS hiccup, the app foregrounded mid-request), not to hammer a proxy
+    /// that's genuinely down.
+    ///
+    /// Without it a single failed read stranded the badge on its "—" state for
+    /// the entire app session — `CoinBalanceBadge` reads once from `.task`,
+    /// `refresh()` swallowed the error into `lastError`, and nothing else
+    /// re-read a balance until an `AICoinEventBus` event happened to fire. On a
+    /// phone, where the very first read races app launch against the radio
+    /// coming back, that was the common case, not the rare one.
+    /// Internal rather than private purely so `WalletBalanceStoreTests` can
+    /// shrink it to milliseconds — a test that genuinely slept the real
+    /// schedule would add 22 seconds to every run.
+    static var retryDelays: [TimeInterval] = [2, 5, 15]
+    /// The in-flight retry cycle, if any. Non-nil is also the "don't start a
+    /// second cycle" flag — every failure inside a cycle would otherwise
+    /// schedule another one on top of it.
+    private var retryTask: Task<Void, Never>?
 
     #if DEBUG
     /// Set to enable the debug-only top-up described on `debugAutoReloadWhenEmpty`.
@@ -42,6 +68,7 @@ public final class WalletBalanceStore: ObservableObject {
             .sink { [weak self] _ in
                 Task { await self?.refresh() }
             }
+        subscribeToForeground()
     }
 
     #if DEBUG
@@ -82,6 +109,7 @@ public final class WalletBalanceStore: ObservableObject {
             .sink { [weak self] _ in
                 Task { await self?.refresh() }
             }
+        subscribeToForeground()
     }
     #endif
 
@@ -94,12 +122,65 @@ public final class WalletBalanceStore: ObservableObject {
         do {
             balance = try await walletClient.balance(address: address)
             lastError = nil
+            // A cycle still counting down has nothing left to fix.
+            retryTask?.cancel()
+            retryTask = nil
         } catch {
             lastError = error
+            scheduleRetryIfNeeded()
         }
         #if DEBUG
         await debugAutoReloadIfEmpty()
         #endif
+    }
+
+    /// Walks `retryDelays` until a read succeeds or the schedule runs out.
+    ///
+    /// Each attempt goes through `refresh()` itself, so a success takes the
+    /// normal path (clears `lastError`, cancels this very task) and the badge
+    /// shows its spinner while an attempt is in flight — the same states a
+    /// first-launch read produces, with no second code path to keep in sync.
+    private func scheduleRetryIfNeeded() {
+        guard retryTask == nil else { return }
+        retryTask = Task { [weak self] in
+            for delay in Self.retryDelays {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled, let store = self else { return }
+                await store.refresh()
+                // `refresh()` cancels this task on success; checking the
+                // outcome here too is what stops the remaining delays from
+                // being slept through before that cancellation is noticed.
+                if store.balance != nil { return }
+            }
+            self?.clearRetryTask()
+        }
+    }
+
+    /// Lets the cycle above release its own handle once the schedule is spent,
+    /// so a later failure (a fresh event-bus refresh, a foregrounding) can
+    /// start a new one instead of being blocked by a finished task.
+    private func clearRetryTask() {
+        retryTask = nil
+    }
+
+    /// Re-reads the balance whenever the app comes back to the foreground.
+    ///
+    /// The badge's own `.task` fires once, when the view first appears — which
+    /// on iOS is typically the one moment the network is least likely to be
+    /// up (cold launch, radio still associating). Coming back from the
+    /// background is both the most common way a stale/failed balance gets
+    /// looked at again and the point where connectivity has usually recovered.
+    private func subscribeToForeground() {
+        #if canImport(UIKit)
+        let notification = UIApplication.willEnterForegroundNotification
+        #elseif canImport(AppKit)
+        let notification = NSApplication.didBecomeActiveNotification
+        #endif
+        foregroundCancellable = NotificationCenter.default.publisher(for: notification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                Task { await self?.refresh() }
+            }
     }
 
     #if DEBUG
