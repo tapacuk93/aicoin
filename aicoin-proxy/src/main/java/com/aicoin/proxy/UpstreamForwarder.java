@@ -254,8 +254,7 @@ final class UpstreamForwarder {
                 // GET /price with spend the proxy was never billed for.
                 if (callCostAicoin > 0) {
                     String bodyStr = decodedForPricing(response.headers(), bodyBytes);
-                    double costUsd = CostCalculator.computeCostUsd(
-                            bodyStr, config.getCostPerTokenUsd(), config.getDefaultCostUsdPerCall());
+                    double costUsd = CostCalculator.computeCostUsd(provider, bodyStr, config.getModelPricing());
                     ledger.recordEvent(provider, costUsd, Instant.now());
                 }
             } else {

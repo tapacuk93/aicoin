@@ -39,6 +39,7 @@ public final class ProxyConfig {
     private final int freeCoinsPoolSize;
     private final String adminToken;
     private final Map<String, ProviderConfig> providers;
+    private final ModelPricing modelPricing;
     private final double costPerTokenUsd;
     private final double defaultCostUsdPerCall;
     private final int healthWindowSize;
@@ -48,7 +49,8 @@ public final class ProxyConfig {
                          double decayHalflifeDays, int freeClaimCooldownSeconds, int signatureSkewSeconds,
                          int freeCoinsPoolSize, String adminToken, Map<String, ProviderConfig> providers,
                          double costPerTokenUsd, double defaultCostUsdPerCall,
-                         int healthWindowSize, List<IapPackageConfig> iapPackages) {
+                         int healthWindowSize, List<IapPackageConfig> iapPackages,
+                         ModelPricing modelPricing) {
         this.port = port;
         this.redisHost = redisHost;
         this.redisPort = redisPort;
@@ -65,6 +67,12 @@ public final class ProxyConfig {
         this.defaultCostUsdPerCall = defaultCostUsdPerCall;
         this.healthWindowSize = healthWindowSize;
         this.iapPackages = iapPackages;
+        this.modelPricing = modelPricing;
+    }
+
+    /** Per-provider, per-model rates for pricing recorded calls — see {@link ModelPricing}. */
+    public ModelPricing getModelPricing() {
+        return modelPricing;
     }
 
     public int getPort() {
@@ -251,9 +259,95 @@ public final class ProxyConfig {
         defaultCostUsdPerCall = envDouble(env, "AICOIN_PROXY_DEFAULT_COST_USD", defaultCostUsdPerCall);
         healthWindowSize = envInt(env, "AICOIN_PROXY_HEALTH_WINDOW_SIZE", healthWindowSize);
 
+        ModelPricing modelPricing = parseModelPricing(yaml, costPerTokenUsd, defaultCostUsdPerCall);
+
         return new ProxyConfig(port, redisHost, redisPort, redisUsername, redisPassword, redisSsl,
                 decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
-                costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages);
+                costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages, modelPricing);
+    }
+
+    /**
+     * Reads the optional {@code pricing.providers} block, layering any configured rates over the
+     * built-in defaults. Config-driven because provider list prices change on the provider's
+     * schedule, not this repo's — a rate correction should be a YAML edit and a restart, not a
+     * release.
+     *
+     * <pre>
+     * pricing:
+     *   providers:
+     *     anthropic:
+     *       inputUsdPerMillionTokens: 3.00
+     *       outputUsdPerMillionTokens: 15.00
+     *       models:
+     *         claude-haiku-4-5: { inputUsdPerMillionTokens: 1.00, outputUsdPerMillionTokens: 5.00 }
+     *     elevenlabs:
+     *       usdPerCall: 0.03
+     * </pre>
+     *
+     * A malformed entry is skipped rather than failing config load — one bad rate should leave the
+     * rest of the table standing, exactly as a bad IAP package entry does.
+     */
+    private static ModelPricing parseModelPricing(Map<String, Object> yaml,
+                                                  double costPerTokenUsd, double defaultCostUsdPerCall) {
+        ModelPricing defaults = ModelPricing.defaults(costPerTokenUsd, defaultCostUsdPerCall);
+        Object configured = getNested(yaml, "pricing.providers");
+        if (!(configured instanceof Map)) {
+            return defaults;
+        }
+        Map<String, ModelPricing.Rates> providerDefaults = new LinkedHashMap<>();
+        Map<String, Map<String, ModelPricing.Rates>> models = new LinkedHashMap<>();
+        Map<String, Double> perCall = new LinkedHashMap<>();
+        for (String provider : PROVIDERS) {
+            ModelPricing.Rates fallbackRates = defaults.ratesFor(provider, null);
+            if (fallbackRates != null) {
+                providerDefaults.put(provider, fallbackRates);
+            }
+            Double fallbackPerCall = defaults.perCallUsd(provider);
+            if (fallbackPerCall != null) {
+                perCall.put(provider, fallbackPerCall);
+            }
+        }
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) configured).entrySet()) {
+            if (!(entry.getKey() instanceof String) || !(entry.getValue() instanceof Map)) {
+                continue;
+            }
+            String provider = (String) entry.getKey();
+            Map<?, ?> body = (Map<?, ?>) entry.getValue();
+            ModelPricing.Rates rates = ratesFromMap(body);
+            if (rates != null) {
+                providerDefaults.put(provider, rates);
+            }
+            Object usdPerCall = body.get("usdPerCall");
+            if (usdPerCall instanceof Number) {
+                perCall.put(provider, ((Number) usdPerCall).doubleValue());
+            }
+            Object modelsNode = body.get("models");
+            if (modelsNode instanceof Map) {
+                Map<String, ModelPricing.Rates> perModel = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> modelEntry : ((Map<?, ?>) modelsNode).entrySet()) {
+                    if (!(modelEntry.getKey() instanceof String) || !(modelEntry.getValue() instanceof Map)) {
+                        continue;
+                    }
+                    ModelPricing.Rates modelRates = ratesFromMap((Map<?, ?>) modelEntry.getValue());
+                    if (modelRates != null) {
+                        perModel.put(((String) modelEntry.getKey()).toLowerCase(java.util.Locale.ROOT), modelRates);
+                    }
+                }
+                if (!perModel.isEmpty()) {
+                    models.put(provider, perModel);
+                }
+            }
+        }
+        return new ModelPricing(providerDefaults, models, perCall, costPerTokenUsd, defaultCostUsdPerCall);
+    }
+
+    private static ModelPricing.Rates ratesFromMap(Map<?, ?> body) {
+        Object in = body.get("inputUsdPerMillionTokens");
+        Object out = body.get("outputUsdPerMillionTokens");
+        if (in instanceof Number && out instanceof Number) {
+            return new ModelPricing.Rates(((Number) in).doubleValue(), ((Number) out).doubleValue());
+        }
+        return null;
     }
 
     /**
