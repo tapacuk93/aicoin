@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// The "Buy AICoin" sheet: a dynamic, server-driven list of coin packages (via `IAPManager`) with
-/// a prominent, literal statement of the exchange rate CONTRACT.md enforces server-side ("1
-/// aicoin is worth 1 paid AI call — enforced, not just a tagline"), plus a secondary "Send /
-/// Receive" tab for the peer-transfer feature. This is the surface an app should present when
+/// a prominent statement of how coins are spent — metered per call against what the call cost
+/// to run, floored at one coin, as CONTRACT.md defines — plus a secondary "Send / Receive" tab
+/// for the peer-transfer feature. This is the surface an app should present when
 /// `AICoinRouter` throws `AICoinError.insufficientBalance` — e.g.:
 ///
 /// ```swift
@@ -36,7 +36,7 @@ public struct BuyAICoinSheet: View {
         public static let root = "aicoin.buySheet"
         /// The Buy / Send-Receive segmented control.
         public static let tabPicker = "aicoin.buySheet.tabPicker"
-        /// The literal "1 AICoin = 1 AI API call" exchange-rate statement.
+        /// The headline stating how coins are spent.
         public static let exchangeRate = "aicoin.buySheet.exchangeRate"
         /// "Current balance: N AICoin" (absent until a balance is known).
         public static let balance = "aicoin.buySheet.balance"
@@ -137,11 +137,11 @@ public struct BuyAICoinSheet: View {
 
     private var buyTab: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("1 AICoin = 1 AI API call")
+            Text("AICoin pays for AI calls")
                 .font(.title3.bold())
                 .padding(.horizontal)
                 .accessibilityIdentifier(Identifiers.exchangeRate)
-            Text("Buy AICoin to keep generating — no personal API keys needed.")
+            Text("A call costs from 1 AICoin, more if it's a long one — you're charged what it costs to run, never a subscription and never your own API key.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal)
@@ -190,7 +190,7 @@ public struct BuyAICoinSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(package.coins) AICoin")
                         .font(.body.weight(.semibold))
-                    Text("≈ \(package.coins) AI calls")
+                    Text("from \(package.coins) AI calls")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

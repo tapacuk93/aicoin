@@ -89,7 +89,7 @@ if __name__ == "__main__":
     tok = w.token()
     payload = {"model": "claude-haiku-4-5-20251001", "max_tokens": 16,
                "messages": [{"role": "user", "content": "Reply with exactly: aicoin works"}]}
-    r = sess.post(f"{BASE}/v1/messages",
+    r = r_call = sess.post(f"{BASE}/v1/messages",
                   headers={"X-AI": "anthropic", "X-Api-Key": tok,
                            "Content-Type": "application/json", "anthropic-version": "2023-06-01"},
                   json=payload, timeout=90)
@@ -106,8 +106,13 @@ if __name__ == "__main__":
     time.sleep(2)
     r = sess.get(f"{BASE}/wallet/api/balance/{w.address}", timeout=30)
     bal_final = r.json().get("balance") if r.status_code == 200 else None
-    results.append(step("exactly 1 aicoin debited for the call", bal_final == 9.0,
-                        f"balance {bal_after_claim} -> {bal_final}"))
+    # Not a hardcoded 1: under metered billing (pricing.metered) a call costs what it cost to
+    # run, so the proxy reports the charge on X-Aicoin-Charged and the ledger must agree with it.
+    charged = float(r_call.headers.get("X-Aicoin-Charged", "1"))
+    results.append(step("ledger debit matches the charge the proxy reported",
+                        bal_final == bal_after_claim - charged,
+                        f"balance {bal_after_claim} -> {bal_final}, X-Aicoin-Charged={charged:g}"))
+    results.append(step("a paid call always costs at least 1 aicoin", charged >= 1, f"charged={charged:g}"))
 
     # 6. Price feed recorded real spend
     r = sess.get(f"{BASE}/price", timeout=30)

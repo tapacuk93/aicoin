@@ -50,7 +50,12 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
     private static final String X_API_SIGNATURE_HEADER = "X-Api-Signature";
     private static final String X_API_TIMESTAMP_HEADER = "X-Api-Timestamp";
 
-    /** 1 aicoin is worth 1 paid AI call — the currency's fixed exchange rate, not a tunable. */
+    /**
+     * What the gate holds before forwarding: one aicoin, always, so a wallet holding one coin can
+     * always make one call and an empty wallet is refused before any provider is touched. Under
+     * metered billing the rest of the call's real cost is settled afterwards — see
+     * {@link CoinMeter} — but the hold itself is fixed, not a tunable.
+     */
     private static final double CALL_COST_AICOIN = 1.0;
     /**
      * What a call to a {@link FreeTargets free target} costs: nothing. Passed to {@link

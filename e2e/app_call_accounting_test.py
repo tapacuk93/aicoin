@@ -12,8 +12,12 @@ the proxy agreeing with itself.
 
 Two things it deliberately checks together:
 
-- **Paid calls debit exactly 1.** Not 0 (a call the proxy forgot to bill, i.e.
-  free provider spend), and not 2 (a listener charged twice for one segment).
+- **Paid calls debit what the proxy says they did.** The charge is read from the
+  response's `X-Aicoin-Charged` header, so this holds under flat billing (always
+  1) and under metered billing (`pricing.metered`, where a call costs what it
+  cost to run) without the test having to know which is configured. What it
+  pins either way: never 0 — a call the proxy forgot to bill is free provider
+  spend — and never more than the header claims.
 - **Free targets debit exactly 0.** The app lists ElevenLabs voices on every
   Settings visit; billing that would charge people for opening a picker.
 
@@ -120,6 +124,8 @@ def run_case(w, tok, case):
     after = balance(w.address)
     delta = round(before - after, 6)
 
+    charged = float(r.headers.get("X-Aicoin-Charged", "1")) if expected > 0 else 0.0
+
     ok_http = 200 <= r.status_code < 300
     if not ok_http and expected > 0:
         # Refund-on-failure means the delta is 0 here whatever the accounting
@@ -129,9 +135,12 @@ def run_case(w, tok, case):
         print(f"        source: {source}")
         return None
 
-    passed = delta == expected
+    # A paid case expects whatever the proxy reported charging, and at least 1;
+    # a free target expects 0 and no header at all.
+    want = charged if expected > 0 else 0.0
+    passed = delta == want and (expected == 0 or charged >= 1)
     print(f"[{'PASS' if passed else 'FAIL'}] {name}: {r.status_code} in {elapsed:5.1f}s, "
-          f"balance {before} -> {after} (delta {delta}, expected {expected})")
+          f"balance {before} -> {after} (delta {delta}, charged {want:g})")
     if not passed:
         print(f"        source: {source}")
         print(f"        body: {r.text[:200]}")
