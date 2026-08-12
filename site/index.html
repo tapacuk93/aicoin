@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AICoin — pay-per-call currency for AI apps</title>
-<meta name="description" content="AICoin: pay-per-call currency for AI apps. Each call costs from 1 coin, priced by what it costs to run. Buy it with an in-app purchase or receive a transfer, spend it across Infinite AI Radio, All Languages Learner, and Learn Its.">
+<meta name="description" content="AICoin: pay-per-call currency for AI apps. Each call costs from 1 coin, priced by what it costs to run. Receive a transfer and spend it from any app that supports it — no personal API keys, ever.">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
@@ -168,22 +168,13 @@
   .steps { margin: 0; padding-left: 1.2rem; }
   .steps li { margin-bottom: 0.5rem; }
   .steps li:last-child { margin-bottom: 0; }
-  table.packages { width: 100%; border-collapse: collapse; margin-top: 0.75rem; font-size: 0.9rem; }
-  table.packages th, table.packages td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); }
-  table.packages th { color: var(--muted); font-weight: 500; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
-  .apps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
-  .app-tile { border: 1px solid var(--border); border-radius: 10px; padding: 0.9rem 1rem; }
-  .app-tile h3 { margin: 0 0 0.3rem; font-size: 0.95rem; color: var(--fg); }
-  .app-tile p { color: var(--muted); font-size: 0.85rem; margin: 0; }
-  .app-tile .links { margin-top: 0.5rem; font-size: 0.82rem; }
-  .app-tile .links a { margin-right: 0.75rem; }
 </style>
 </head>
 <body>
 <main>
   <span class="status">live</span>
   <h1>AICoin</h1>
-  <p class="tagline">One currency for AI provider calls, priced by what each call costs to run — from 1 AICoin, more for a longer one. Buy it or receive a transfer, spend it from any app that supports it — no personal API keys, ever.</p>
+  <p class="tagline">One currency for AI provider calls, priced by what each call costs to run — from 1 AICoin, more for a longer one. Receive a transfer, spend it from any app that supports it — no personal API keys, ever.</p>
 
   <div class="card price-card">
     <div>
@@ -203,47 +194,9 @@
 
   <div class="card">
     <h2>Getting AICoin</h2>
-    <p>There are exactly two ways to acquire AICoin:</p>
-    <h3>1. Buy it (in-app purchase)</h3>
-    <p>Inside any app that supports AICoin, open the wallet/buy screen — the available coin packages and their App Store prices are set here on the server and can change at any time, so what you see in the app is always current. Payment is processed entirely by Apple through StoreKit; we never see your payment details. A successful purchase credits your wallet immediately.</p>
-    <table class="packages" id="packagesTable" style="display:none">
-      <thead><tr><th>Package</th><th>Coins</th><th>Typical price</th></tr></thead>
-      <tbody id="packagesBody"></tbody>
-    </table>
-    <h3>2. Receive a transfer</h3>
+    <h3>Receive a transfer</h3>
     <p>Anyone can send AICoin to your wallet address, from the <a href="https://proxy.aicoin.oeaio.com/wallet">wallet page</a> or from within a supporting app. There's no real-money rail on this path — it's a direct peer-to-peer balance transfer, the same way you'd hand someone cash.</p>
     <p class="price-meta">A small free-coin faucet also exists for trying things out (up to 10 coins per wallet per hour, while the shared pool lasts — <span id="freeCoinsRemaining">&hellip;</span> left) — it's for onboarding, not a way to fund real usage.</p>
-  </div>
-
-  <div class="card">
-    <h2>Used in these apps</h2>
-    <p>AICoin is the same wallet and the same balance everywhere — buy once, spend it in any of these:</p>
-    <div class="apps-grid">
-      <div class="app-tile">
-        <h3>Infinite AI Radio</h3>
-        <p>An endless, ever-deepening spoken monologue on any topic you tune to.</p>
-        <div class="links">
-          <a href="https://tapacuk93.github.io/infinite-ai-radio-support/">Support</a>
-          <a href="https://tapacuk93.github.io/infinite-ai-radio-support/PRIVACY">Privacy</a>
-        </div>
-      </div>
-      <div class="app-tile">
-        <h3>All Languages Learner</h3>
-        <p>Short AI-generated passages in the language you're learning, with translation and narration.</p>
-        <div class="links">
-          <a href="https://tapacuk93.github.io/alllanguageslearner-support/">Support</a>
-          <a href="https://tapacuk93.github.io/alllanguageslearner-support/PRIVACY">Privacy</a>
-        </div>
-      </div>
-      <div class="app-tile">
-        <h3>Learn Its</h3>
-        <p>A fresh, multi-screen AI lesson on any topic, with illustrations and narration.</p>
-        <div class="links">
-          <a href="https://tapacuk93.github.io/learn-it-support/">Support</a>
-          <a href="https://tapacuk93.github.io/learn-it-support/PRIVACY">Privacy</a>
-        </div>
-      </div>
-    </div>
   </div>
 
   <div class="card">
@@ -257,14 +210,14 @@
 
   <div class="card">
     <h2>Integrate AICoin (for developers)</h2>
-    <p>Building an iOS/macOS app? The shared <code>AICoinKit</code> Swift package (in the <a href="https://github.com/tapacuk93/aicoin">aicoin</a> repo, under <code>mobile-purchase/ios/</code>) bundles wallet keys, StoreKit purchase → wallet-credit flow, transfer UI, and the provider-routing HTTP transport used by our own apps above — that's the fastest path in.</p>
+    <p>Building an iOS/macOS app? The shared <code>AICoinKit</code> Swift package (in the <a href="https://github.com/tapacuk93/aicoin">aicoin</a> repo, under <code>mobile-purchase/ios/</code>) bundles wallet keys, StoreKit purchase → wallet-credit flow, transfer UI, and the provider-routing HTTP transport used by our own apps — that's the fastest path in.</p>
     <p>For any other client, or to call it directly, it's a plain HTTP relay: same request path as the real provider, one header to pick the upstream, an API token instead of your own provider key:</p>
     <pre><code>curl https://proxy.aicoin.oeaio.com/v1/chat/completions \
   -H "X-AI: openai" \
   -H "X-Api-Key: &lt;token from the wallet&gt;" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'</code></pre>
-    <p class="price-meta" style="margin-top: 0.6rem;">A <code>402</code> response means the wallet's balance ran out — prompt the user to buy more or ask someone to send a transfer; never fall back to asking for their own provider key. Full API/config reference, the ledger's data model, and the IAP-redeem flow are documented in <a href="https://github.com/tapacuk93/aicoin/blob/main/CONTRACT.md">CONTRACT.md</a>.</p>
+    <p class="price-meta" style="margin-top: 0.6rem;">A <code>402</code> response means the wallet's balance ran out — prompt the user to ask someone to send a transfer; never fall back to asking for their own provider key. Full API/config reference, the ledger's data model, and the IAP-redeem flow are documented in <a href="https://github.com/tapacuk93/aicoin/blob/main/CONTRACT.md">CONTRACT.md</a>.</p>
   </div>
 
   <footer>
@@ -298,25 +251,6 @@
     .catch(function () {
       freeCoinsRemaining.textContent = "?";
     });
-
-  var packagesTable = document.getElementById("packagesTable");
-  var packagesBody = document.getElementById("packagesBody");
-  fetch(API + "/iap/packages")
-    .then(function (res) { return res.json(); })
-    .then(function (body) {
-      var seen = {};
-      (body.packages || []).forEach(function (p) {
-        var key = p.coins + "|" + p.usd_price_hint;
-        if (seen[key]) return;
-        seen[key] = true;
-        var tr = document.createElement("tr");
-        var label = p.coins >= 1000 ? (p.coins / 1000) + "k coins" : p.coins + " coins";
-        tr.innerHTML = "<td>" + label + "</td><td>" + p.coins + "</td><td>$" + Number(p.usd_price_hint).toFixed(2) + "</td>";
-        packagesBody.appendChild(tr);
-      });
-      if (Object.keys(seen).length) packagesTable.style.display = "table";
-    })
-    .catch(function () { /* leave table hidden */ });
 
   var backendsList = document.getElementById("backendsList");
   var LABELS = {
