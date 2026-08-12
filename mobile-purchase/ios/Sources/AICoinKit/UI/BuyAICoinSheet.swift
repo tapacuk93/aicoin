@@ -140,6 +140,23 @@ public struct BuyAICoinSheet: View {
                 await iapManager.loadPackages()
             }
         }
+        // A macOS sheet takes its size from what its content asks for, and this content asks for
+        // almost nothing: `List` reports a small ideal height regardless of how many rows it holds,
+        // so the sheet opened barely taller than its own title bar. Everything below the balance
+        // line was cut off mid-row — the first package was sliced through horizontally and no
+        // package could be read, let alone bought, which made the sheet a dead end on the Mac.
+        //
+        // The vertical squeeze also reached the copy above the list: with no room to wrap, the
+        // "A call costs from 1 AICoin…" paragraph collapsed to a single truncated line, so the
+        // pricing explanation was unreadable too.
+        //
+        // Sized here rather than at each call site because the sheet is presented from several
+        // places across three apps and none of them should have to know what it needs. iOS is
+        // deliberately untouched: a sheet there is already full-height (or detent-driven) and a
+        // fixed frame would fight it.
+        #if os(macOS)
+        .frame(minWidth: 460, idealWidth: 520, minHeight: 560, idealHeight: 640)
+        #endif
     }
 
     private var buyTab: some View {
