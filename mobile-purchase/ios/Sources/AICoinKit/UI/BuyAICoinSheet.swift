@@ -46,6 +46,8 @@ public struct BuyAICoinSheet: View {
         public static let packageList = "aicoin.buySheet.packageList"
         /// Shown instead of `packageList` when the server returned no packages.
         public static let emptyPackages = "aicoin.buySheet.empty"
+        /// The single-offer buy button, shown when the server has an offer set.
+        public static let offer = "aicoin.buySheet.offer"
         /// The toolbar's dismiss button.
         public static let close = "aicoin.buySheet.close"
 
@@ -131,7 +133,12 @@ public struct BuyAICoinSheet: View {
                         .accessibilityIdentifier(Identifiers.close)
                 }
             }
-            .task { await iapManager.loadPackages() }
+            .task {
+                // Both: the offer is what's displayed when the server has one set, and the
+                // package list is the fallback for a server that doesn't yet.
+                await iapManager.loadOffer()
+                await iapManager.loadPackages()
+            }
         }
     }
 
@@ -162,9 +169,16 @@ public struct BuyAICoinSheet: View {
                     .accessibilityIdentifier(Identifiers.error)
             }
 
-            if iapManager.isLoading && iapManager.packages.isEmpty {
+            if iapManager.isLoading && iapManager.offer == nil && iapManager.packages.isEmpty {
                 Spacer()
                 ProgressView()
+                Spacer()
+            } else if let offer = iapManager.offer {
+                // The offer model: one server-set amount, the same for every app. The package
+                // list below is the pre-offer fallback, kept live so an app running against a
+                // server with no offer set still has something to sell.
+                Spacer()
+                offerButton(offer)
                 Spacer()
             } else if iapManager.packages.isEmpty {
                 Spacer()
@@ -179,6 +193,52 @@ public struct BuyAICoinSheet: View {
                 .listStyle(.plain)
                 .accessibilityIdentifier(Identifiers.packageList)
             }
+        }
+    }
+
+    private func offerButton(_ offer: AICoinOffer) -> some View {
+        Button {
+            Task { await buyOffer(offer) }
+        } label: {
+            VStack(spacing: 6) {
+                Text("\(offer.coins) AICoin")
+                    .font(.title2.bold())
+                if purchasingProductId != nil {
+                    ProgressView()
+                } else if let product = iapManager.offerProduct {
+                    // StoreKit's localized price is authoritative; the offer's usdPrice is the
+                    // server's own view of the same fixed price point and only stands in when
+                    // StoreKit hasn't resolved the product.
+                    Text(product.displayPrice).font(.title3.weight(.semibold))
+                } else {
+                    Text(offer.usdPrice, format: .currency(code: "USD"))
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderedProminent)
+        .padding(.horizontal)
+        .disabled(purchasingProductId != nil || iapManager.offerProduct == nil)
+        .accessibilityIdentifier(Identifiers.offer)
+    }
+
+    private func buyOffer(_ offer: AICoinOffer) async {
+        purchasingProductId = iapManager.offerProduct?.id ?? offer.tier
+        errorMessage = nil
+        defer { purchasingProductId = nil }
+        do {
+            // Passing the displayed amount as `confirmedCoins` is what turns a mid-purchase offer
+            // change into a visible "it just changed, tap again" rather than a silent charge for
+            // something other than what's on screen.
+            let outcome = try await iapManager.purchaseCurrentOffer(
+                address: identity.address, confirmedCoins: offer.coins)
+            await handle(outcome)
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -219,29 +279,33 @@ public struct BuyAICoinSheet: View {
         errorMessage = nil
         defer { purchasingProductId = nil }
         do {
-            let outcome = try await iapManager.purchase(package, address: identity.address)
-            switch outcome {
-            case .success:
-                // Refresh first, then close: the sheet is usually presented
-                // *because* something ran out of coins, so the thing the user
-                // came back to — the badge, the segment that 402'd — should
-                // already be showing the new balance as the sheet goes away.
-                await walletStore.refresh()
-                // Bought and credited, so this screen has nothing left to say.
-                // Leaving it up made the purchase feel unfinished — the one
-                // clear signal of success was a number changing behind a sheet
-                // the user then had to dismiss by hand.
-                dismiss()
-            case .pending, .userCancelled:
-                // `.pending` is Ask-to-Buy/SCA — the purchase isn't done and
-                // may never be, so the sheet stays; `IAPManager`'s unfinished-
-                // transaction observer credits it whenever it does clear.
-                // `.userCancelled` means they backed out of Apple's own sheet,
-                // which shouldn't take this one down with it.
-                break
-            }
+            await handle(try await iapManager.purchase(package, address: identity.address))
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Shared post-purchase handling for both the single offer and the legacy package rows.
+    private func handle(_ outcome: AICoinPurchaseOutcome) async {
+        switch outcome {
+        case .success:
+            // Refresh first, then close: the sheet is usually presented
+            // *because* something ran out of coins, so the thing the user
+            // came back to — the badge, the segment that 402'd — should
+            // already be showing the new balance as the sheet goes away.
+            await walletStore.refresh()
+            // Bought and credited, so this screen has nothing left to say.
+            // Leaving it up made the purchase feel unfinished — the one
+            // clear signal of success was a number changing behind a sheet
+            // the user then had to dismiss by hand.
+            dismiss()
+        case .pending, .userCancelled:
+            // `.pending` is Ask-to-Buy/SCA — the purchase isn't done and
+            // may never be, so the sheet stays; `IAPManager`'s unfinished-
+            // transaction observer credits it whenever it does clear.
+            // `.userCancelled` means they backed out of Apple's own sheet,
+            // which shouldn't take this one down with it.
+            break
         }
     }
 }

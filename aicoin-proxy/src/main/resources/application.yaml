@@ -112,6 +112,12 @@ pricing:
 health:
   windowSize: 50
 iap:
+  # Whether POST /wallet/api/redeem-iap honours StoreKit *Sandbox* transactions. Production must
+  # leave this false: Apple signs sandbox transactions with the same certificate chain as real
+  # ones, so they verify identically, and a free sandbox tester account can mint them without
+  # limit — accepting them means anyone can credit themselves unbounded coins they never bought.
+  # Turn on only against a non-production deployment. Env: AICOIN_PROXY_IAP_ACCEPT_SANDBOX.
+  acceptSandboxPurchases: false
   packages:
     - { productId: com.tarasmaslov.infiniteairadio.aicoin.small,       coins: 50,   usdPriceHint: 0.99 }
     - { productId: com.tarasmaslov.infiniteairadio.aicoin.medium,      coins: 200,  usdPriceHint: 2.99 }

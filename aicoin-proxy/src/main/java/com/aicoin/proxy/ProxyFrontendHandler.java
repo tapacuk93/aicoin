@@ -106,6 +106,18 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             IapPackagesHandler.serveAdminSet(ctx, request, ledger, config);
             return;
         }
+        if (request.method() == HttpMethod.GET && "/iap/offer".equals(path)) {
+            CoinOfferHandler.serveOffer(ctx, ledger);
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/iap/offer/check".equals(path)) {
+            CoinOfferHandler.serveCheck(ctx, ledger);
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/admin/iap/offer".equals(path)) {
+            CoinOfferHandler.serveAdminSet(ctx, request, ledger, config);
+            return;
+        }
         if (request.method() == HttpMethod.GET && "/health".equals(path)) {
             HealthHandler.respond(ctx, healthTracker, config);
             return;
@@ -387,6 +399,11 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
         String toUserId = (String) toRaw;
+        // Optional: apps on the offer model send back the offer_id POST /iap/offer/check gave them
+        // right before opening the purchase sheet. Absent (an older client, or a StoreKit
+        // redelivery whose pin has since expired) simply falls through to the live offer.
+        Object offerIdRaw = map.get("offer_id");
+        String offerId = offerIdRaw instanceof String ? (String) offerIdRaw : "";
 
         AppleJwsVerifier.VerifyResult verified = AppleJwsVerifier.verify(
                 (String) signedTransactionRaw, Instant.now().toEpochMilli());
@@ -398,19 +415,33 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "unknown bundleId");
             return;
         }
+        // Apple's signature proves the transaction is genuine, not that it was paid for. A sandbox
+        // purchase is free, unlimited, and signed by the same chain — so without this check anyone
+        // with a sandbox tester account could credit themselves without limit. See
+        // ProxyConfig#isAcceptSandboxPurchases.
+        if (verified.isSandbox() && !config.isAcceptSandboxPurchases()) {
+            LOG.log(Level.WARNING, "rejected a Sandbox purchase for product {0} (transaction {1}) — "
+                    + "set iap.acceptSandboxPurchases only on a non-production deployment",
+                    new Object[] {verified.getProductId(), verified.getTransactionId()});
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "sandbox purchases are not accepted");
+            return;
+        }
+        // Refunded/revoked: the money went back to the buyer, so the coins must not go out.
+        if (verified.isRevoked()) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "purchase has been refunded or revoked");
+            return;
+        }
 
-        String seedJson = IapPackages.seedJson(config.getIapPackages());
-        ledger.getIapPackages(seedJson, packagesJson -> {
-            if (!packagesJson.isPresent()) {
+        resolveRedeemCoins(offerId, verified.getProductId(), lookup -> {
+            if (!lookup.isReachable()) {
                 sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
                 return;
             }
-            Optional<IapPackages.Entry> pkg = IapPackages.findByProductId(packagesJson.get(), verified.getProductId());
-            if (!pkg.isPresent()) {
+            if (!lookup.isFound()) {
                 sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "unknown productId");
                 return;
             }
-            double coins = pkg.get().getCoins() * (double) verified.getQuantity();
+            double coins = lookup.getCoins() * (double) verified.getQuantity();
             ledger.redeemIap(verified.getTransactionId(), toUserId, verified.getProductId(), coins, redeemResult -> {
                 if (!redeemResult.isReachable()) {
                     sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
@@ -422,6 +453,102 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 sendJson(ctx, HttpResponseStatus.OK, bytes);
             });
         });
+    }
+
+    /**
+     * How many coins <em>one unit</em> of {@code productId} credits, resolved in the order that
+     * keeps a promise already made to the user (CONTRACT.md, "Pinning an offer across the
+     * purchase"):
+     *
+     * <ol>
+     *   <li><b>The pin</b>, when {@code offerId} names a live one that sells this product — the
+     *       exact amount the user was shown before the purchase sheet opened, honoured even if
+     *       the operator has changed the offer since.
+     *   <li><b>The live offer</b>, when it sells this product — the path for a client too old to
+     *       send an {@code offer_id}, or one whose pin expired during a slow StoreKit redelivery.
+     *   <li><b>The package catalog's static {@code coins}</b> — reached only when the purchased
+     *       product isn't the one currently on offer at all (a paywall cached from before an
+     *       offer change). It's the only remaining statement of what that product was sold as.
+     * </ol>
+     *
+     * <p>A failed pin or offer lookup deliberately falls through rather than erroring: every step
+     * down this list is still a defensible amount, and refusing to credit a genuine, Apple-signed
+     * purchase because Redis blipped is strictly worse than crediting the next-best figure. Only
+     * the last step's failure is fatal, since by then there is nothing left to credit from.
+     */
+    private void resolveRedeemCoins(String offerId, String productId, Consumer<CoinLookup> onResult) {
+        if (!offerId.isEmpty()) {
+            ledger.getOfferPin(offerId, pinJson -> {
+                Optional<CoinOffer.Resolved> pinned = pinJson.flatMap(CoinOffer::parse);
+                if (pinned.isPresent() && pinned.get().sells(productId)) {
+                    onResult.accept(CoinLookup.found(pinned.get().getCoins()));
+                    return;
+                }
+                resolveRedeemCoinsFromLiveOffer(productId, onResult);
+            });
+            return;
+        }
+        resolveRedeemCoinsFromLiveOffer(productId, onResult);
+    }
+
+    private void resolveRedeemCoinsFromLiveOffer(String productId, Consumer<CoinLookup> onResult) {
+        ledger.getOffer(offerJson -> {
+            Optional<CoinOffer.Resolved> offer = offerJson.flatMap(CoinOffer::parse);
+            if (offer.isPresent() && offer.get().sells(productId)) {
+                onResult.accept(CoinLookup.found(offer.get().getCoins()));
+                return;
+            }
+            resolveRedeemCoinsFromPackages(productId, onResult);
+        });
+    }
+
+    private void resolveRedeemCoinsFromPackages(String productId, Consumer<CoinLookup> onResult) {
+        String seedJson = IapPackages.seedJson(config.getIapPackages());
+        ledger.getIapPackages(seedJson, packagesJson -> {
+            if (!packagesJson.isPresent()) {
+                onResult.accept(CoinLookup.unreachable());
+                return;
+            }
+            Optional<IapPackages.Entry> pkg = IapPackages.findByProductId(packagesJson.get(), productId);
+            onResult.accept(pkg.isPresent() ? CoinLookup.found(pkg.get().getCoins()) : CoinLookup.notFound());
+        });
+    }
+
+    /** Outcome of {@link #resolveRedeemCoins}: an amount, a product nothing sells (400), or a ledger that couldn't be read (503). */
+    private static final class CoinLookup {
+        private final boolean reachable;
+        private final boolean found;
+        private final double coins;
+
+        private CoinLookup(boolean reachable, boolean found, double coins) {
+            this.reachable = reachable;
+            this.found = found;
+            this.coins = coins;
+        }
+
+        static CoinLookup found(double coins) {
+            return new CoinLookup(true, true, coins);
+        }
+
+        static CoinLookup notFound() {
+            return new CoinLookup(true, false, 0);
+        }
+
+        static CoinLookup unreachable() {
+            return new CoinLookup(false, false, 0);
+        }
+
+        boolean isReachable() {
+            return reachable;
+        }
+
+        boolean isFound() {
+            return found;
+        }
+
+        double getCoins() {
+            return coins;
+        }
     }
 
     private void handleRevokeTokens(ChannelHandlerContext ctx, String address) {

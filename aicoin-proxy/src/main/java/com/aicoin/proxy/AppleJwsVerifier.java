@@ -157,7 +157,22 @@ final class AppleJwsVerifier {
         Object quantityRaw = payload.get("quantity");
         int quantity = (quantityRaw instanceof Number) ? Math.max(1, ((Number) quantityRaw).intValue()) : 1;
 
-        return VerifyResult.success((String) bundleId, (String) productId, (String) transactionId, quantity);
+        // Apple signs Sandbox transactions with the same certificate chain as Production ones, so
+        // the signature check above cannot tell them apart — only this field can. Anyone with a
+        // free sandbox tester account can mint unlimited genuine, verifiable purchase JWSes, so
+        // whether to honour them is a policy decision the caller makes (see ProxyConfig
+        // #isAcceptSandboxPurchases), not something to decide by silence. Absent means Production:
+        // the field is documented as always present, and defaulting an unreadable environment to
+        // "Sandbox" would break redemption outright if Apple ever renamed it.
+        Object environmentRaw = payload.get("environment");
+        String environment = environmentRaw instanceof String ? (String) environmentRaw : "Production";
+
+        // Present iff Apple has refunded/revoked the purchase. Crediting a revoked transaction
+        // hands out coins that were paid for and then taken back.
+        boolean revoked = payload.get("revocationDate") != null;
+
+        return VerifyResult.success(
+                (String) bundleId, (String) productId, (String) transactionId, quantity, environment, revoked);
     }
 
     // ---- RFC 7518 §3.4: ES256 JWS signatures are raw big-endian R||S (32+32 bytes), not ASN.1
@@ -225,24 +240,29 @@ final class AppleJwsVerifier {
         private final String productId;
         private final String transactionId;
         private final int quantity;
+        private final String environment;
+        private final boolean revoked;
         private final String failureReason;
 
         private VerifyResult(boolean valid, String bundleId, String productId, String transactionId,
-                              int quantity, String failureReason) {
+                              int quantity, String environment, boolean revoked, String failureReason) {
             this.valid = valid;
             this.bundleId = bundleId;
             this.productId = productId;
             this.transactionId = transactionId;
             this.quantity = quantity;
+            this.environment = environment;
+            this.revoked = revoked;
             this.failureReason = failureReason;
         }
 
-        static VerifyResult success(String bundleId, String productId, String transactionId, int quantity) {
-            return new VerifyResult(true, bundleId, productId, transactionId, quantity, null);
+        static VerifyResult success(String bundleId, String productId, String transactionId, int quantity,
+                                     String environment, boolean revoked) {
+            return new VerifyResult(true, bundleId, productId, transactionId, quantity, environment, revoked, null);
         }
 
         static VerifyResult failure(String reason) {
-            return new VerifyResult(false, null, null, null, 0, reason);
+            return new VerifyResult(false, null, null, null, 0, "", false, reason);
         }
 
         boolean isValid() {
@@ -263,6 +283,20 @@ final class AppleJwsVerifier {
 
         int getQuantity() {
             return quantity;
+        }
+
+        /** {@code "Production"} or {@code "Sandbox"} — the only thing distinguishing a real purchase from a free sandbox one, since both carry a genuine Apple signature. */
+        String getEnvironment() {
+            return environment;
+        }
+
+        /** True when Apple's payload carries a {@code revocationDate} — the purchase was refunded or revoked, and must not be credited. */
+        boolean isRevoked() {
+            return revoked;
+        }
+
+        boolean isSandbox() {
+            return "Sandbox".equalsIgnoreCase(environment);
         }
 
         String getFailureReason() {

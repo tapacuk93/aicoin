@@ -54,6 +54,28 @@ for dep in curl jq awk; do
   fi
 done
 
+# ---------------------------------------------------------------------------------------------
+# SAFETY GUARD 0 — do not reprice products the current-offer model is mapping against.
+#
+# Under CONTRACT.md's "The current offer", the four products stop being coin tiers and become four
+# *fixed* price points: the server prices the offer's coin amount and picks the cheapest point that
+# covers it. That mapping is only sound while the catalog's prices match what App Store Connect
+# actually charges. Moving .large from $9.99 to $6.99 here would leave every offer that resolved to
+# .large charging $6.99 for coins priced at up to $9.99 — an unbounded, silent discount on every
+# sale, which is exactly the failure the round-up rule exists to prevent.
+#
+# So: if an offer is live, this script degrades to report-only no matter what was asked for. It
+# still runs and still logs, because the reported targets are the signal that the *fixed* points
+# have drifted away from real costs and want a human to re-pick them.
+# ---------------------------------------------------------------------------------------------
+offer_json=$(curl -sS "${BASE_URL%/}/iap/offer" 2>/dev/null || echo '{}')
+if [[ "$(jq -r '.offer // "null"' <<<"$offer_json" 2>/dev/null)" != "null" ]]; then
+  if [[ "$APPLY" == "--apply" ]]; then
+    echo "WARNING: an offer is live ($(jq -rc '.offer.coins' <<<"$offer_json") aicoin at \$$(jq -rc '.offer.usd_price' <<<"$offer_json")) — the four price points must stay fixed while it is. Reporting only." >&2
+    APPLY=""
+  fi
+fi
+
 round_to_nearest_tier() {
   local raw="$1"
   awk -v raw="$raw" -v tiers="$PRICE_TIERS" '

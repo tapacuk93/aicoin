@@ -67,10 +67,21 @@ struct TransferSuccessBody: Decodable {
 struct RedeemIAPRequestBody: Codable {
     let toUserId: String
     let signedTransaction: String
+    /// Omitted from the encoded body entirely when nil (`encodeIfPresent`), so a redemption
+    /// without a pin is byte-identical to what pre-offer clients send.
+    let offerId: String?
 
     enum CodingKeys: String, CodingKey {
         case toUserId = "to_user_id"
         case signedTransaction = "signed_transaction"
+        case offerId = "offer_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(toUserId, forKey: .toUserId)
+        try container.encode(signedTransaction, forKey: .signedTransaction)
+        try container.encodeIfPresent(offerId, forKey: .offerId)
     }
 }
 

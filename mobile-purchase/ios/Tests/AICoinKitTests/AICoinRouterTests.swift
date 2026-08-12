@@ -96,7 +96,7 @@ final class AICoinRouterTests: XCTestCase {
     // MARK: - Routing / rewriting
 
     func testRoutesKnownHostThroughProxyWithHeadersPreservingMethodPathQueryBody() async throws {
-        let proxyURL = URL(string: "https://apps.oeaio.com/v1/messages")!
+        let proxyURL = URL(string: "https://proxy.aicoin.oeaio.com/v1/messages")!
         let transport = MockHTTPTransport([(Data(#"{"ok":true}"#.utf8), httpResponse(proxyURL, statusCode: 200))])
         let router = AICoinRouter(underlying: transport, eventBus: AICoinEventBus(), tokenProvider: { "the-token" })
 
@@ -104,7 +104,7 @@ final class AICoinRouterTests: XCTestCase {
 
         XCTAssertEqual(transport.requests.count, 1)
         let sent = transport.requests[0]
-        XCTAssertEqual(sent.url?.host, "apps.oeaio.com")
+        XCTAssertEqual(sent.url?.host, "proxy.aicoin.oeaio.com")
         XCTAssertEqual(sent.url?.scheme, "https")
         XCTAssertEqual(sent.url?.path, "/v1/messages")
         XCTAssertEqual(sent.url?.query, "foo=bar")
@@ -121,7 +121,7 @@ final class AICoinRouterTests: XCTestCase {
         _ = try await router.data(for: makeRequest(url: elevenLabsURL))
 
         let sent = transport.requests[0]
-        XCTAssertEqual(sent.url?.host, "apps.oeaio.com")
+        XCTAssertEqual(sent.url?.host, "proxy.aicoin.oeaio.com")
         XCTAssertEqual(sent.url?.path, "/v1/text-to-speech/voice123")
         XCTAssertEqual(sent.value(forHTTPHeaderField: "X-AI"), "elevenlabs")
     }
@@ -143,7 +143,7 @@ final class AICoinRouterTests: XCTestCase {
     // MARK: - 402 balance gate: throws, never falls back
 
     func test402ThrowsTypedInsufficientBalanceErrorWithParsedBalance() async throws {
-        let proxyURL = URL(string: "https://apps.oeaio.com/v1/messages")!
+        let proxyURL = URL(string: "https://proxy.aicoin.oeaio.com/v1/messages")!
         let body = Data(#"{"error":"insufficient aicoin balance","balance":0.5}"#.utf8)
         let transport = MockHTTPTransport([(body, httpResponse(proxyURL, statusCode: 402))])
         let router = AICoinRouter(underlying: transport, eventBus: AICoinEventBus(), tokenProvider: { "tok" })
@@ -158,7 +158,7 @@ final class AICoinRouterTests: XCTestCase {
     }
 
     func test402WithUnparsableBodyStillThrowsWithNilBalance() async throws {
-        let proxyURL = URL(string: "https://apps.oeaio.com/v1/messages")!
+        let proxyURL = URL(string: "https://proxy.aicoin.oeaio.com/v1/messages")!
         let transport = MockHTTPTransport([(Data("not json".utf8), httpResponse(proxyURL, statusCode: 402))])
         let router = AICoinRouter(underlying: transport, eventBus: AICoinEventBus(), tokenProvider: { "tok" })
 
@@ -171,7 +171,7 @@ final class AICoinRouterTests: XCTestCase {
     }
 
     func test402PublishesInsufficientBalanceEventOnTheEventBus() async throws {
-        let proxyURL = URL(string: "https://apps.oeaio.com/v1/messages")!
+        let proxyURL = URL(string: "https://proxy.aicoin.oeaio.com/v1/messages")!
         let body = Data(#"{"error":"insufficient aicoin balance","balance":2}"#.utf8)
         let transport = MockHTTPTransport([(body, httpResponse(proxyURL, statusCode: 402))])
         let bus = AICoinEventBus()
@@ -187,7 +187,7 @@ final class AICoinRouterTests: XCTestCase {
     }
 
     func testNonInsufficientBalanceErrorStatusIsReturnedAsIsNotThrown() async throws {
-        let proxyURL = URL(string: "https://apps.oeaio.com/v1/messages")!
+        let proxyURL = URL(string: "https://proxy.aicoin.oeaio.com/v1/messages")!
         let transport = MockHTTPTransport([(Data("boom".utf8), httpResponse(proxyURL, statusCode: 500))])
         let router = AICoinRouter(underlying: transport, eventBus: AICoinEventBus(), tokenProvider: { "tok" })
 
@@ -200,7 +200,7 @@ final class AICoinRouterTests: XCTestCase {
     // MARK: - Success publishes paidCallSucceeded
 
     func testSuccessfulProxiedCallPublishesPaidCallSucceeded() async throws {
-        let proxyURL = URL(string: "https://apps.oeaio.com/v1/messages")!
+        let proxyURL = URL(string: "https://proxy.aicoin.oeaio.com/v1/messages")!
         let transport = MockHTTPTransport([(Data("ok".utf8), httpResponse(proxyURL, statusCode: 200))])
         let bus = AICoinEventBus()
         let router = AICoinRouter(underlying: transport, eventBus: bus, tokenProvider: { "tok" })

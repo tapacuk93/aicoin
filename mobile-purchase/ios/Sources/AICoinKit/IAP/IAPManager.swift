@@ -6,6 +6,12 @@ import StoreKit
 public enum AICoinPurchaseError: Error, LocalizedError, Sendable {
     case productNotFound(String)
     case verificationFailed
+    /// Nothing is on sale right now — the operator has closed sales, or this app has no product
+    /// at the offer's price point. The paywall must not open Apple's purchase sheet.
+    case offerUnavailable
+    /// The pre-purchase re-check came back with a different amount than the one displayed. Nothing
+    /// was charged; show the new amount and let the user decide again.
+    case offerChanged(from: Int, to: Int)
     /// The purchase itself succeeded (StoreKit has a verified transaction) but crediting the
     /// wallet failed — network failure or a non-200 from `/wallet/api/redeem-iap`. The underlying
     /// transaction is deliberately **not** finished in this case (see `IAPManager.purchase`), so
@@ -20,7 +26,68 @@ public enum AICoinPurchaseError: Error, LocalizedError, Sendable {
             return "Apple could not verify this purchase."
         case .redeemFailed:
             return "Your purchase went through, but we couldn't credit your AICoin wallet yet. It will be retried automatically."
+        case .offerUnavailable:
+            return "AICoin isn't available to buy right now. Please try again later."
+        case .offerChanged(_, let to):
+            return "The current offer just changed to \(to) AICoin. Nothing was charged — tap buy again to take it."
         }
+    }
+}
+
+/// Remembers which pinned offer a purchase was started against, keyed by StoreKit transaction id,
+/// so a transaction StoreKit redelivers after an app restart still redeems at the amount the user
+/// was shown (see `IAPManager.startObservingUnfinishedTransactions`).
+///
+/// Deliberately tiny and lossy: entries expire locally well after the server-side pin does, and
+/// losing one only means falling back to the live offer — the same thing that happens for a client
+/// that never pinned at all. `UserDefaults` is the right store precisely because nothing here is
+/// sensitive or worth a Keychain round-trip.
+/// `@unchecked Sendable` because `UserDefaults` isn't formally `Sendable` while being documented
+/// as thread-safe — and this store genuinely has to cross isolation, since the redelivery observer
+/// reads it from a detached task.
+struct OfferPinStore: @unchecked Sendable {
+    private static let key = "aicoin.offerPins"
+    /// Comfortably longer than the server's 15-minute pin TTL — no point keeping what it will refuse.
+    private static let maxAge: TimeInterval = 60 * 60
+    private static let maxEntries = 32
+
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+    }
+
+    func record(offerID: String, forTransactionID transactionID: String) {
+        var entries = pruned()
+        entries[transactionID] = [offerID, String(Date().timeIntervalSince1970)]
+        if entries.count > Self.maxEntries {
+            // Oldest first — a bounded store that drops the least useful entry under pressure.
+            let sorted = entries.sorted { timestamp($0.value) < timestamp($1.value) }
+            for (key, _) in sorted.prefix(entries.count - Self.maxEntries) {
+                entries.removeValue(forKey: key)
+            }
+        }
+        defaults.set(entries, forKey: Self.key)
+    }
+
+    func offerID(forTransactionID transactionID: String) -> String? {
+        pruned()[transactionID]?.first
+    }
+
+    func clear(transactionID: String) {
+        var entries = pruned()
+        entries.removeValue(forKey: transactionID)
+        defaults.set(entries, forKey: Self.key)
+    }
+
+    private func pruned() -> [String: [String]] {
+        let stored = defaults.dictionary(forKey: Self.key) as? [String: [String]] ?? [:]
+        let cutoff = Date().timeIntervalSince1970 - Self.maxAge
+        return stored.filter { timestamp($0.value) >= cutoff }
+    }
+
+    private func timestamp(_ entry: [String]) -> TimeInterval {
+        entry.count > 1 ? (TimeInterval(entry[1]) ?? 0) : 0
     }
 }
 
@@ -54,9 +121,16 @@ public final class IAPManager: ObservableObject {
     @Published public private(set) var isLoading = false
     @Published public private(set) var lastError: Error?
 
+    /// The single amount on sale right now (`GET /iap/offer`), or nil when sales are closed or
+    /// `loadOffer()` hasn't run. This is what a paywall shows; `offerProduct` is what it charges.
+    @Published public private(set) var offer: AICoinOffer?
+    /// The StoreKit product backing `offer` for *this* app, resolved during `loadOffer()`.
+    @Published public private(set) var offerProduct: Product?
+
     private let walletClient: WalletClient
     private let bundleIDPrefix: String
     private let eventBus: AICoinEventBus
+    private let pinStore: OfferPinStore
     private var updatesTask: Task<Void, Never>?
 
     /// - Parameters:
@@ -67,11 +141,13 @@ public final class IAPManager: ObservableObject {
     public init(
         walletClient: WalletClient = WalletClient(),
         bundleIDPrefix: String = Bundle.main.bundleIdentifier ?? "",
-        eventBus: AICoinEventBus = .shared
+        eventBus: AICoinEventBus = .shared,
+        pinDefaults: UserDefaults = .standard
     ) {
         self.walletClient = walletClient
         self.bundleIDPrefix = bundleIDPrefix
         self.eventBus = eventBus
+        self.pinStore = OfferPinStore(defaults: pinDefaults)
     }
 
     deinit {
@@ -100,6 +176,69 @@ public final class IAPManager: ObservableObject {
         }
     }
 
+    /// Fetches the current offer (`GET /iap/offer`) and resolves this app's product for it. Safe
+    /// to call repeatedly — the offer changes server-side at any time, so a paywall should call
+    /// this every time it opens, exactly like `loadPackages()`.
+    public func loadOffer() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let current = try await walletClient.currentOffer()
+            offer = current
+            guard let current, let productID = current.productID(forBundleID: bundleIDPrefix) else {
+                offerProduct = nil
+                return
+            }
+            offerProduct = try await Product.products(for: [productID]).first
+        } catch {
+            lastError = error
+        }
+    }
+
+    /// Buys whatever is currently on offer, crediting `address`.
+    ///
+    /// Re-checks the offer against the server first (`POST /iap/offer/check`) and purchases what
+    /// *that* returns, not the possibly-stale `offer` the paywall is displaying — so a user who
+    /// left the sheet open across an offer change is charged for, and credited with, what is
+    /// actually on sale at the moment they tap buy. The check's pin travels through to redemption,
+    /// which is what makes the amount they saw at that instant the amount they get.
+    ///
+    /// Throws `AICoinPurchaseError.offerUnavailable` when sales have closed, and
+    /// `.offerChanged(from:to:)` when the re-check came back with a different coin amount than was
+    /// displayed — the caller should show the new amount and let the user decide, rather than
+    /// silently charging for something they didn't agree to.
+    public func purchaseCurrentOffer(address: String, confirmedCoins: Int? = nil) async throws -> AICoinPurchaseOutcome {
+        guard let pinned = try await walletClient.checkOffer() else {
+            offer = nil
+            offerProduct = nil
+            throw AICoinPurchaseError.offerUnavailable
+        }
+        if let confirmedCoins, confirmedCoins != pinned.offer.coins {
+            // Refresh what's displayed before handing back, so the retry the user is about to be
+            // asked for is against the new number.
+            offer = pinned.offer
+            if let productID = pinned.offer.productID(forBundleID: bundleIDPrefix) {
+                offerProduct = try? await Product.products(for: [productID]).first
+            }
+            throw AICoinPurchaseError.offerChanged(from: confirmedCoins, to: pinned.offer.coins)
+        }
+        guard let productID = pinned.offer.productID(forBundleID: bundleIDPrefix) else {
+            throw AICoinPurchaseError.offerUnavailable
+        }
+        let product: Product
+        if let cached = offerProduct, cached.id == productID {
+            product = cached
+        } else {
+            guard let resolved = try await Product.products(for: [productID]).first else {
+                throw AICoinPurchaseError.productNotFound(productID)
+            }
+            product = resolved
+            offerProduct = resolved
+        }
+        offer = pinned.offer
+        return try await run(product: product, address: address, offerID: pinned.offerID)
+    }
+
     /// Purchases `package` and, on success, credits `address`'s wallet before finishing the
     /// transaction. `address` is the buyer's own wallet address (`WalletIdentity.address`) — the
     /// destination `to_user_id` for `/wallet/api/redeem-iap`.
@@ -107,7 +246,12 @@ public final class IAPManager: ObservableObject {
         guard let product = products[package.productId] else {
             throw AICoinPurchaseError.productNotFound(package.productId)
         }
+        return try await run(product: product, address: address, offerID: nil)
+    }
 
+    /// The shared purchase → verify → redeem → finish sequence behind both `purchase(_:address:)`
+    /// and `purchaseCurrentOffer(address:)`; `offerID` is the pin to redeem against, if any.
+    private func run(product: Product, address: String, offerID: String?) async throws -> AICoinPurchaseOutcome {
         let result = try await product.purchase()
         switch result {
         case .success(let verification):
@@ -116,9 +260,17 @@ public final class IAPManager: ObservableObject {
             // must be read before/alongside `checkVerified` unwraps it.
             let jws = verification.jwsRepresentation
             let transaction = try Self.checkVerified(verification)
+            // Persist the pin against this transaction id *before* attempting to redeem: if the
+            // app dies between the purchase and a successful redeem, StoreKit redelivers the
+            // transaction on a later launch and `startObservingUnfinishedTransactions` needs the
+            // pin to still credit what the user was shown.
+            if let offerID {
+                pinStore.record(offerID: offerID, forTransactionID: String(transaction.id))
+            }
             do {
-                let redeemed = try await walletClient.redeemIAP(to: address, signedTransaction: jws)
+                let redeemed = try await walletClient.redeemIAP(to: address, signedTransaction: jws, offerID: offerID)
                 await transaction.finish()
+                pinStore.clear(transactionID: String(transaction.id))
                 eventBus.events.send(.purchaseCredited(newBalance: redeemed.balance))
                 return .success(newBalance: redeemed.balance)
             } catch {
@@ -146,13 +298,19 @@ public final class IAPManager: ObservableObject {
         updatesTask?.cancel()
         let client = walletClient
         let bus = eventBus
+        let pins = pinStore
         updatesTask = Task.detached(priority: .background) {
             for await update in Transaction.updates {
                 let jws = update.jwsRepresentation
                 guard let transaction = try? Self.checkVerified(update) else { continue }
+                // A pin recorded before the app died still names what the user was shown. The
+                // server ignores it once it has expired, falling back to the live offer, so
+                // sending a stale one is harmless.
+                let offerID = pins.offerID(forTransactionID: String(transaction.id))
                 do {
-                    let redeemed = try await client.redeemIAP(to: address, signedTransaction: jws)
+                    let redeemed = try await client.redeemIAP(to: address, signedTransaction: jws, offerID: offerID)
                     await transaction.finish()
+                    pins.clear(transactionID: String(transaction.id))
                     bus.events.send(.purchaseCredited(newBalance: redeemed.balance))
                 } catch {
                     // Leave unfinished; StoreKit will offer it again on a future launch/update.

@@ -1,15 +1,15 @@
 # AICoinKit
 
 A local Swift Package providing everything an iOS/macOS app needs to integrate with
-[**aicoin-proxy**](../aicoin-proxy) — the shared coin-ledger/AI-proxy server described in
-[`CONTRACT.md`](../CONTRACT.md) — instead of hand-rolling wallet signing, provider routing, and IAP
+[**aicoin-proxy**](../../aicoin-proxy) — the shared coin-ledger/AI-proxy server described in
+[`CONTRACT.md`](../../CONTRACT.md) — instead of hand-rolling wallet signing, provider routing, and IAP
 redemption per app.
 
 It replaces the bespoke, near-duplicate integration code that three apps
 (**InfiniteAIRadio**, **All Languages Learner**, **Learn It**) each grew independently:
 - All Languages Learner's `AICoinGateway`
 - Learn It's `AIcoinWalletRouter` + `HTTPTransport`
-- The crypto/keychain core of the standalone `AICoinWallet` prototype app (`../ios/AICoinWallet`)
+- The crypto/keychain core of the standalone `AICoinWallet` prototype app (`../../ios/AICoinWallet`)
 
 This package generalizes the real, working logic from all three into one place, and makes one
 deliberate behavior change from the two apps' existing routers: **there is no "use your own API
@@ -34,14 +34,15 @@ Sources/AICoinKit/
     AICoinTokenCache.swift      Caches/refreshes an issued API token for AICoinRouter
   Wallet/
     WalletModels.swift          Request/response DTOs (internal)
-    WalletClient.swift          balance / claim / transfer / revoke-tokens / iap packages / redeem
+    WalletClient.swift          balance / claim / transfer / revoke-tokens / offer / packages / redeem
   IAP/
-    AICoinPackage.swift         /iap/packages model + bundle-ID-prefix filtering
-    IAPManager.swift            StoreKit 2 purchase flow + redemption
+    AICoinPackage.swift         /iap/packages catalog model + bundle-ID-prefix filtering
+    AICoinOffer.swift           /iap/offer model + per-app product selection
+    IAPManager.swift            StoreKit 2 purchase flow + offer pinning + redemption
   UI/
     WalletBalanceStore.swift    ObservableObject balance holder, auto-refreshes on events
     CoinBalanceBadge.swift      Toolbar-sized balance badge
-    BuyAICoinSheet.swift        "Buy AICoin" sheet (dynamic packages) + Send/Receive tab
+    BuyAICoinSheet.swift        "Buy AICoin" sheet (server-set offer) + Send/Receive tab
     SendReceiveView.swift       Peer-transfer UI
 
 Tests/AICoinKitTests/          XCTest, no network/Redis — pure logic + mock transports
@@ -54,7 +55,7 @@ package share a common parent directory, `~/src`):
 
 ```swift
 // Package.swift, or Xcode > File > Add Package Dependencies... > Add Local...
-.package(path: "../aicoin/ios-iap-redeem")
+.package(path: "../aicoin/mobile-purchase/ios")
 ```
 
 or, in an `.xcodeproj`/XcodeGen `project.yml`:
@@ -62,7 +63,7 @@ or, in an `.xcodeproj`/XcodeGen `project.yml`:
 ```yaml
 packages:
   AICoinKit:
-    path: ../aicoin/ios-iap-redeem
+    path: ../aicoin/mobile-purchase/ios
 targets:
   YourApp:
     dependencies:
@@ -70,7 +71,7 @@ targets:
 ```
 
 Once this package (and the server it talks to) has stabilized, swap the local path for a git URL
-(`.package(url: "https://github.com/tarasmaslov/aicoin-ios-iap-redeem", from: "1.0.0")`) with no
+(`.package(url: "https://github.com/tarasmaslov/aicoin-mobile-purchase", from: "1.0.0")`) with no
 call-site changes required.
 
 ### Wiring it up (typical app startup)
@@ -96,7 +97,8 @@ let balance = try await walletClient.balance(address: identity.address)
 
 // 4. IAP.
 let iapManager = IAPManager(walletClient: walletClient)
-await iapManager.loadPackages()
+await iapManager.loadOffer()      // the one amount on sale right now
+await iapManager.loadPackages()   // pre-offer fallback, for a server with no offer set
 iapManager.startObservingUnfinishedTransactions(address: identity.address)
 
 // 5. UI.
@@ -118,6 +120,31 @@ do {
 }
 ```
 
+## The buy flow (the current-offer model)
+
+What's on sale is one server-set number, the same in every app — not a list of tiers the user picks
+from. `BuyAICoinSheet` renders it as a single button.
+
+1. **Display** — `loadOffer()` fetches `GET /iap/offer` and resolves this app's product for it into
+   `offerProduct` (StoreKit's localized `displayPrice` is what's shown; the offer's `usdPrice` only
+   stands in until StoreKit resolves). A nil `offer` means sales are closed, which is an empty
+   state, not an error.
+2. **Re-check, then charge** — `purchaseCurrentOffer(address:confirmedCoins:)` calls
+   `POST /iap/offer/check` *first* and purchases what that returns, not the possibly-stale number
+   on screen. Pass the displayed amount as `confirmedCoins` and a mid-flight change throws
+   `AICoinPurchaseError.offerChanged(from:to:)` having charged nothing, so the user re-confirms
+   against the new number instead of being billed for something they didn't agree to.
+3. **Redeem against the pin** — the check's `offer_id` travels with the JWS to
+   `/wallet/api/redeem-iap`, which is what makes the credit equal what the user was shown even if
+   the offer moved during Apple's sheet. The pin is also persisted locally against the StoreKit
+   transaction id (`OfferPinStore`), so a purchase interrupted by the app being killed still
+   redeems at the shown amount when `startObservingUnfinishedTransactions(address:)` picks the
+   transaction up on a later launch. Server-side pins expire (15 min), after which redemption
+   falls back to the live offer — the same path a client that never pinned takes.
+
+`loadPackages()` and `purchase(_:address:)` remain as the pre-offer path, used only when the server
+has no offer set. Both credit via the catalog's `coins` for the purchased product.
+
 ## Public API surface
 
 - `WalletIdentity` — `generate()`, `init(seed:)`, `.address`, `.seed`, `.backupBlob`,
@@ -133,10 +160,13 @@ do {
 - `AICoinError` / `AICoinPurchaseError` — typed errors.
 - `AICoinEvent` / `AICoinEventBus` — `.paidCallSucceeded`, `.insufficientBalance`, `.purchaseCredited`.
 - `WalletClient` — `balance(address:)`, `claimFreeCoins(identity:)`, `transfer(to:amount:identity:)`,
-  `revokeTokens(identity:)`, `iapPackages()`, `redeemIAP(to:signedTransaction:)`, `price()`,
-  `freeCoinsAvailable()`.
+  `revokeTokens(identity:)`, `iapPackages()`, `redeemIAP(to:signedTransaction:offerID:)`, `price()`,
+  `freeCoinsAvailable()`, `currentOffer()`, `checkOffer()`.
 - `AICoinPackage` — `/iap/packages` model, plus `[AICoinPackage].filtered(byBundleIDPrefix:)`.
-- `IAPManager` — `loadPackages()`, `purchase(_:address:)`, `startObservingUnfinishedTransactions(address:)`.
+- `AICoinOffer` — `/iap/offer` model, plus `productID(forBundleID:)`; `AICoinProductID.prefix(forBundleID:)`
+  derives the product-id prefix from a bundle ID (they differ for Learn It — Apple forbids the hyphen).
+- `IAPManager` — `loadOffer()`, `purchaseCurrentOffer(address:confirmedCoins:)`, `loadPackages()`,
+  `purchase(_:address:)`, `startObservingUnfinishedTransactions(address:)`.
 - `WalletBalanceStore`, `CoinBalanceBadge`, `BuyAICoinSheet`, `SendReceiveView` — SwiftUI layer.
 
 ## Design decisions made beyond CONTRACT.md's explicit spec
@@ -144,11 +174,11 @@ do {
 CONTRACT.md is authoritative on the server's wire format; several client-side questions were not
 specified there and were decided as follows:
 
-- **Proxy base URL**: CONTRACT.md's own task brief says the production proxy is
-  `https://apps.oeaio.com` (with `aicoin.oeaio.com` being the separate marketing site). This
-  package defaults to that. Note this *corrects* three different stale placeholder hosts found in
-  the existing prior art (`aicoin.oeaio.com` in two apps' routers, `proxy.aicoin.oeaio.com` in the
-  prototype wallet app) — none of which match the real deployed host.
+- **Proxy base URL**: the production proxy is `https://proxy.aicoin.oeaio.com` (with
+  `aicoin.oeaio.com` being the separate marketing site, and `apps.oeaio.com` the previous proxy
+  host, still resolving for already-shipped builds). This package defaults to that. Note this
+  *corrects* the stale placeholder host found in the existing prior art (`aicoin.oeaio.com` in two
+  apps' routers), which was never a real proxy.
 - **No bring-your-own-key fallback**: `AICoinRouter` throws `AICoinError.insufficientBalance` on
   402 rather than retrying against a personal key, and throws `AICoinError.missingToken` if no
   token is configured for a known AI-provider host at all (rather than silently passing through to
@@ -191,7 +221,16 @@ specified there and were decided as follows:
   matching CONTRACT.md's `com.tarasmaslov.<app>.aicoin.{small,medium,large,xl}` scheme before
   `Product.products(for:)` will resolve them to real `Product`s — until then, `IAPManager
   .loadPackages()` will populate `packages` (from the server) but `products` will stay empty for
-  any product ID App Store Connect doesn't know about yet.
+  any product ID App Store Connect doesn't know about yet, and `loadOffer()` will set `offer`
+  while leaving `offerProduct` nil (which disables the buy button rather than charging blind).
+- Under the offer model those four products must sit at **fixed** prices in App Store Connect —
+  the server maps an offer's coin amount onto whichever point covers it, so a product repriced
+  behind the server's back silently sells coins at the wrong price. `adjust-iap-prices.sh` enforces
+  this server-side by refusing to apply prices while an offer is live.
+- End-to-end redemption hasn't been exercised against a real StoreKit purchase, because the server
+  now (correctly) rejects Sandbox transactions by default. Testing the full purchase → credit path
+  needs a non-production proxy with `AICOIN_PROXY_IAP_ACCEPT_SANDBOX=true`; never set that on the
+  live deployment, since sandbox purchases are free and unlimited.
 - No SwiftUI preview/screenshot testing was done — the views compile and their logic is covered
   indirectly through `IAPManager`/`WalletClient` tests, but visual polish is left to each app,
   since they're expected to skin these to match their own look.
