@@ -61,6 +61,16 @@ final class AicoinLedger implements AutoCloseable {
     private static final String KNOWN_WALLETS_KEY = "aicoin:" + TAG + ":known-wallets";
     private static final String IAP_PACKAGES_KEY = "aicoin:" + TAG + ":iap-packages";
     private static final String OFFER_KEY = "aicoin:" + TAG + ":offer";
+    /** The operator's total spend ceiling in USD — see CONTRACT.md's "Spend budget". Unset means no ceiling. */
+    private static final String BUDGET_KEY = "aicoin:" + TAG + ":budget";
+    /**
+     * Wallet addresses whose spend does not count against {@link #BUDGET_KEY} — development and
+     * QA installs. Membership is an operator decision written through {@code POST
+     * /admin/internal-wallets}, never something a client can assert about itself: a build-type
+     * header would let anyone exclude their own usage from the ceiling simply by sending it, which
+     * defeats the point of having a ceiling.
+     */
+    private static final String INTERNAL_WALLETS_KEY = "aicoin:" + TAG + ":internal-wallets";
     /** Per-wallet transaction logs are capped at this many most-recent entries (draft/prototype: no pagination, no archival). */
     private static final int TX_LOG_CAP = 200;
 
@@ -320,14 +330,196 @@ final class AicoinLedger implements AutoCloseable {
                 });
     }
 
-    /** Fire-and-forget, per the old {@code EventPublisher}'s contract: must never block or fail the client-facing response. */
-    void recordEvent(String provider, double costUsd, Instant timestamp) {
-        String member = costUsd + "|" + UUID.randomUUID();
-        commands.zadd(EVENTS_KEY, (double) timestamp.toEpochMilli(), member)
-                .exceptionally(err -> {
-                    LOG.log(Level.WARNING, "ledger event record failed for provider " + provider, err);
-                    return null;
+    /**
+     * Fire-and-forget, per the old {@code EventPublisher}'s contract: must never block or fail the
+     * client-facing response.
+     *
+     * <p>{@code walletAddress} decides only whether this event counts toward the spend budget, not
+     * whether it counts toward {@code price_usd} — an internal call costs the operator exactly as
+     * much as any other, so excluding it from the price signal would misprice coins. The member
+     * gains a trailing {@code |i} for internal spend; the leading {@code cost|} prefix is
+     * unchanged, so every event written before this existed still parses, and still reads as
+     * production.
+     */
+    void recordEvent(String provider, double costUsd, Instant timestamp, String walletAddress) {
+        recordEvent(provider, costUsd, -1, timestamp, walletAddress);
+    }
+
+    /**
+     * As above, plus the call's size in tokens for the price signal to weight by. A negative
+     * {@code tokens} means the response reported no usage — speech and image APIs — and is
+     * recorded as absent rather than as zero, which the price formula treats differently.
+     *
+     * <p>The member gains a {@code |tN} field before any {@code |i}: {@code cost|uuid|t1234|i}.
+     * Ordering matters because internal spend is still detected by a trailing {@code |i}, and
+     * every event written before this existed keeps parsing — it simply has no size, which is
+     * exactly how a usage-less response reads too.
+     */
+    void recordEvent(String provider, double costUsd, long tokens, Instant timestamp, String walletAddress) {
+        String id = UUID.randomUUID().toString();
+        String size = tokens >= 0 ? "|t" + tokens : "";
+        commands.sismember(INTERNAL_WALLETS_KEY, walletAddress == null ? "" : walletAddress)
+                .whenComplete((internal, err) -> {
+                    if (err != null) {
+                        // An unreachable set is not a reason to drop the event, and counting it as
+                        // production is the safe direction: a budget that over-counts stops sales
+                        // early, one that under-counts overspends real money.
+                        LOG.log(Level.WARNING, "ledger internal-wallet lookup failed, recording as production", err);
+                    }
+                    boolean isInternal = err == null && Boolean.TRUE.equals(internal);
+                    String member = costUsd + "|" + id + size + (isInternal ? "|i" : "");
+                    commands.zadd(EVENTS_KEY, (double) timestamp.toEpochMilli(), member)
+                            .exceptionally(zerr -> {
+                                LOG.log(Level.WARNING, "ledger event record failed for provider " + provider, zerr);
+                                return null;
+                            });
                 });
+    }
+
+    /**
+     * The spend ceiling and how much production spend has run against it, per CONTRACT.md's
+     * "Spend budget".
+     *
+     * <p>Deliberately undecayed, unlike {@link #computePrice}: a budget is cumulative cash actually
+     * spent, and money does not become un-spent because it is old. Internal wallets are excluded —
+     * that is the whole reason events carry the marker.
+     */
+    void computeBudget(Consumer<BudgetResult> onResult) {
+        commands.get(BUDGET_KEY).whenComplete((budgetJson, budgetErr) -> {
+            if (budgetErr != null) {
+                LOG.log(Level.WARNING, "ledger budget lookup failed", budgetErr);
+                onResult.accept(BudgetResult.unreachable());
+                return;
+            }
+            Double limitUsd = parseBudgetUsd(budgetJson);
+            commands.zrangeWithScores(EVENTS_KEY, 0, -1).whenComplete((entries, err) -> {
+                if (err != null) {
+                    LOG.log(Level.WARNING, "ledger budget spend scan failed", err);
+                    onResult.accept(BudgetResult.unreachable());
+                    return;
+                }
+                double productionSpend = 0;
+                double internalSpend = 0;
+                for (io.lettuce.core.ScoredValue<String> entry : entries) {
+                    double cost = parseCost(entry.getValue());
+                    if (parseInternal(entry.getValue())) {
+                        internalSpend += cost;
+                    } else {
+                        productionSpend += cost;
+                    }
+                }
+                onResult.accept(new BudgetResult(true, limitUsd, productionSpend, internalSpend));
+            });
+        });
+    }
+
+    /** Writes the ceiling. A null {@code usd} removes it entirely, restoring "no ceiling". */
+    void setBudget(Double usd, Consumer<Boolean> onResult) {
+        java.util.concurrent.CompletionStage<?> write = usd == null
+                ? commands.del(BUDGET_KEY)
+                : commands.set(BUDGET_KEY, "{\"usd\":" + usd + ",\"set_at\":" + Instant.now().toEpochMilli() + "}");
+        write.whenComplete((reply, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger budget update failed", err);
+                onResult.accept(false);
+                return;
+            }
+            onResult.accept(true);
+        });
+    }
+
+    /** Adds/removes wallet addresses whose spend is exempt from the budget. Returns the resulting membership count. */
+    void updateInternalWallets(List<String> add, List<String> remove, Consumer<Optional<Long>> onResult) {
+        java.util.concurrent.CompletionStage<Long> step = add.isEmpty()
+                ? commands.scard(INTERNAL_WALLETS_KEY)
+                : commands.sadd(INTERNAL_WALLETS_KEY, add.toArray(new String[0]));
+        step.thenCompose(ignored -> remove.isEmpty()
+                        ? commands.scard(INTERNAL_WALLETS_KEY)
+                        : commands.srem(INTERNAL_WALLETS_KEY, remove.toArray(new String[0])))
+                .thenCompose(ignored -> commands.scard(INTERNAL_WALLETS_KEY))
+                .whenComplete((count, err) -> {
+                    if (err != null) {
+                        LOG.log(Level.WARNING, "ledger internal-wallet update failed", err);
+                        onResult.accept(Optional.empty());
+                        return;
+                    }
+                    onResult.accept(Optional.ofNullable(count));
+                });
+    }
+
+    /** Every wallet currently exempt from the budget. */
+    void listInternalWallets(Consumer<Optional<List<String>>> onResult) {
+        commands.smembers(INTERNAL_WALLETS_KEY).whenComplete((members, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger internal-wallet list failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            List<String> sorted = new ArrayList<>(members);
+            java.util.Collections.sort(sorted);
+            onResult.accept(Optional.of(sorted));
+        });
+    }
+
+    /** {@code {"usd":200.0,...}} → 200.0; absent/unparseable → null, i.e. no ceiling. */
+    private static Double parseBudgetUsd(String json) {
+        if (json == null || json.isEmpty()) {
+            return null;
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"usd\"\\s*:\\s*([0-9.]+)").matcher(json);
+        if (!m.find()) {
+            return null;
+        }
+        try {
+            return Double.parseDouble(m.group(1));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** Outcome of {@link #computeBudget}. */
+    static final class BudgetResult {
+        private final boolean reachable;
+        private final Double limitUsd;
+        private final double productionSpendUsd;
+        private final double internalSpendUsd;
+
+        private BudgetResult(boolean reachable, Double limitUsd, double productionSpendUsd, double internalSpendUsd) {
+            this.reachable = reachable;
+            this.limitUsd = limitUsd;
+            this.productionSpendUsd = productionSpendUsd;
+            this.internalSpendUsd = internalSpendUsd;
+        }
+
+        static BudgetResult unreachable() {
+            return new BudgetResult(false, null, 0, 0);
+        }
+
+        boolean isReachable() {
+            return reachable;
+        }
+
+        /** Null means no ceiling is set — the state the proxy shipped in before budgets existed. */
+        Double getLimitUsd() {
+            return limitUsd;
+        }
+
+        double getProductionSpendUsd() {
+            return productionSpendUsd;
+        }
+
+        double getInternalSpendUsd() {
+            return internalSpendUsd;
+        }
+
+        /**
+         * Whether sales must stop. An unreachable ledger is deliberately NOT exhausted: failing
+         * open keeps the paywall working through a Redis blip, and the ceiling is a cost control,
+         * not a correctness invariant.
+         */
+        boolean isExhausted() {
+            return reachable && limitUsd != null && productionSpendUsd >= limitUsd;
+        }
     }
 
     void computePrice(double halfLifeDays, Consumer<PriceResult> onResult) {
@@ -340,7 +532,9 @@ final class AicoinLedger implements AutoCloseable {
             double nowMillis = Instant.now().toEpochMilli();
             List<PriceCalculator.Event> events = new ArrayList<>(entries.size());
             for (ScoredValue<String> entry : entries) {
-                events.add(new PriceCalculator.Event(parseCost(entry.getValue()), entry.getScore()));
+                long tokens = parseTokens(entry.getValue());
+                events.add(new PriceCalculator.Event(
+                        parseCost(entry.getValue()), entry.getScore(), Math.max(tokens, 0), tokens >= 0));
             }
             onResult.accept(PriceCalculator.compute(events, nowMillis, halfLifeDays));
         });
@@ -369,7 +563,9 @@ final class AicoinLedger implements AutoCloseable {
             List<PriceCalculator.Event> events = new ArrayList<>(entries.size());
             double earliestMillis = Double.MAX_VALUE;
             for (ScoredValue<String> entry : entries) {
-                events.add(new PriceCalculator.Event(parseCost(entry.getValue()), entry.getScore()));
+                long tokens = parseTokens(entry.getValue());
+                events.add(new PriceCalculator.Event(
+                        parseCost(entry.getValue()), entry.getScore(), Math.max(tokens, 0), tokens >= 0));
                 earliestMillis = Math.min(earliestMillis, entry.getScore());
             }
             double nowMillis = Instant.now().toEpochMilli();
@@ -725,6 +921,29 @@ final class AicoinLedger implements AutoCloseable {
     private static double parseCost(String member) {
         int sep = member.indexOf('|');
         return Double.parseDouble(sep >= 0 ? member.substring(0, sep) : member);
+    }
+
+    /** {@code cost|uuid|i} marks spend by an internal wallet — see {@link #recordEvent}. Anything else is production. */
+    private static boolean parseInternal(String member) {
+        return member.endsWith("|i");
+    }
+
+    /**
+     * The {@code |tN} size field, or {@code -1} when the member carries none — an event from
+     * before sizes were recorded, or a response that reported no usage. Both mean the same thing
+     * to the price formula: this call has no size to weight by.
+     */
+    private static long parseTokens(String member) {
+        for (String field : member.split("\\|")) {
+            if (field.length() > 1 && field.charAt(0) == 't') {
+                try {
+                    return Long.parseLong(field.substring(1));
+                } catch (NumberFormatException e) {
+                    return -1;
+                }
+            }
+        }
+        return -1;
     }
 
     /** Outcome of {@link #claimFreeCoins}: ledger-unreachable, a decided grant/cooldown-reject with the resulting deadline, or the shared pool being exhausted. */

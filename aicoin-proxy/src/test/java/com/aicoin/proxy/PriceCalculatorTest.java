@@ -77,4 +77,91 @@ class PriceCalculatorTest {
         // A shorter half-life decays the 30-day-old event's weight faster.
         assertTrue(shortHalfLife.getWeightedTotal() < longHalfLife.getWeightedTotal());
     }
+
+    @Test
+    void sizelessEventsPriceExactlyAsBefore() {
+        // Every event recorded before sizes were persisted has none, and the formula must be
+        // bit-for-bit what it was for them — otherwise deploying this would reprice the existing
+        // ledger. Two costs, two ages, no sizes: the plain recency-weighted mean.
+        double now = 10 * 86_400_000.0;
+        List<PriceCalculator.Event> events = List.of(
+                new PriceCalculator.Event(0.02, now),
+                new PriceCalculator.Event(0.01, now - HALF_LIFE_DAYS * 86_400_000.0));
+
+        AicoinLedger.PriceResult result = PriceCalculator.compute(events, now, HALF_LIFE_DAYS);
+
+        assertEquals((0.02 * 1.0 + 0.01 * 0.5) / 1.5, result.getPriceUsd(), 1e-9);
+        assertEquals(1.5, result.getWeightedTotal(), 1e-9);
+    }
+
+    @Test
+    void uniformSizesPriceTheSameAsNoSizes() {
+        // Size only matters relative to other sizes. When every call is the same size the size
+        // terms cancel and the answer must not move.
+        double now = 0;
+        List<PriceCalculator.Event> sized = List.of(
+                new PriceCalculator.Event(0.02, now, 1000, true),
+                new PriceCalculator.Event(0.04, now, 1000, true));
+        List<PriceCalculator.Event> unsized = List.of(
+                new PriceCalculator.Event(0.02, now),
+                new PriceCalculator.Event(0.04, now));
+
+        assertEquals(PriceCalculator.compute(unsized, now, HALF_LIFE_DAYS).getPriceUsd(),
+                PriceCalculator.compute(sized, now, HALF_LIFE_DAYS).getPriceUsd(), 1e-12);
+    }
+
+    @Test
+    void bigCallsCountForMoreThanSmallOnes() {
+        // The point of the change: one 100,000-token call at $1.00 and ninety-nine 100-token calls
+        // at $0.001. Per call, the mean is dragged to nearly nothing by the ninety-nine; per token,
+        // the expensive call dominates because it is where essentially all the work happened.
+        double now = 0;
+        List<PriceCalculator.Event> events = new java.util.ArrayList<>();
+        events.add(new PriceCalculator.Event(1.00, now, 100_000, true));
+        for (int i = 0; i < 99; i++) {
+            events.add(new PriceCalculator.Event(0.001, now, 100, true));
+        }
+
+        double perCallMean = (1.00 + 99 * 0.001) / 100;
+        double priced = PriceCalculator.compute(events, now, HALF_LIFE_DAYS).getPriceUsd();
+
+        assertTrue(priced > perCallMean * 5,
+                "token weighting should not collapse to the per-call mean: " + priced);
+        // Cost per token is 1.00/100000 for the big call and 0.001/100 for each small one; the
+        // big call carries 100000/(100000+9900) of the weight.
+        double meanSize = (100_000 + 99 * 100) / 100.0;
+        double expected = (1.00 + 99 * 0.001) / (100_000 + 99 * 100.0) * meanSize;
+        assertEquals(expected, priced, 1e-9);
+    }
+
+    @Test
+    void unknownSizedEventsTakeTheMeanKnownSizeRatherThanVanishing() {
+        // A speech call reports no tokens. Weighting it by 1 would erase it beside a 1,000-token
+        // call; dropping it would discard real spend. It stands in at the mean known size, so it
+        // carries exactly the weight of a typical call.
+        double now = 0;
+        List<PriceCalculator.Event> events = List.of(
+                new PriceCalculator.Event(0.01, now, 1000, true),
+                new PriceCalculator.Event(0.05, now));
+
+        double priced = PriceCalculator.compute(events, now, HALF_LIFE_DAYS).getPriceUsd();
+
+        // Both end up size 1000, so this is the plain mean of the two costs.
+        assertEquals(0.03, priced, 1e-9);
+        assertEquals(2.0, PriceCalculator.compute(events, now, HALF_LIFE_DAYS).getWeightedTotal(), 1e-9);
+    }
+
+    @Test
+    void weightedTotalStaysAnEventCountNotATokenCount() {
+        // weighted_total is published and gates offer pricing at ">= 50" meaning "enough recent
+        // calls". If sizes leaked into it, three calls would read as tens of thousands and that
+        // guard would never fire again.
+        double now = 0;
+        List<PriceCalculator.Event> events = List.of(
+                new PriceCalculator.Event(0.01, now, 50_000, true),
+                new PriceCalculator.Event(0.01, now, 60_000, true),
+                new PriceCalculator.Event(0.01, now, 70_000, true));
+
+        assertEquals(3.0, PriceCalculator.compute(events, now, HALF_LIFE_DAYS).getWeightedTotal(), 1e-9);
+    }
 }

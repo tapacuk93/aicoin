@@ -363,11 +363,49 @@ There are now exactly two ways to *acquire* aicoin: the existing peer transfer (
 - **Admin script**: `aicoin-proxy/scripts/set-coin-packages.sh <packages.json>` — reads a JSON file in the same shape as `GET /iap/packages`'s `packages` array and `PUT`s it to `POST /admin/iap/packages` (`X-Admin-Token` gated, same posture as the rest of `/admin/*`), which atomically overwrites `aicoin:iap-packages` after validating every entry has a non-empty `product_id` and a positive integer `coins`. This is the one place "currently available coins" is set — a single source of truth every app reads.
 - **Tier-level wrapper**: `aicoin-proxy/scripts/set-coin-amounts.sh --small 100 --xl 6000` — the everyday way to change what all users can currently buy, without hand-writing all twelve entries. It `GET`s the live `/iap/packages`, rewrites `coins` only for the tiers named (`--small/--medium/--large/--xl`, or `--tier <suffix>=N` for any other suffix; `--app <product-id-prefix>` narrows to one app, default all three), carries `product_id` and `usd_price_hint` through untouched, prints a full before/after table, and hands the result to `set-coin-packages.sh` — so `POST /admin/iap/packages` stays the single write path and its server-side validation stays the authority. `--dry-run` previews without writing; a run that changes nothing exits 0 without a write. Prices are the other script's job (see "Automatic price adjustment") — this one never touches them. **Note:** once an offer is live (see "The current offer"), a catalog entry's `coins` is only the last-resort fallback for a product that isn't currently on offer — `set-coin-offer.sh` is what changes what users actually buy.
 
+### Spend budget
+
+A ceiling, in dollars, on what ordinary users' AI calls may cost the operator in total. Backed by
+the Redis string `aicoin:budget`; **unset means no ceiling**, which is the state the proxy shipped
+in before this existed and remains the default.
+
+- `GET /budget` → `{"budget_usd":200.0,"spend_usd":41.7,"internal_spend_usd":7.8,"remaining_usd":158.3,"exhausted":false}` —
+  public, `Access-Control-Allow-Origin: *`, same posture as `GET /price`. `budget_usd` and
+  `remaining_usd` are `null` when no ceiling is set.
+- `POST /admin/budget` — `X-Admin-Token` gated. Body `{"usd":N}` sets the ceiling; `{"usd":0}`
+  removes it. Admin script: **`aicoin-proxy/scripts/set-budget.sh 200`** (`--show`, `--clear`).
+- `POST /admin/internal-wallets` — `X-Admin-Token` gated. Body `{"add":[...]}` / `{"remove":[...]}`;
+  an empty body lists. Wallets on this list are development and QA installs, and their spend does
+  not count against the ceiling. Script: `set-budget.sh --internal <addr>`, `--list-internal`.
+
+**Exemption is a server-side allowlist, not something the client asserts.** A build-type header
+(`X-AICoin-Build: debug`) would be one line of client code, and would also let anyone exempt
+themselves from the ceiling by sending it — the ceiling exists to bound real money, so the one
+thing it must not accept is the spender's own word for whether they count.
+
+**Budget spend is undecayed, unlike `price_usd`.** The price signal is a recency-weighted average
+because an old cost figure is a poor estimate of today's cost. A budget is cumulative cash already
+spent, and money does not become un-spent because it is old, so `spend_usd` is a plain sum.
+Internal calls are excluded from the budget but **still recorded in the price signal**: they cost
+the operator exactly as much as any other call, so dropping them would misprice coins.
+
+**Enforcement empties the catalog, and it has to be the catalog.** Once `spend_usd >= budget_usd`,
+`GET /iap/packages` serves `{"packages":[]}`. Closing the offer is *not* sufficient: a client with
+no live offer falls back to rendering the catalog (see `BuyAICoinSheet`, which shows its empty
+state only when `packages` is empty), and `redeem-iap` falls back to crediting the catalog entry's
+own `coins` (see "resolveRedeemCoins"). An empty catalog is the only state every client renders as
+"nothing is on sale". A ledger that cannot be reached is **not** treated as exhausted — failing
+open keeps paywalls working through a Redis blip, since the ceiling is a cost control rather than a
+correctness invariant.
+
+Exhaustion stops *sales*, not *service*: coins already bought still pay for calls. Refusing those
+would be taking money for a service and then declining to render it.
+
 ### The current offer
 
 The packages list above is the **catalog**: which products exist and what each one costs. What is actually *for sale* is a single number — **the current offer** — set by the operator and identical in every app. An app displays that one amount, re-checks it immediately before charging, and buys whichever product covers it. Coin amounts are decoupled from products entirely: the four products are four **fixed price points**, and the offer is what a purchase at one of them credits. A `.large` purchase credits the offer's amount, not the `coins` on `.large`'s catalog entry.
 
-- `GET /iap/offer` → `{"offer":{"coins":350,"tier":"large","usd_price":9.99,"product_ids":["com.tarasmaslov.infiniteairadio.aicoin.large", ...],"set_at":<epochMillis>}}` — public, `Access-Control-Allow-Origin: *`, same posture as `/price`. Backed by the Redis string `aicoin:offer`. Unlike `aicoin:iap-packages` there is **no config seed**: an unset key means "nothing is on sale", served as `{"offer":null}` and rendered by clients as an empty paywall, not as a failed fetch. `product_ids` lists one product per app at that price point; a client picks its own by prefix.
+- `GET /iap/offer` → `{"offer":{"coins":350,"tier":"large","usd_price":9.99,"product_ids":["com.tarasmaslov.infiniteairadio.aicoin.large", ...],"set_at":<epochMillis>}}` — public, `Access-Control-Allow-Origin: *`, same posture as `/price`. Backed by the Redis string `aicoin:offer`. Unlike `aicoin:iap-packages` there is **no config seed**: an unset key means "nothing is on sale", served as `{"offer":null}`, not as a failed fetch. **Note this does not stop sales on its own** — a client with no live offer falls back to rendering the catalog, and `redeem-iap` falls back to crediting the catalog entry's own `coins`. Emptying the catalog is what stops sales; see "Spend budget". `product_ids` lists one product per app at that price point; a client picks its own by prefix.
 - `POST /admin/iap/offer` — `X-Admin-Token` gated. Body `{"coins":N}` prices `N` against the live `/price` signal; `{"coins":N,"usd_price":P}` puts it on a named price point instead; `{"coins":0}` closes sales. Admin script: **`aicoin-proxy/scripts/set-coin-offer.sh 350`** (`--price 9.99`, `--close`, `--show`, `--url`). This is the one place "how much aicoin all users can buy right now" is set.
 - **Pricing rounds up, not to nearest.** The target price is the same formula the repricer uses (`coins × price_usd × 1.5 / 0.7`), and the offer takes the **cheapest price point that covers it**. 350 coins at a $0.0086 signal raw-price to $6.45 and therefore sell at **$9.99**, not at the nearer $2.99 — nearest-tier rounding would sell those coins for under half their computed worth. This deliberately differs from `AppStorePriceRounding.roundToNearestTier`, which rounds against its own denser ladder and exists for the per-product repricer this model supersedes. Rounding up can only overcharge relative to the raw target; that excess is margin, and margin is the safe direction.
 - **Two refusals, both `409`, both deliberate.** (1) *Thin signal*: `price_usd` averages recorded paid calls, so a fresh deploy reports `0.0` and every amount would collapse onto the cheapest point — selling 5,000 coins for $0.99. Below `price_usd > 0` **and** `weighted_total >= 50` (the same guard `adjust-iap-prices.sh` applies) the server refuses to price an offer and says to pass an explicit `usd_price`. (2) *Above the ceiling*: if no price point covers the amount, that is an error rather than a silent clamp to the top tier, since clamping would sell the excess coins for nothing.
