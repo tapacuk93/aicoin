@@ -106,6 +106,18 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             IapPackagesHandler.serveAdminSet(ctx, request, ledger, config);
             return;
         }
+        if (request.method() == HttpMethod.GET && "/budget".equals(path)) {
+            BudgetHandler.serveBudget(ctx, ledger);
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/admin/budget".equals(path)) {
+            BudgetHandler.serveAdminSet(ctx, request, ledger, config);
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/admin/internal-wallets".equals(path)) {
+            BudgetHandler.serveAdminInternalWallets(ctx, request, ledger, config);
+            return;
+        }
         if (request.method() == HttpMethod.GET && "/iap/offer".equals(path)) {
             CoinOfferHandler.serveOffer(ctx, ledger);
             return;

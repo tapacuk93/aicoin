@@ -47,6 +47,53 @@ public final class CostCalculator {
      * per-call figure (for speech and image APIs, which report no tokens at all) -> the global
      * blended rate over whatever token total could be parsed -> {@code defaultCostUsdPerCall}.
      */
+    /**
+     * A call's cost together with the token count it was derived from, for callers that need to
+     * know not just what a call cost but how big it was.
+     *
+     * <p>The price signal needs both: averaging cost per call weights a 200-token lookup and a
+     * 200,000-token long-context turn equally, which misstates what an aicoin is worth whenever
+     * the mix of call sizes shifts. {@code tokensKnown} is false for the responses that report no
+     * usage at all — speech and image APIs — where there is nothing to weight by and the caller
+     * must decide what to do instead of being handed a fabricated zero.
+     */
+    public static final class Priced {
+        private final double costUsd;
+        private final long tokens;
+        private final boolean tokensKnown;
+
+        Priced(double costUsd, long tokens, boolean tokensKnown) {
+            this.costUsd = costUsd;
+            this.tokens = tokens;
+            this.tokensKnown = tokensKnown;
+        }
+
+        public double getCostUsd() {
+            return costUsd;
+        }
+
+        /** Total billable tokens for the call; meaningless unless {@link #isTokensKnown()}. */
+        public long getTokens() {
+            return tokens;
+        }
+
+        public boolean isTokensKnown() {
+            return tokensKnown;
+        }
+    }
+
+    /**
+     * Cost and size in one parse, so the size is available to the price signal rather than being
+     * computed and thrown away. Same fallback chain as {@link #computeCostUsd(String, String,
+     * ModelPricing)}, which now delegates here.
+     */
+    public static Priced price(String provider, String jsonBody, ModelPricing pricing) {
+        Usage usage = extractUsage(jsonBody);
+        long tokens = usage == null ? 0
+                : usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+        return new Priced(computeCostUsd(provider, jsonBody, pricing), tokens, tokens > 0);
+    }
+
     public static double computeCostUsd(String provider, String jsonBody, ModelPricing pricing) {
         Usage usage = extractUsage(jsonBody);
         if (usage != null) {

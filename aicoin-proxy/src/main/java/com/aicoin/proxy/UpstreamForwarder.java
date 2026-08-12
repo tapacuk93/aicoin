@@ -313,8 +313,11 @@ final class UpstreamForwarder {
                 // formula — recording defaultCostUsdPerCall for a model listing would inflate
                 // GET /price with spend the proxy was never billed for.
                 if (callCostAicoin > 0) {
-                    double costUsd = costUsdFor(response.headers(), bodyBytes);
-                    ledger.recordEvent(provider, costUsd, Instant.now());
+                    CostCalculator.Priced priced = costUsdFor(response.headers(), bodyBytes);
+                    double costUsd = priced.getCostUsd();
+                    ledger.recordEvent(provider, costUsd,
+                            priced.isTokensKnown() ? priced.getTokens() : -1,
+                            Instant.now(), walletAddress);
 
                     // Metering settles AFTER the upstream answers, because that answer is the only
                     // place the call's real cost exists. The gate up front still holds exactly one
@@ -373,13 +376,15 @@ final class UpstreamForwarder {
          * shared with Redis. Three concurrent narration requests made it the largest allocator in
          * the process, to reach a constant.
          */
-        private double costUsdFor(HttpHeaders headers, byte[] bodyBytes) {
+        private CostCalculator.Priced costUsdFor(HttpHeaders headers, byte[] bodyBytes) {
             Double perCall = config.getModelPricing().perCallUsd(provider);
             if (perCall != null) {
-                return perCall;
+                // A provider priced per call reports no tokens by definition, so there is no size
+                // to hand the price signal.
+                return new CostCalculator.Priced(perCall, 0, false);
             }
             String bodyStr = decodedForPricing(headers, bodyBytes);
-            return CostCalculator.computeCostUsd(provider, bodyStr, config.getModelPricing());
+            return CostCalculator.price(provider, bodyStr, config.getModelPricing());
         }
 
         private static void copyHeaders(HttpHeaders from, HttpHeaders to) {

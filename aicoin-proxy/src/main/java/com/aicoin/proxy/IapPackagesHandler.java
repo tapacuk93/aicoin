@@ -27,15 +27,29 @@ final class IapPackagesHandler {
     private IapPackagesHandler() {
     }
 
-    /** Public, {@code Access-Control-Allow-Origin: *} — same posture as {@code GET /price}. */
+    /**
+     * Public, {@code Access-Control-Allow-Origin: *} — same posture as {@code GET /price}.
+     *
+     * <p>Serves an empty catalog once the spend budget is exhausted (CONTRACT.md, "Spend budget").
+     * This is the enforcement point, and it has to be this one: closing the offer alone does not
+     * stop sales, because a client with no live offer falls back to rendering the catalog, and
+     * {@code redeem-iap} falls back to crediting the catalog entry's own {@code coins}. An empty
+     * catalog is the only state every client renders as "nothing is on sale".
+     */
     static void servePackages(ChannelHandlerContext ctx, AicoinLedger ledger, ProxyConfig config) {
-        String seedJson = IapPackages.seedJson(config.getIapPackages());
-        ledger.getIapPackages(seedJson, packagesJson -> {
-            if (!packagesJson.isPresent()) {
-                sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not load iap packages", true);
+        ledger.computeBudget(budget -> {
+            if (budget.isExhausted()) {
+                sendJson(ctx, "{\"packages\":[]}", true);
                 return;
             }
-            sendJson(ctx, "{\"packages\":" + packagesJson.get() + "}", true);
+            String seedJson = IapPackages.seedJson(config.getIapPackages());
+            ledger.getIapPackages(seedJson, packagesJson -> {
+                if (!packagesJson.isPresent()) {
+                    sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not load iap packages", true);
+                    return;
+                }
+                sendJson(ctx, "{\"packages\":" + packagesJson.get() + "}", true);
+            });
         });
     }
 
