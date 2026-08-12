@@ -61,6 +61,7 @@ class ProxyConfigTest {
         assertEquals(0.000002, config.getCostPerTokenUsd(), 1e-12);
         assertEquals(0.001, config.getDefaultCostUsdPerCall(), 1e-12);
         assertEquals(50, config.getHealthWindowSize());
+        assertEquals(60, config.getUpstreamReadTimeoutSeconds());
 
         assertEquals(12, config.getIapPackages().size());
         IapPackageConfig first = config.getIapPackages().get(0);
@@ -136,6 +137,7 @@ class ProxyConfigTest {
         env.put("AICOIN_PROXY_REDIS_HOST", "redis.internal");
         env.put("AICOIN_PROXY_COST_PER_TOKEN_USD", "0.5");
         env.put("AICOIN_PROXY_DEFAULT_COST_USD", "1.5");
+        env.put("AICOIN_PROXY_UPSTREAM_READ_TIMEOUT_SECONDS", "15");
 
         ProxyConfig config = ProxyConfig.load(env);
         assertEquals(9090, config.getPort());
@@ -143,6 +145,9 @@ class ProxyConfigTest {
         assertEquals("redis.internal", config.getRedisHost());
         assertEquals(0.5, config.getCostPerTokenUsd(), 1e-12);
         assertEquals(1.5, config.getDefaultCostUsdPerCall(), 1e-12);
+        // Tunable without a rebuild: a provider that turns out to need longer than 60s, or a
+        // deployment that wants to fail faster, is an env change on the running host.
+        assertEquals(15, config.getUpstreamReadTimeoutSeconds());
 
         // Unrelated providers stay at their defaults.
         assertEquals("https://api.anthropic.com", config.getProviderBaseUrl("anthropic"));

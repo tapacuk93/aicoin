@@ -111,6 +111,28 @@ pricing:
       usdPerCall: 0.03
 health:
   windowSize: 50
+upstream:
+  # How long a provider connection may deliver nothing before the forward is abandoned as a 504
+  # and the call's coins are refunded. The connect timeout covers only establishing the socket, so
+  # without this a provider that accepted and then stalled was waited on indefinitely — the
+  # client's own timeout was the only limit anywhere, and it left this side holding the socket, the
+  # buffered response and an unrefunded debit. Generous enough for a long speech synthesis or a
+  # large completion, far below the point where any client is still listening.
+  # Env: AICOIN_PROXY_UPSTREAM_READ_TIMEOUT_SECONDS.
+  readTimeoutSeconds: 60
+accessLog:
+  # One JSON line per request: method, path (no query — see AccessLog on why credentials are never
+  # written), provider, wallet address, status, byte counts, duration, coins charged, outcome.
+  # A client that gives up and disconnects before any response is recorded as status -1 /
+  # "client_gone", which is the only trace such a request leaves anywhere.
+  # Empty path turns access logging off. Env: AICOIN_PROXY_ACCESS_LOG_PATH.
+  path: logs/access.log
+  # Rotation is by size: maxBytes per file, count files kept, oldest overwritten. maxBytes × count
+  # is a hard ceiling on disk used — this shares a 20GB Lightsail volume with Redis snapshots, so
+  # the default deliberately caps the whole log at 50MB.
+  # Env: AICOIN_PROXY_ACCESS_LOG_MAX_BYTES / AICOIN_PROXY_ACCESS_LOG_COUNT.
+  maxBytes: 10485760
+  count: 5
 iap:
   # Whether POST /wallet/api/redeem-iap honours StoreKit *Sandbox* transactions. Production must
   # leave this false: Apple signs sandbox transactions with the same certificate chain as real

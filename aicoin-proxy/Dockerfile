@@ -38,6 +38,25 @@ WORKDIR /opt/aicoin-proxy
 
 COPY --from=build /workspace/build/install/aicoin-proxy/ ./
 
+# Explicit memory budget, because the default is derived from the host and the host is small.
+# With no -Xmx the JVM takes ~25% of visible RAM as max heap; on the 512MB production Lightsail
+# instance that is ~128MB, chosen without knowing that Redis wants a share of the same 512MB and
+# that Netty's off-heap direct buffers are not counted in it at all. Under load the two grew into
+# each other with no stated ceiling for either.
+#
+# The numbers: 160m heap covers steady-state request handling with room for the pricing parse on
+# the providers that still need it. MaxDirectMemorySize is what actually bounds the response
+# aggregation — HttpObjectAggregator buffers each response whole, so this is the real cap on
+# concurrent large relays, and leaving it unset lets it default to roughly the heap size again,
+# silently doubling the process footprint. 160+64 plus JVM overhead leaves Redis its room.
+#
+# ExitOnOutOfMemoryError so exhaustion terminates the process instead of entering the far worse
+# failure it produced before: a JVM alive but spending all its time in GC, which from the outside
+# looks exactly like the slow-then-timeout behaviour this whole change set is about. Paired with
+# `restart: unless-stopped` in docker-compose.yml, that turns a memory blowout into a few seconds
+# of downtime rather than an indefinite brownout.
+ENV JAVA_OPTS="-Xmx160m -XX:MaxDirectMemorySize=64m -XX:+ExitOnOutOfMemoryError"
+
 EXPOSE 8080
 
 ENTRYPOINT ["/opt/aicoin-proxy/bin/aicoin-proxy"]

@@ -47,6 +47,10 @@ public final class ProxyConfig {
     private final int healthWindowSize;
     private final List<IapPackageConfig> iapPackages;
     private final boolean acceptSandboxPurchases;
+    private final String accessLogPath;
+    private final int accessLogMaxBytes;
+    private final int accessLogCount;
+    private final int upstreamReadTimeoutSeconds;
 
     private ProxyConfig(int port, String redisHost, int redisPort, String redisUsername, String redisPassword, boolean redisSsl,
                          double decayHalflifeDays, int freeClaimCooldownSeconds, int signatureSkewSeconds,
@@ -54,7 +58,9 @@ public final class ProxyConfig {
                          double costPerTokenUsd, double defaultCostUsdPerCall,
                          int healthWindowSize, List<IapPackageConfig> iapPackages,
                          ModelPricing modelPricing, double coinValueUsd, boolean meteredBilling,
-                         boolean acceptSandboxPurchases) {
+                         boolean acceptSandboxPurchases,
+                         String accessLogPath, int accessLogMaxBytes, int accessLogCount,
+                         int upstreamReadTimeoutSeconds) {
         this.port = port;
         this.redisHost = redisHost;
         this.redisPort = redisPort;
@@ -75,6 +81,10 @@ public final class ProxyConfig {
         this.coinValueUsd = coinValueUsd;
         this.meteredBilling = meteredBilling;
         this.acceptSandboxPurchases = acceptSandboxPurchases;
+        this.accessLogPath = accessLogPath;
+        this.accessLogMaxBytes = accessLogMaxBytes;
+        this.accessLogCount = accessLogCount;
+        this.upstreamReadTimeoutSeconds = upstreamReadTimeoutSeconds;
     }
 
     /**
@@ -213,6 +223,47 @@ public final class ProxyConfig {
         return acceptSandboxPurchases;
     }
 
+    /**
+     * @return {@code accessLog.path} (env {@code AICOIN_PROXY_ACCESS_LOG_PATH}): where the
+     * one-line-per-request access log is written. Empty turns access logging off entirely.
+     * Rotation appends {@code .0}, {@code .1}, ... to this path.
+     */
+    public String getAccessLogPath() {
+        return accessLogPath;
+    }
+
+    /** @return {@code accessLog.maxBytes} (env {@code AICOIN_PROXY_ACCESS_LOG_MAX_BYTES}): size at which the access log rotates. */
+    public int getAccessLogMaxBytes() {
+        return accessLogMaxBytes;
+    }
+
+    /**
+     * @return {@code accessLog.count} (env {@code AICOIN_PROXY_ACCESS_LOG_COUNT}): how many
+     * rotated files to keep. {@code maxBytes × count} is the hard ceiling on disk used, which
+     * matters on the small Lightsail volume this shares with Redis snapshots.
+     */
+    public int getAccessLogCount() {
+        return accessLogCount;
+    }
+
+    /**
+     * @return {@code upstream.readTimeoutSeconds} (env
+     * {@code AICOIN_PROXY_UPSTREAM_READ_TIMEOUT_SECONDS}): how long an upstream connection may go
+     * without delivering any bytes before the forward is abandoned as a 504.
+     *
+     * <p>Until this existed, {@code CONNECT_TIMEOUT_MILLIS} was the only bound anywhere on a
+     * forwarded call — it covers establishing the socket and nothing after it. A provider that
+     * accepted the connection and then stalled was waited on forever: the client's own timeout was
+     * the only thing that ever fired, and it left the proxy still holding the upstream socket, the
+     * aggregated response buffer, and an unrefunded debit for a call it would never deliver.
+     *
+     * <p>60s is well clear of a slow-but-real generation (ElevenLabs synthesis of a long segment,
+     * a large completion) while being far under the point where any client is still waiting.
+     */
+    public int getUpstreamReadTimeoutSeconds() {
+        return upstreamReadTimeoutSeconds;
+    }
+
     public static ProxyConfig load() {
         return load(System.getenv());
     }
@@ -288,6 +339,10 @@ public final class ProxyConfig {
         int healthWindowSize = getInt(yaml, "health.windowSize", 50);
         List<IapPackageConfig> iapPackages = getIapPackageList(yaml);
         boolean acceptSandboxPurchases = getBoolean(yaml, "iap.acceptSandboxPurchases", false);
+        String accessLogPath = getString(yaml, "accessLog.path", "logs/access.log");
+        int accessLogMaxBytes = getInt(yaml, "accessLog.maxBytes", 10 * 1024 * 1024);
+        int accessLogCount = getInt(yaml, "accessLog.count", 5);
+        int upstreamReadTimeoutSeconds = getInt(yaml, "upstream.readTimeoutSeconds", 60);
 
         // Env var overrides (highest precedence).
         port = envInt(env, "AICOIN_PROXY_PORT", port);
@@ -306,6 +361,10 @@ public final class ProxyConfig {
         coinValueUsd = envDouble(env, "AICOIN_PROXY_COIN_VALUE_USD", coinValueUsd);
         meteredBilling = envBool(env, "AICOIN_PROXY_METERED", meteredBilling);
         acceptSandboxPurchases = envBool(env, "AICOIN_PROXY_IAP_ACCEPT_SANDBOX", acceptSandboxPurchases);
+        accessLogPath = envStr(env, "AICOIN_PROXY_ACCESS_LOG_PATH", accessLogPath);
+        accessLogMaxBytes = envInt(env, "AICOIN_PROXY_ACCESS_LOG_MAX_BYTES", accessLogMaxBytes);
+        accessLogCount = envInt(env, "AICOIN_PROXY_ACCESS_LOG_COUNT", accessLogCount);
+        upstreamReadTimeoutSeconds = envInt(env, "AICOIN_PROXY_UPSTREAM_READ_TIMEOUT_SECONDS", upstreamReadTimeoutSeconds);
         healthWindowSize = envInt(env, "AICOIN_PROXY_HEALTH_WINDOW_SIZE", healthWindowSize);
 
         ModelPricing modelPricing = parseModelPricing(yaml, costPerTokenUsd, defaultCostUsdPerCall);
@@ -313,7 +372,8 @@ public final class ProxyConfig {
         return new ProxyConfig(port, redisHost, redisPort, redisUsername, redisPassword, redisSsl,
                 decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
                 costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages, modelPricing,
-                coinValueUsd, meteredBilling, acceptSandboxPurchases);
+                coinValueUsd, meteredBilling, acceptSandboxPurchases,
+                accessLogPath, accessLogMaxBytes, accessLogCount, upstreamReadTimeoutSeconds);
     }
 
     /**

@@ -6,6 +6,11 @@ aicoin-proxy/.gradle/
 # e2e scratch
 /tmp/
 *.log
+# Access log + its rotated generations (access.log.0, .1, ...) and JUL's lock file.
+# *.log above doesn't cover the rotated suffixes.
+logs/
+*.log.[0-9]*
+*.lck
 
 # OS
 .DS_Store

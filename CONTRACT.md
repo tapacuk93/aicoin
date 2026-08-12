@@ -42,6 +42,10 @@ aicoin:
   signatureSkewSeconds: 120       # AICOIN_PROXY_SIGNATURE_SKEW_SECONDS
   freeCoinsPoolSize: 5000         # AICOIN_PROXY_FREE_COINS_POOL_SIZE (total coins the faucet will ever give away)
   adminToken: ""                  # AICOIN_PROXY_ADMIN_TOKEN (empty = admin page/API disabled)
+accessLog:
+  path: logs/access.log          # AICOIN_PROXY_ACCESS_LOG_PATH ("none" disables; see "Access log")
+  maxBytes: 10485760             # AICOIN_PROXY_ACCESS_LOG_MAX_BYTES — rotate at this size
+  count: 5                       # AICOIN_PROXY_ACCESS_LOG_COUNT — files kept; maxBytes x count caps disk
 iap:
   acceptSandboxPurchases: false   # AICOIN_PROXY_IAP_ACCEPT_SANDBOX — production MUST leave this false
 providers:
