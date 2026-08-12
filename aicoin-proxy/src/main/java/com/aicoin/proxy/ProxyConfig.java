@@ -47,10 +47,6 @@ public final class ProxyConfig {
     private final int healthWindowSize;
     private final List<IapPackageConfig> iapPackages;
     private final boolean acceptSandboxPurchases;
-    private final String stripeSecretKey;
-    private final String stripeWebhookSecret;
-    private final String checkoutSuccessUrl;
-    private final String checkoutCancelUrl;
     private final String accessLogPath;
     private final int accessLogMaxBytes;
     private final int accessLogCount;
@@ -63,8 +59,6 @@ public final class ProxyConfig {
                          int healthWindowSize, List<IapPackageConfig> iapPackages,
                          ModelPricing modelPricing, double coinValueUsd, boolean meteredBilling,
                          boolean acceptSandboxPurchases,
-                         String stripeSecretKey, String stripeWebhookSecret,
-                         String checkoutSuccessUrl, String checkoutCancelUrl,
                          String accessLogPath, int accessLogMaxBytes, int accessLogCount,
                          int upstreamReadTimeoutSeconds) {
         this.port = port;
@@ -87,10 +81,6 @@ public final class ProxyConfig {
         this.coinValueUsd = coinValueUsd;
         this.meteredBilling = meteredBilling;
         this.acceptSandboxPurchases = acceptSandboxPurchases;
-        this.stripeSecretKey = stripeSecretKey;
-        this.stripeWebhookSecret = stripeWebhookSecret;
-        this.checkoutSuccessUrl = checkoutSuccessUrl;
-        this.checkoutCancelUrl = checkoutCancelUrl;
         this.accessLogPath = accessLogPath;
         this.accessLogMaxBytes = accessLogMaxBytes;
         this.accessLogCount = accessLogCount;
@@ -234,34 +224,6 @@ public final class ProxyConfig {
     }
 
     /**
-     * @return {@code checkout.stripeSecretKey} (env {@code AICOIN_PROXY_STRIPE_SECRET_KEY}). Empty
-     * disables the card path entirely: {@code POST /checkout/session} answers 503 rather than
-     * pretending to sell something it cannot charge for.
-     */
-    public String getStripeSecretKey() {
-        return stripeSecretKey;
-    }
-
-    /**
-     * @return {@code checkout.stripeWebhookSecret} (env {@code AICOIN_PROXY_STRIPE_WEBHOOK_SECRET}).
-     * Empty means no webhook can ever verify — the endpoint fails closed, since the alternative is
-     * an unauthenticated endpoint that credits wallets.
-     */
-    public String getStripeWebhookSecret() {
-        return stripeWebhookSecret;
-    }
-
-    /** @return where Stripe returns the buyer after a completed payment. */
-    public String getCheckoutSuccessUrl() {
-        return checkoutSuccessUrl;
-    }
-
-    /** @return where Stripe returns the buyer after an abandoned payment. */
-    public String getCheckoutCancelUrl() {
-        return checkoutCancelUrl;
-    }
-
-    /**
      * @return {@code accessLog.path} (env {@code AICOIN_PROXY_ACCESS_LOG_PATH}): where the
      * one-line-per-request access log is written. Empty turns access logging off entirely.
      * Rotation appends {@code .0}, {@code .1}, ... to this path.
@@ -377,10 +339,6 @@ public final class ProxyConfig {
         int healthWindowSize = getInt(yaml, "health.windowSize", 50);
         List<IapPackageConfig> iapPackages = getIapPackageList(yaml);
         boolean acceptSandboxPurchases = getBoolean(yaml, "iap.acceptSandboxPurchases", false);
-        String stripeSecretKey = getString(yaml, "checkout.stripeSecretKey", "");
-        String stripeWebhookSecret = getString(yaml, "checkout.stripeWebhookSecret", "");
-        String checkoutSuccessUrl = getString(yaml, "checkout.successUrl", "https://aicoin.oeaio.com/paid");
-        String checkoutCancelUrl = getString(yaml, "checkout.cancelUrl", "https://aicoin.oeaio.com/");
         String accessLogPath = getString(yaml, "accessLog.path", "logs/access.log");
         int accessLogMaxBytes = getInt(yaml, "accessLog.maxBytes", 10 * 1024 * 1024);
         int accessLogCount = getInt(yaml, "accessLog.count", 5);
@@ -403,10 +361,6 @@ public final class ProxyConfig {
         coinValueUsd = envDouble(env, "AICOIN_PROXY_COIN_VALUE_USD", coinValueUsd);
         meteredBilling = envBool(env, "AICOIN_PROXY_METERED", meteredBilling);
         acceptSandboxPurchases = envBool(env, "AICOIN_PROXY_IAP_ACCEPT_SANDBOX", acceptSandboxPurchases);
-        stripeSecretKey = envStr(env, "AICOIN_PROXY_STRIPE_SECRET_KEY", stripeSecretKey);
-        stripeWebhookSecret = envStr(env, "AICOIN_PROXY_STRIPE_WEBHOOK_SECRET", stripeWebhookSecret);
-        checkoutSuccessUrl = envStr(env, "AICOIN_PROXY_CHECKOUT_SUCCESS_URL", checkoutSuccessUrl);
-        checkoutCancelUrl = envStr(env, "AICOIN_PROXY_CHECKOUT_CANCEL_URL", checkoutCancelUrl);
         accessLogPath = envStr(env, "AICOIN_PROXY_ACCESS_LOG_PATH", accessLogPath);
         accessLogMaxBytes = envInt(env, "AICOIN_PROXY_ACCESS_LOG_MAX_BYTES", accessLogMaxBytes);
         accessLogCount = envInt(env, "AICOIN_PROXY_ACCESS_LOG_COUNT", accessLogCount);
@@ -419,7 +373,6 @@ public final class ProxyConfig {
                 decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
                 costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages, modelPricing,
                 coinValueUsd, meteredBilling, acceptSandboxPurchases,
-                stripeSecretKey, stripeWebhookSecret, checkoutSuccessUrl, checkoutCancelUrl,
                 accessLogPath, accessLogMaxBytes, accessLogCount, upstreamReadTimeoutSeconds);
     }
 
