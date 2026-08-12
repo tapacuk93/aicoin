@@ -73,6 +73,7 @@ public struct CoinBalanceBadge: View {
     private var balanceLabel: some View {
         if let balance = store.balance {
             Text(Self.format(balance))
+                .balanceTextLayout()
                 .accessibilityIdentifier(Identifiers.value)
         } else if store.isLoading {
             ProgressView()
@@ -80,6 +81,7 @@ public struct CoinBalanceBadge: View {
         } else {
             Text("—")
                 .foregroundStyle(.secondary)
+                .balanceTextLayout()
                 .accessibilityIdentifier(Identifiers.value)
         }
     }
@@ -95,5 +97,30 @@ public struct CoinBalanceBadge: View {
 
     private var accessibilityValueText: String {
         store.balance.map(Self.format) ?? ""
+    }
+}
+
+private extension View {
+    /// Makes the balance render at its natural width or not at all — never squeezed down to an
+    /// ellipsis.
+    ///
+    /// Host apps put this badge in a toolbar, and a toolbar is the one container that hands its
+    /// children less room than they asked for rather than growing. All Languages Learner has five
+    /// `.primaryAction` items beside an inline title; the badge is the only one holding free-form
+    /// text, so it is the only one with anything to give up, and SwiftUI's default response to a
+    /// `Text` that doesn't fit is to truncate it.
+    ///
+    /// What that looked like: the badge rendered fine at small balances and turned into a bare "…"
+    /// next to the coin mark once a purchase made the number wide enough to overflow — reported as
+    /// the balance not updating after buying coins, when in fact it had updated and could no longer
+    /// be drawn. The accessibility label carried the full number throughout, which is why nothing
+    /// reading the hierarchy (tests included) could see it.
+    ///
+    /// `fixedSize` is what actually fixes it: it makes the text report its ideal width as
+    /// non-negotiable, so the toolbar takes the space from its own spacing instead. `lineLimit(1)`
+    /// pairs with it to keep an unexpectedly long value on one line rather than growing the bar's
+    /// height.
+    func balanceTextLayout() -> some View {
+        lineLimit(1).fixedSize(horizontal: true, vertical: false)
     }
 }
