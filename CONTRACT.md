@@ -455,6 +455,53 @@ Body: `{"to_user_id":"<address>","signed_transaction":"<StoreKit2 Transaction.jw
 6. Response: `200 {"credited":N,"balance":N}` (or the already-redeemed no-op's current balance, same shape).
 This endpoint is why HTTPS between every app and `proxy.aicoin.oeaio.com` is non-negotiable in production (TLS via the Lightsail Caddy front-end) — the JWS itself is tamper-evident, but the wallet address it's credited to travels in the clear otherwise.
 
+## Card checkout (buying aicoin without Apple)
+
+A second way to buy coins: a bank card on the web, charged through Stripe Checkout, crediting the
+same wallets by the same rules. It exists because the App Store path routes every sale through
+Apple; this one does not. Both sell **the current offer** — the same single number (see "The
+current offer") — so the two cannot drift into selling different amounts for the same money.
+
+Off by default. `checkout.stripeSecretKey` empty disables it, and both endpoints fail closed rather
+than degrading into something that looks like it works.
+
+- `POST /checkout/session` → `{"url":"https://checkout.stripe.com/...","coins":N,"amount_cents":N}`.
+  Body `{"address":"<64-hex wallet>"}`. Public and unauthenticated, same posture as `POST
+  /iap/offer/check` and for the same reason: creating a session grants nothing. The price is the
+  live offer's `usd_price` in cents and the amount is the offer's `coins`; both are written into the
+  session's `metadata`, which pins them for the life of the checkout, so an offer changed
+  mid-payment still credits what the buyer was shown. No live offer → `409`, not an invented price.
+  Unconfigured → `503`. Stripe unreachable or refusing → `502`, and its response body is never
+  echoed onward.
+- `POST /checkout/webhook` → Stripe's event delivery, and **the only place a card payment becomes
+  coins**. Public in the HTTP sense; what makes it safe is two things, both required:
+  1. **`Stripe-Signature` verified over the raw request body** (`StripeWebhookVerifier`) — HMAC-SHA256
+     of `"<t>.<body>"` against `checkout.stripeWebhookSecret`, compared in constant time, with a
+     300-second timestamp tolerance. The raw bytes matter: re-serialized JSON differs in whitespace
+     and fails. An unset secret verifies nothing and rejects everything — treating "no secret" as
+     "skip the check" would leave a wallet-crediting endpoint open to the internet. Failure → `400`.
+  2. **Idempotency on Stripe's session id** (`aicoin:checkout-credited:<session_id>`), sharing
+     `REDEEM_IAP_SCRIPT` so the marker and the credit are one atomic Redis operation. Stripe retries
+     any delivery that did not return 2xx, for hours; without this a lost response pays out twice.
+  Only `checkout.session.completed` acts, and only when `payment_status` is `paid` — a session can
+  complete while an asynchronous payment method is still settling, and that is not money in hand.
+  Anything else is a signed no-op answered `200`, since a non-2xx only tells Stripe to retry
+  something that will never become actionable. The one deliberate non-2xx is `503` when the ledger
+  is unreachable: the payment is real and uncredited, so a retry is exactly what should happen.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| Checkout credited marker | `aicoin:checkout-credited:<session_id>` | String `"1"`, set by the credit script. Its presence is what makes a replay a no-op |
+
+The wallet address travels in `metadata` in the clear, which is acceptable for the same reason it is
+on `redeem-iap`: crediting a wallet can only benefit its owner, so the security burden is on proving
+the *payment* is real, not on proving control of the destination address.
+
+**App Store rule.** Apple's guideline 3.1.1 prohibits an iOS app from steering users to a purchase
+path outside IAP. This checkout is therefore a *web* surface only — the three apps must keep using
+`redeem-iap`, and must not link to it — which is why the IAP path stays exactly as it is rather than
+being replaced.
+
 ## Automatic price adjustment
 
 A small scheduled job (cron on the Lightsail host, `aicoin-proxy/scripts/adjust-iap-prices.sh`, hourly) re-derives each package's target USD price from the *current* `/price` signal (not the launch estimate above) using the same formula (`coins × price_usd × 1.5 / 0.7`, rounded to the nearest App Store price point), and — where the App Store Connect API supports it (manual price schedules on an existing in-app purchase's `inAppPurchasePriceSchedule`) — pushes the new price point automatically via the App Store Connect API, one call per product ID, only when the computed price point differs from the currently-scheduled one (avoids no-op API churn/rate limits). Coin *amounts* per package never change automatically, only price — keeps the on-screen "50 coins" etc. stable for users while the $ cost of that package tracks real AI spend plus the fixed fee margin.
