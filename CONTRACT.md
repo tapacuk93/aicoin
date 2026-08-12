@@ -164,7 +164,7 @@ Keys, namespaced under `aicoin:` (each additionally carrying the `{aicoin}` hash
 
 | Concept | Key | Type | Notes |
 |---|---|---|---|
-| Price event log | `aicoin:events` | ZSET | member = `<costUsd>\|<uuid>` (uuid keeps members unique since ZSET dedupes by member), score = event epoch-millis timestamp — fed **only** by genuine 2xx paid calls, never by claims/transfers/failed calls or free targets |
+| Price event log | `aicoin:events` | ZSET | member = `<costUsd>\|<uuid>[\|t<tokens>][\|i]` (uuid keeps members unique since ZSET dedupes by member), score = event epoch-millis timestamp — fed **only** by genuine 2xx paid calls, never by claims/transfers/failed calls or free targets. `\|t<tokens>` is the call's total billable tokens, used as the price weight (see below); it is **absent** when the response reported no usage at all (speech/image APIs, per-call-priced providers) and on every event written before sizes were recorded. Absent and zero are different: absent means "no size to weight by". Any `\|i` stays last, since internal spend is detected by a trailing `\|i` |
 | Wallet balance | `aicoin:balance:{address}` | String (float) | `INCRBYFLOAT` for claim mints, transfers, and call refunds (all plain atomic ops); check-then-debit for claims/transfers/call-debits uses the Lua scripts below |
 | Last free-claim time | `aicoin:lastclaim:{address}` | String (epoch-millis) | read/written only inside the claim Lua script below |
 | Free-coins pool remaining | `aicoin:free-coins-remaining` | String (int) | shared across every wallet, lazily initialized to `aicoin.freeCoinsPoolSize` on first-ever claim; read/written only inside the claim Lua script |
@@ -178,9 +178,10 @@ Keys, namespaced under `aicoin:` (each additionally carrying the `{aicoin}` hash
 
 **Price (final formula, v2: smooth exponential decay)** — unchanged math from
 before, now computed by fetching the full event log rather than folding
-over a chain. **1 aicoin's price = a recency-weighted average of `cost_usd`
-across every priced event ever recorded — NOT divided by number of users.**
-Every event contributes `cost_usd * weight(age)`, where `age` = `now -
+over a chain. **1 aicoin's price = a recency- and size-weighted average of
+`cost_usd` across every priced event ever recorded — NOT divided by number of
+users.**
+Every event contributes `cost_usd * weight(age) * size`, where `age` = `now -
 event.timestamp` (wall-clock "now" at query time; a negative age from clock
 skew/future timestamps clamps to `0`, giving `weight = 1.0`), and:
 
@@ -214,8 +215,33 @@ Named checkpoints (informational only — computed from the one formula above), 
 | 1 year (365.25d) | ≈ 0.100 (by construction) |
 | 5 years | ≈ 0.00001 |
 
-`price_usd = Σ(weight(age_i) * cost_usd_i) / Σ(weight(age_i))` over every
-event. Zero events → `price_usd = 0`. Implemented as a pure function
+`price_usd = Σ(weight(age_i) * size_i * cost_usd_i) / Σ(weight(age_i) * size_i)`
+over every event. Zero events → `price_usd = 0`.
+
+**Size weighting.** `size_i` is the call's total billable tokens. Weighting by
+recency alone counts a 200-token lookup and a 200,000-token long-context turn
+equally, so the reported price tracks the *mix* of call sizes rather than the
+cost of the work, and drifts whenever that mix moves without any underlying
+price having changed — which matters directly now that billing is metered
+(`CoinMeter` charges `ceil(cost_usd / coinValueUsd)`, so coins are consumed in
+proportion to a call's cost, not its count).
+
+- A call whose response reported no usage has no size to weight by. It takes
+  the **recency-weighted mean size of the events that do know theirs**: dropping
+  it would discard real spend, and giving it a size of 1 would make it vanish
+  beside any real call.
+- When no event knows its size — every event written before sizes were
+  recorded — the size factor is common to every term and divides out, so this
+  reduces **exactly** to the previous per-call formula. Deploying it therefore
+  does not reprice an existing ledger; the weighting phases in as sized events
+  accumulate.
+- Note that "cost per token, multiplied back by the mean size" is *not* this
+  formula: that expression cancels algebraically to the plain per-call mean and
+  changes nothing.
+- `weighted_total` remains `Σweight(age_i)`, **not** `Σ(weight × size)`. It is
+  published on `GET /price` and gates offer pricing at `>= 50`, a threshold
+  meaning "enough recent calls"; scaling it by tokens would put it in the
+  millions and silently disable that guard. Implemented as a pure function
 (`PriceCalculator`) over the events fetched from Redis, so it's unit-testable
 without a live Redis connection. This is purely a market-rate *signal*, distinct
 from the fixed 1-aicoin-per-call spending rate above — a call always costs

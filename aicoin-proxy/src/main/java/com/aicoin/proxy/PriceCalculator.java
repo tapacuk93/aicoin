@@ -71,26 +71,29 @@ final class PriceCalculator {
         double imputedSize = knownWeight > 0 ? knownSizeWeighted / knownWeight : 1;
 
         double totalSpend = 0;
-        double weightedCost = 0;
-        double weightedSize = 0;
+        double weightedSum = 0;
+        double sizeWeight = 0;
         double weightedTotal = 0;
         for (Event event : events) {
             double ageDays = (nowMillis - event.timestampMillis) / MILLIS_PER_DAY;
             double w = weight(ageDays, halfLifeDays);
             double size = event.tokensKnown && event.tokens > 0 ? event.tokens : imputedSize;
             totalSpend += event.costUsd;
-            weightedCost += w * event.costUsd;
-            weightedSize += w * size;
+            weightedSum += w * size * event.costUsd;
+            sizeWeight += w * size;
             // Deliberately still Σweight, not Σ(weight × size): weighted_total is published and
             // gates offer pricing at ">= 50", a threshold that means "enough recent calls". Scaling
             // it by tokens would put it in the millions and silently disable that guard.
             weightedTotal += w;
         }
-        // Dollars per token, restored to dollars per call of average size — so price_usd keeps its
-        // units and its meaning, while what it averages over is tokens served rather than calls
-        // made. With uniform or unknown sizes the size terms cancel and this is exactly the
-        // per-call formula it replaces.
-        double priceUsd = weightedSize > 0 ? weightedCost / weightedSize * imputedSize : 0;
+        // A mean of per-call cost in which each call counts for its size, so price_usd still reads
+        // as dollars per call but is no longer dragged to the floor by a majority of tiny calls.
+        // Note this is NOT cost-per-token restored to call units — that expression cancels back to
+        // the plain per-call mean and changes nothing at all.
+        //
+        // With uniform sizes, or none known, the size factor is common to every term and divides
+        // out, leaving exactly the formula this replaces.
+        double priceUsd = sizeWeight > 0 ? weightedSum / sizeWeight : 0;
         return new AicoinLedger.PriceResult(priceUsd, totalSpend, weightedTotal, halfLifeDays);
     }
 }
