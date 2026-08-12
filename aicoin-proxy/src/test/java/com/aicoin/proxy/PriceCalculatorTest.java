@@ -127,10 +127,9 @@ class PriceCalculatorTest {
 
         assertTrue(priced > perCallMean * 5,
                 "token weighting should not collapse to the per-call mean: " + priced);
-        // Cost per token is 1.00/100000 for the big call and 0.001/100 for each small one; the
-        // big call carries 100000/(100000+9900) of the weight.
-        double meanSize = (100_000 + 99 * 100) / 100.0;
-        double expected = (1.00 + 99 * 0.001) / (100_000 + 99 * 100.0) * meanSize;
+        // Each call's cost counts for its size: the big call carries 100000 of the 109900 total
+        // size weight, so it sets almost the whole answer.
+        double expected = (100_000 * 1.00 + 99 * 100 * 0.001) / (100_000 + 99 * 100.0);
         assertEquals(expected, priced, 1e-9);
     }
 
