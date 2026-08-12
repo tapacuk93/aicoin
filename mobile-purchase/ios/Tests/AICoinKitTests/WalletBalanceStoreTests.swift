@@ -49,14 +49,56 @@ final class WalletBalanceStoreTests: XCTestCase {
         super.tearDown()
     }
 
-    private func store(_ transport: HTTPTransport) -> WalletBalanceStore {
+    private func store(_ transport: HTTPTransport, eventBus: AICoinEventBus = AICoinEventBus()) -> WalletBalanceStore {
         WalletBalanceStore(
             address: address,
             walletClient: WalletClient(baseURL: baseURL, transport: transport),
             // A fresh bus, not `.shared`: otherwise an event published by any
             // other test refreshes this store behind the assertions below.
-            eventBus: AICoinEventBus()
+            eventBus: eventBus
         )
+    }
+
+    /// The reported-symptom regression: the coin badge kept showing its
+    /// placeholder after a purchase that had genuinely been credited.
+    ///
+    /// The wallet is unreachable for reads throughout — the state a device that
+    /// spent its whole retry schedule offline is actually in — while the redeem
+    /// call itself succeeded and reported the post-credit total. Publishing that
+    /// total has to be enough on its own; requiring a second, working round trip
+    /// is what left a paying user looking at "—".
+    func testACreditedPurchaseShowsUpEvenWhenEveryBalanceReadFails() async throws {
+        let transport = FlakyTransport(failures: .max, thenServing: "{}")
+        let bus = AICoinEventBus()
+        let store = store(transport, eventBus: bus)
+
+        await store.refresh()
+        XCTAssertNil(store.balance, "reads are failing, so there is nothing to show yet")
+
+        bus.events.send(.purchaseCredited(newBalance: 250))
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(store.balance, 250, "the purchase's own reported balance should be on screen")
+        // `lastError` is expected to be set here, and deliberately not asserted away: the
+        // reconciling read that follows the payload really did fail, and recording that is what
+        // keeps the retry cycle armed. What must not happen is that failure taking the number
+        // down with it — a badge showing a real balance beats a truthful placeholder.
+        XCTAssertNotNil(store.lastError, "the failed reconcile read should still be recorded")
+    }
+
+    /// `paidCallSucceeded` reports no balance, so it stays what it always was —
+    /// a "go re-read" nudge that must not blank out the number already shown.
+    func testAnEventWithoutABalancePayloadLeavesTheShownNumberAlone() async throws {
+        let transport = FlakyTransport(failures: 0, thenServing: #"{"user_id":"\#(address)","balance":9}"#)
+        let bus = AICoinEventBus()
+        let store = store(transport, eventBus: bus)
+
+        await store.refresh()
+        XCTAssertEqual(store.balance, 9)
+
+        bus.events.send(.paidCallSucceeded)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(store.balance, 9)
     }
 
     /// The regression this whole retry cycle exists for: one failed read used

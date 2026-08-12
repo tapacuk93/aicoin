@@ -288,8 +288,15 @@ public struct BuyAICoinSheet: View {
     /// Shared post-purchase handling for both the single offer and the legacy package rows.
     private func handle(_ outcome: AICoinPurchaseOutcome) async {
         switch outcome {
-        case .success:
-            // Refresh first, then close: the sheet is usually presented
+        case .success(let newBalance):
+            // Take the redeem response's own total before reading anything:
+            // it is the authoritative post-credit balance, and it arrived on
+            // the request that just succeeded. Leaving this to `refresh()`
+            // alone made a visibly credited purchase depend on a *second*
+            // round trip, which on a flaky connection is how the badge ended
+            // up still showing its placeholder after paying.
+            walletStore.apply(newBalance)
+            // Then refresh, then close: the sheet is usually presented
             // *because* something ran out of coins, so the thing the user
             // came back to — the badge, the segment that 402'd — should
             // already be showing the new balance as the sheet goes away.

@@ -63,11 +63,7 @@ public final class WalletBalanceStore: ObservableObject {
         #if DEBUG
         self.debugAutoReloadIdentity = nil
         #endif
-        cancellable = eventBus.events
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                Task { await self?.refresh() }
-            }
+        subscribe(to: eventBus)
         subscribeToForeground()
     }
 
@@ -104,14 +100,49 @@ public final class WalletBalanceStore: ObservableObject {
         self.address = address
         self.walletClient = walletClient
         self.debugAutoReloadIdentity = debugAutoReloadIdentity
-        cancellable = eventBus.events
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                Task { await self?.refresh() }
-            }
+        subscribe(to: eventBus)
         subscribeToForeground()
     }
     #endif
+
+    /// Refreshes on every `AICoinEventBus` event, and — for the events that carry one — adopts the
+    /// balance the server already reported *before* starting that read.
+    ///
+    /// The adoption is what keeps a purchase visible. `refresh()`'s retry schedule is finite by
+    /// design (see `retryDelays`), so a device that was offline through it sits on `balance == nil`
+    /// — the badge's placeholder — until something re-reads successfully. A purchase used to be
+    /// exactly that "something" and nothing more: `.purchaseCredited` triggered a fresh read and
+    /// the post-credit total it carried was thrown away, so if that one read failed the badge
+    /// stayed on its placeholder even though the redeem call had just come back over the same
+    /// connection with the number on it. Taking the payload first means a credited purchase shows
+    /// up on the strength of the redeem that already succeeded, not on a second request that might
+    /// not.
+    private func subscribe(to eventBus: AICoinEventBus) {
+        cancellable = eventBus.events
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                if let reported = event.reportedBalance {
+                    self?.apply(reported)
+                }
+                // Still re-read: the payload is a snapshot from the moment the event was
+                // published, and reconciling it against the ledger costs nothing on screen now
+                // that the badge already has a number to show while the read is in flight.
+                Task { await self?.refresh() }
+            }
+    }
+
+    /// Adopts a balance the server has already reported (a redeem response, a `402` body) without
+    /// waiting on a read of our own.
+    ///
+    /// Clears `lastError` and stands down any retry cycle for the same reason `refresh()` does on
+    /// success: the thing those exist to recover — not having a balance to show — is no longer
+    /// true. A read that fails after this still schedules a fresh cycle.
+    public func apply(_ newBalance: Double) {
+        balance = newBalance
+        lastError = nil
+        retryTask?.cancel()
+        retryTask = nil
+    }
 
     /// Re-fetches the balance from `GET /wallet/api/balance/{address}`. Errors leave the last
     /// known `balance` in place (a stale-but-present number is more useful on screen than nothing)
@@ -208,8 +239,13 @@ public final class WalletBalanceStore: ObservableObject {
             if result.granted {
                 debugReloadDeclinedAt = nil
                 // Re-read rather than adding the granted amount locally, so the badge
-                // shows what the ledger actually holds.
-                self.balance = try? await walletClient.balance(address: address)
+                // shows what the ledger actually holds. Assigning `try?` straight through
+                // would write `nil` over a balance we already had whenever that read failed
+                // — dropping the badge back to its placeholder with no `lastError` recorded
+                // and no retry scheduled, the one state nothing else here can produce.
+                if let reloaded = try? await walletClient.balance(address: address) {
+                    self.balance = reloaded
+                }
             } else {
                 // Cooldown or an exhausted pool — both mean "not now", so back off.
                 debugReloadDeclinedAt = Date()
