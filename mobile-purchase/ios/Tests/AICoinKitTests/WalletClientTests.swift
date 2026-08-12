@@ -29,13 +29,13 @@ private func httpResponse(_ url: URL, statusCode: Int) -> HTTPURLResponse {
 }
 
 final class WalletClientTests: XCTestCase {
-    private let baseURL = URL(string: "https://apps.oeaio.com")!
+    private let baseURL = URL(string: "https://proxy.aicoin.oeaio.com")!
 
     // MARK: - endpointURL path joining (what WalletSigner's canonical message must match)
 
     func testEndpointURLProducesExactlyThePathWithNoDoubleSlashes() {
         let url = WalletClient.endpointURL(baseURL, "/wallet/api/claim")
-        XCTAssertEqual(url.absoluteString, "https://apps.oeaio.com/wallet/api/claim")
+        XCTAssertEqual(url.absoluteString, "https://proxy.aicoin.oeaio.com/wallet/api/claim")
         XCTAssertEqual(url.path, "/wallet/api/claim")
     }
 

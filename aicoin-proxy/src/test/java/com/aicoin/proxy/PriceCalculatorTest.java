@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Mirrors the Go node's old {@code state_test.go} checkpoint table for the
- * recency-weighted price formula, per CONTRACT.md's "Derived state — price"
+ * recency-weighted price formula, per CONTRACT.md's "Price (final formula...)"
  * section: {@code weight(age_days) = 2^(-age_days/halfLifeDays)}, default
  * half-life 110 days.
  */

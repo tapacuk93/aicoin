@@ -16,10 +16,10 @@ final class AICoinPackageTests: XCTestCase {
         {"product_id":"com.tarasmaslov.alllanguageslearner.aicoin.medium", "coins":200,  "usd_price_hint":2.99},
         {"product_id":"com.tarasmaslov.alllanguageslearner.aicoin.large",  "coins":1000, "usd_price_hint":9.99},
         {"product_id":"com.tarasmaslov.alllanguageslearner.aicoin.xl",     "coins":5000, "usd_price_hint":44.99},
-        {"product_id":"com.tarasmaslov.learn-it.aicoin.small",  "coins":50,   "usd_price_hint":0.99},
-        {"product_id":"com.tarasmaslov.learn-it.aicoin.medium", "coins":200,  "usd_price_hint":2.99},
-        {"product_id":"com.tarasmaslov.learn-it.aicoin.large",  "coins":1000, "usd_price_hint":9.99},
-        {"product_id":"com.tarasmaslov.learn-it.aicoin.xl",     "coins":5000, "usd_price_hint":44.99}
+        {"product_id":"com.tarasmaslov.learnit.aicoin.small",  "coins":50,   "usd_price_hint":0.99},
+        {"product_id":"com.tarasmaslov.learnit.aicoin.medium", "coins":200,  "usd_price_hint":2.99},
+        {"product_id":"com.tarasmaslov.learnit.aicoin.large",  "coins":1000, "usd_price_hint":9.99},
+        {"product_id":"com.tarasmaslov.learnit.aicoin.xl",     "coins":5000, "usd_price_hint":44.99}
       ]
     }
     """
@@ -54,17 +54,33 @@ final class AICoinPackageTests: XCTestCase {
 
         XCTAssertEqual(mine.count, 4)
         XCTAssertFalse(mine.contains { $0.productId.contains("infiniteairadio") })
-        XCTAssertFalse(mine.contains { $0.productId.contains("learn-it") })
+        XCTAssertFalse(mine.contains { $0.productId.contains(".learnit.") })
     }
 
     func testFilteringByLearnItBundleIDDoesNotAccidentallyMatchAllLanguagesLearner() throws {
-        // Regression guard: "learn-it" must not be treated as a prefix-substring of
+        // Regression guard: "learnit" must not be treated as a prefix-substring of
         // "alllanguageslearner" or vice versa — hasPrefix, not contains.
         let packages = try decodePackages()
         let mine = packages.filtered(byBundleIDPrefix: "com.tarasmaslov.learn-it")
 
         XCTAssertEqual(mine.count, 4)
-        XCTAssertTrue(mine.allSatisfy { $0.productId.hasPrefix("com.tarasmaslov.learn-it") })
+        XCTAssertTrue(mine.allSatisfy { $0.productId.hasPrefix("com.tarasmaslov.learnit") })
+    }
+
+    /// Learn It's real bundle ID carries a hyphen its product IDs cannot (Apple's product-id
+    /// alphabet excludes it), so filtering the live catalog by a raw `Bundle.main.bundleIdentifier`
+    /// used to match nothing at all and leave that one app's paywall permanently empty. The
+    /// fixture above deliberately carries the *server's* real, hyphen-free product IDs — matching
+    /// `application.yaml` and CONTRACT.md — so this stays a test of the real shape.
+    func testHyphenatedBundleIDStillMatchesItsHyphenFreeProductIDs() throws {
+        XCTAssertEqual(AICoinProductID.prefix(forBundleID: "com.tarasmaslov.learn-it"), "com.tarasmaslov.learnit")
+        XCTAssertEqual(
+            AICoinProductID.prefix(forBundleID: "com.tarasmaslov.infiniteairadio"),
+            "com.tarasmaslov.infiniteairadio",
+            "an already-legal bundle id must pass through untouched")
+
+        let packages = try decodePackages()
+        XCTAssertEqual(packages.filtered(byBundleIDPrefix: "com.tarasmaslov.learn-it").count, 4)
     }
 
     func testEmptyPrefixReturnsEverythingUnfiltered() throws {

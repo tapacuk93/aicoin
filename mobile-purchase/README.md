@@ -21,10 +21,20 @@ Whatever the store, the flow is the same three steps, and only step 2 is platfor
 3. **Redeem** — hand that proof to the proxy, which verifies it with the store's public keys and
    credits the wallet. Coins are then spent by routing AI-provider calls through the proxy.
 
-Package definitions (product IDs → coin amounts) come from the server at runtime
-(`GET /iap/packages`), so a new package or price never requires a client release. The product IDs
-are per-app and per-store, so an Android build registers its own alongside the iOS ones in
-`aicoin-proxy/src/main/resources/application.yaml`.
+What's for sale comes from the server at runtime, so changing it never requires a client release.
+There are two layers: the **catalog** (`GET /iap/packages`) is which products exist and what each
+costs, and the **current offer** (`GET /iap/offer`) is the single coin amount every app is actually
+selling right now. A client displays the offer, re-checks it via `POST /iap/offer/check`
+immediately before charging — which pins that amount so the user is credited what they were shown
+even if it changes mid-purchase — and buys whichever fixed-price product the offer names for its
+own app. Coins are decoupled from products entirely: a purchase credits the offer's amount, not
+the catalog `coins` of the product charged.
+
+The product IDs are per-app and per-store, so an Android build registers its own alongside the iOS
+ones in `aicoin-proxy/src/main/resources/application.yaml`. Note a store's product-id alphabet may
+not match a bundle ID: Apple forbids hyphens, so Learn It's `com.tarasmaslov.learn-it` bundle uses
+`com.tarasmaslov.learnit.*` product IDs, and a client must derive the prefix rather than matching
+its raw bundle ID (`AICoinProductID.prefix(forBundleID:)` in the iOS package).
 
 ## Adding Android later
 
@@ -42,3 +52,8 @@ each does and the exact wire format it produces. Two things to carry over rather
 
 Redemption of a Play purchase token needs a server-side counterpart next to the existing Apple JWS
 verifier (`aicoin-proxy/.../AppleJwsVerifier.java`) before the Android client can credit a wallet.
+Carry over one lesson from the Apple side: a valid store signature proves a purchase is *genuine*,
+never that it was *paid for*. The Apple verifier must reject Sandbox transactions (same signing
+chain as real ones, mintable without limit from a free tester account) and refunded ones; a Play
+verifier needs the equivalent checks on `purchaseState`/test purchases and voided orders, or the
+same "spend coins nobody bought" hole reopens on Android.

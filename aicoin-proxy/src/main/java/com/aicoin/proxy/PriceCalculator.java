@@ -3,8 +3,8 @@ package com.aicoin.proxy;
 import java.util.List;
 
 /**
- * Pure recency-weighted price math, per CONTRACT.md's "Derived state —
- * price (final formula, v2: smooth exponential decay)" section — no I/O, so
+ * Pure recency-weighted price math, per CONTRACT.md's "Price (final formula,
+ * v2: smooth exponential decay)" under "Ledger (Redis)" — no I/O, so
  * it can be unit-tested without a live Redis connection. {@link
  * AicoinLedger#computePrice} feeds this the raw event list fetched from
  * Redis.

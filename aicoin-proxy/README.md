@@ -60,8 +60,10 @@ aicoin:
   decayHalflifeDays: 110.0        # AICOIN_PROXY_DECAY_HALFLIFE_DAYS
   freeClaimCooldownSeconds: 3600  # AICOIN_PROXY_FREE_CLAIM_COOLDOWN_SECONDS
   signatureSkewSeconds: 120       # AICOIN_PROXY_SIGNATURE_SKEW_SECONDS
-  freeCoinsPoolSize: 100          # AICOIN_PROXY_FREE_COINS_POOL_SIZE
+  freeCoinsPoolSize: 5000         # AICOIN_PROXY_FREE_COINS_POOL_SIZE (total coins the faucet will ever give away)
   adminToken: ""                  # AICOIN_PROXY_ADMIN_TOKEN (empty = admin page/API disabled)
+iap:
+  acceptSandboxPurchases: false   # AICOIN_PROXY_IAP_ACCEPT_SANDBOX — production MUST leave this false; see "IAP" below
 providers:
   openai:
     baseUrl: https://api.openai.com          # AICOIN_PROXY_OPENAI_BASEURL
@@ -426,6 +428,17 @@ just the Java-side shape:
 - `setIapPackages(packagesJson, callback)` — a plain Redis `SET` (already
   atomic for a single unconditional write, no Lua script needed). Backs
   `POST /admin/iap/packages`.
+- `getOffer(callback)` / `setOffer(offerJson, callback)` — Redis `GET`/`SET` on
+  `aicoin:offer`. Unlike the packages list there is **no config seed**: an unset
+  key is a real state ("nothing is on sale"), reported as a present-but-empty
+  value rather than conjured from config. Back `GET /iap/offer` and
+  `POST /admin/iap/offer`.
+- `putOfferPin(offerId, pinJson, ttlSeconds, callback)` / `getOfferPin(offerId, callback)`
+  — `SETEX`/`GET` on `aicoin:offer-pin:{offerId}`. The TTL is set atomically with
+  the write, never after, since expiry is the only thing bounding how long a pin
+  can be hoarded. An expired or never-issued id reads back present-but-empty, not
+  as a failure — redemption falls back to the live offer for it, the same path a
+  client too old to pin takes. Back `POST /iap/offer/check`.
 - `redeemIap(transactionId, address, productId, coins, callback)` — runs a
   Lua `EVAL` script that `SETNX`s `aicoin:iap-redeemed:{transactionId}`; if
   it was already set (a StoreKit retry), returns the current balance
@@ -525,12 +538,75 @@ The free faucet remains for onboarding; in-app purchase is the actual
 monetization path — see CONTRACT.md's "AICoin pricing" and "IAP: buying
 aicoin with real money" sections for the full design/pricing rationale.
 
+There are two layers here, and they answer different questions. The
+**catalog** (`/iap/packages`) says which products exist and what each costs.
+The **current offer** (`/iap/offer`) says what is actually for sale right
+now — one coin amount, identical in every app. Under the offer model the four
+products stop being coin tiers and become four *fixed price points*: the
+offer picks whichever one covers what its coins are worth, and a purchase
+credits the offer's amount, not the `coins` on that product's catalog entry.
+
+### The catalog
+
 - `GET /iap/packages` → `{"packages":[{"product_id":"...","coins":N,"usd_price_hint":N}, ...]}`
   — public, `Access-Control-Allow-Origin: *`, same posture as `GET /price`.
   Backed by the single Redis string `aicoin:iap-packages`, lazily seeded from
-  config's `iap.packages` (12 entries: 4 coin tiers × the 3 client apps' real
+  config's `iap.packages` (12 entries: 4 price points × the 3 client apps' real
   bundle ids) the first time this is ever called against a fresh instance.
-- `POST /wallet/api/redeem-iap` — body `{"to_user_id":"<address>","signed_transaction":"<StoreKit2 Transaction.jwsRepresentation>"}`.
+- `POST /admin/iap/packages` — `X-Admin-Token` gated, atomically overwrites the
+  list. Admin CLIs: `scripts/set-coin-packages.sh <packages.json>` (replaces the
+  whole array) and `scripts/set-coin-amounts.sh --small 100 --xl 6000` (rewrites
+  only the tiers you name, across every app, with a before/after table and
+  `--dry-run`).
+
+### The current offer
+
+- `GET /iap/offer` → `{"offer":{"coins":350,"tier":"large","usd_price":9.99,"product_ids":[...],"set_at":<ms>}}`
+  — public + CORS. Backed by the Redis string `aicoin:offer`. **Not** seeded
+  from config: an unset key means "nothing is on sale", served as
+  `{"offer":null}` and rendered by clients as an empty paywall rather than a
+  failed fetch. `product_ids` carries one product per app; a client picks its
+  own by prefix.
+- `POST /admin/iap/offer` — `X-Admin-Token` gated. `{"coins":N}` prices `N`
+  against the live `/price` signal; `{"coins":N,"usd_price":P}` puts it on a
+  named price point; `{"coins":0}` closes sales. Admin CLI:
+  **`scripts/set-coin-offer.sh 350`** (also `--price`, `--close`, `--show`,
+  `--url`). This is the one place "how much aicoin all users can buy right
+  now" is set.
+- `POST /iap/offer/check` → the same offer plus `{"offer_id":"o_<32 hex>","expires_in":900}`,
+  recorded at `aicoin:offer-pin:{offer_id}` with a matching Redis TTL. Apps call
+  this immediately before opening Apple's purchase sheet; the pin is what makes
+  redemption credit **what the user was shown**, even if the offer changed
+  mid-purchase. Public and unauthenticated like the rest of the buy path — a pin
+  only promises coins in exchange for a genuine Apple-signed purchase, so
+  minting one grants nothing, and the TTL bounds hoarding.
+
+**Pricing rounds up, not to nearest** (`CoinOffer`). The target is the same
+formula the repricer uses (`coins × price_usd × 1.5 / 0.7`), and the offer takes
+the *cheapest price point that covers it*: 350 coins at a $0.0086 signal
+raw-price to $6.45 and therefore sell at **$9.99**, not at the nearer $2.99,
+which would sell them for under half their computed worth. This deliberately
+differs from `AppStorePriceRounding.roundToNearestTier`, which rounds against
+its own denser ladder and serves the per-product repricer this model
+supersedes.
+
+**Two `409` refusals, both deliberate.** (1) *Thin signal*: `price_usd` averages
+recorded paid calls, so a fresh deploy reports `0.0` and every amount would
+collapse onto the cheapest point — selling 5,000 coins for $0.99. Below
+`price_usd > 0` **and** `weighted_total >= 50` the server refuses and asks for an
+explicit `usd_price`. (2) *Above the ceiling*: if no price point covers the
+amount, that is an error rather than a silent clamp to the top tier, which would
+sell the excess for nothing.
+
+**The price points must stay fixed while an offer is live.** The mapping is only
+sound while the catalog's prices match what App Store Connect actually charges —
+a repriced `.large` at $6.99 would silently discount every offer resolving to it.
+`scripts/adjust-iap-prices.sh` therefore checks `GET /iap/offer` first and
+degrades to report-only whenever an offer exists, whatever was asked for.
+### Redeeming
+
+- `POST /wallet/api/redeem-iap` — body `{"to_user_id":"<address>","signed_transaction":"<StoreKit2 Transaction.jwsRepresentation>"}`,
+  plus an optional `"offer_id"` from `/iap/offer/check`.
   No live wallet signature required (crediting a wallet can't harm anyone,
   same reasoning as the free faucet) — the entire security burden is on
   `AppleJwsVerifier` proving the *purchase* is real:
@@ -547,16 +623,44 @@ aicoin with real money" sections for the full design/pricing rationale.
      signature to ASN.1 DER (`AppleJwsVerifier.joseToDer`, since Apple's JWS
      format and Java's `Signature.verify` disagree on encoding) and verifies
      it against the leaf certificate's public key.
-  2. Extracts `bundleId`/`productId`/`transactionId`/`quantity` from the
-     verified payload. `400` if `bundleId` isn't one of the three known apps
-     (`IapPackages.isKnownBundleId`) or `productId` isn't in the current
-     `aicoin:iap-packages` list (`IapPackages.findByProductId`).
-  3. Idempotency + credit run as one Lua script (`AicoinLedger.redeemIap`) —
+  2. Extracts `bundleId`/`productId`/`transactionId`/`quantity`/`environment`/
+     `revocationDate` from the verified payload. `400` if `bundleId` isn't one
+     of the three known apps (`IapPackages.isKnownBundleId`), or if nothing
+     sells `productId` (step 3).
+     - **`environment` must be `Production`.** A signature proves a transaction
+       is genuine, *not* that anyone paid for it: Apple signs Sandbox
+       transactions with the same certificate chain, so they verify
+       identically, and a free sandbox tester account can mint them without
+       limit. This field is the only thing separating the two, and therefore
+       the only barrier between a tester account and unbounded free coins.
+       Rejected unless `iap.acceptSandboxPurchases` is on — non-production
+       deployments only. An absent `environment` is treated as `Production`;
+       defaulting the other way would reject every real purchase if Apple ever
+       renamed the field. `AppleJwsVerifierTest` deliberately asserts that a
+       sandbox JWS *is* cryptographically genuine, since that is exactly why
+       the check has to exist.
+     - **A `revocationDate` means refunded/revoked** and is rejected: the money
+       went back to the buyer, so the coins must not go out. This only catches a
+       refund landing *before* redemption — coins already credited are not
+       clawed back, which would need App Store Server Notifications V2 (not
+       implemented).
+  3. Decides what one unit is worth, in this order, each step a defensible
+     amount so a failed lookup falls through rather than refusing to credit a
+     genuine purchase — only the last step's failure is fatal:
+     **(a)** the pin, when `offer_id` names a live one whose `product_ids`
+     include this product — the exact amount the user was shown;
+     **(b)** the live offer, when it sells this product — the path for a client
+     too old to send an `offer_id`, or one whose pin expired during a slow
+     StoreKit redelivery; **(c)** the catalog's static `coins`, reached only
+     when the purchased product isn't the one on offer at all (a paywall cached
+     from before an offer change). A product matching none of the three is
+     `400 unknown productId`.
+  4. Idempotency + credit run as one Lua script (`AicoinLedger.redeemIap`) —
      see "The ledger" above. A retried/already-redeemed `transactionId` is a
      safe `200` no-op with `"credited":0` and the current (unchanged)
      balance, never an error, since StoreKit retries delivery of unfinished
      transactions.
-  4. Response: `200 {"credited":N,"balance":N}`.
+  5. Response: `200 {"credited":N,"balance":N}`.
 
 ## Tests
 
@@ -600,6 +704,12 @@ JUnit5 pure-function tests, with no network/Redis dependency required:
   → JSON, `Entry` list → JSON), `POST /admin/iap/packages` body validation
   (non-empty `product_id`, positive integer `coins`, optional
   `usd_price_hint`), by-`product_id` lookup, and the three known bundle ids.
+- `CoinOfferTest` — the pure offer math: collapsing the 12-entry catalog into
+  its four price points (including a tier whose apps disagree on price taking
+  the highest, since under-pricing is the failure that costs money), the
+  round-**up** resolution and the worked $6.45 → $9.99 example, refusing an
+  amount no point covers instead of clamping to the top tier, and the JSON
+  round-trip `aicoin:offer` and the pins are stored as.
 - `AppleJwsVerifierTest` — a **genuinely-generated** test certificate chain
   (a hand-rolled minimal X.509 v1 certificate builder using only the JDK's
   own `Signature`/`KeyPairGenerator`/`CertificateFactory` — no bouncycastle
@@ -608,7 +718,11 @@ JUnit5 pure-function tests, with no network/Redis dependency required:
   `bundleId`/`productId`/`transactionId`/`quantity`; a tampered payload or
   signature, an expired or not-yet-valid certificate, a chain not rooted in
   the given trusted root, an unsupported `alg`, and various malformed JWS
-  shapes are all rejected with a specific reason. Also confirms the bundled
+  shapes are all rejected with a specific reason. It also pins the security
+  property the sandbox check rests on: a `"environment":"Sandbox"` transaction
+  verifies *just as genuinely* as a production one, so only the field
+  distinguishes them; an absent `environment` reads as `Production`; and a
+  payload carrying `revocationDate` is flagged revoked. Also confirms the bundled
   `apple-root-ca-g3.der` resource loads and is genuinely Apple's real Root
   CA - G3 (asserts its subject DN). The real Apple root's authenticity is
   documented, not re-tested here — see `AppleJwsVerifier`'s class javadoc

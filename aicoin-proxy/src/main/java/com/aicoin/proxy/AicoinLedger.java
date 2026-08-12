@@ -60,6 +60,7 @@ final class AicoinLedger implements AutoCloseable {
     private static final String FREE_COINS_REMAINING_KEY = "aicoin:" + TAG + ":free-coins-remaining";
     private static final String KNOWN_WALLETS_KEY = "aicoin:" + TAG + ":known-wallets";
     private static final String IAP_PACKAGES_KEY = "aicoin:" + TAG + ":iap-packages";
+    private static final String OFFER_KEY = "aicoin:" + TAG + ":offer";
     /** Per-wallet transaction logs are capped at this many most-recent entries (draft/prototype: no pagination, no archival). */
     private static final int TX_LOG_CAP = 200;
 
@@ -604,6 +605,71 @@ final class AicoinLedger implements AutoCloseable {
     }
 
     /**
+     * The raw JSON object currently stored at {@code aicoin:offer} — the single coin amount every
+     * app is selling right now, per CONTRACT.md's "The current offer" section. Unlike {@link
+     * #getIapPackages} there is no config seed: an unset offer is a real, meaningful state (the
+     * operator hasn't opened sales yet), reported as a present-but-empty {@link Optional} value
+     * rather than conjured from config. {@link Optional#empty()} means the lookup itself failed.
+     */
+    void getOffer(Consumer<Optional<String>> onResult) {
+        commands.get(OFFER_KEY).whenComplete((value, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger offer lookup failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            onResult.accept(Optional.of(value != null ? value : ""));
+        });
+    }
+
+    /** Atomically overwrites {@code aicoin:offer} — a single unconditional {@code SET}, same reasoning as {@link #setIapPackages}. */
+    void setOffer(String offerJson, Consumer<Boolean> onResult) {
+        commands.set(OFFER_KEY, offerJson).whenComplete((reply, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger offer update failed", err);
+                onResult.accept(false);
+                return;
+            }
+            onResult.accept(true);
+        });
+    }
+
+    /**
+     * Records a pinned offer under {@code offerId} with a {@code ttlSeconds} expiry — the promise
+     * that {@code POST /iap/offer/check} makes to the app about to open Apple's purchase sheet,
+     * honoured later by {@code POST /wallet/api/redeem-iap} even if the live offer has changed in
+     * between (CONTRACT.md, "Pinning an offer across the purchase"). Redis expiry is what bounds
+     * how long a pin can be hoarded, so the TTL is set atomically with the write, never after.
+     */
+    void putOfferPin(String offerId, String pinJson, long ttlSeconds, Consumer<Boolean> onResult) {
+        commands.setex(offerPinKey(offerId), ttlSeconds, pinJson).whenComplete((reply, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger offer-pin write failed", err);
+                onResult.accept(false);
+                return;
+            }
+            onResult.accept(true);
+        });
+    }
+
+    /**
+     * Looks up a pinned offer. An expired or never-issued {@code offerId} is a present-but-empty
+     * value, not a failure — redemption falls back to the live offer for it, which is the same
+     * path a client too old to send an {@code offer_id} takes. {@link Optional#empty()} means the
+     * lookup itself failed.
+     */
+    void getOfferPin(String offerId, Consumer<Optional<String>> onResult) {
+        commands.get(offerPinKey(offerId)).whenComplete((value, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger offer-pin lookup failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            onResult.accept(Optional.of(value != null ? value : ""));
+        });
+    }
+
+    /**
      * Credits {@code coins} aicoin to {@code address} for a verified StoreKit2 purchase, exactly
      * once per {@code transactionId} — see {@link #REDEEM_IAP_SCRIPT}. A replay of an
      * already-redeemed {@code transactionId} is a no-op, reported via {@link RedeemResult#isFreshCredit()}
@@ -650,6 +716,10 @@ final class AicoinLedger implements AutoCloseable {
 
     private static String iapRedeemedKey(String transactionId) {
         return "aicoin:" + TAG + ":iap-redeemed:" + transactionId;
+    }
+
+    private static String offerPinKey(String offerId) {
+        return "aicoin:" + TAG + ":offer-pin:" + offerId;
     }
 
     private static double parseCost(String member) {

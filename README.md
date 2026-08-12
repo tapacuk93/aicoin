@@ -66,30 +66,92 @@ matching step 1's defaults, so no extra config is needed for a local setup.
 
 ## Using it
 
-**Make an AI call through the proxy.** Same path as the real provider,
-`X-AI` picks the upstream, `X-Api-Key` is your aicoin wallet id (any
-string — it's created implicitly the first time you use it):
+**Make an AI call through the proxy.** Same path as the real provider, `X-AI`
+picks the upstream, and `X-Api-Key` carries an **API token** — open
+`http://localhost:8080/wallet` in a browser, create a wallet, and click
+"Issue API token" (default 7 days):
 
 ```
 curl http://localhost:8080/v1/chat/completions \
   -H "X-AI: openai" \
-  -H "X-Api-Key: alice" \
+  -H "X-Api-Key: <token from the wallet page>" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-The proxy checks `alice`'s balance against the ledger, forwards the request
-to OpenAI using the proxy's *own* configured key, relays the response back
-to you unchanged, and — in the background — records the call's cost into the
-price history. `X-AI` also accepts `anthropic`, `google`, `mistral`,
-`cohere`, `elevenlabs`, `stability`.
+A token is `base64url(payload).base64url(signature)`, signed once by the
+wallet's Ed25519 private key and self-verifying (the address embedded in it
+*is* the verification key). A bare wallet address is **not** accepted on this
+path and returns `401 {"error":"invalid API token"}` — signing is what proves
+the call may spend that wallet's coins. Tokens can only spend; claiming free
+coins and transferring require the private key itself, so a leaked token
+can't drain a wallet. Revoke every outstanding one from the wallet page.
 
-**Check the current price of 1 aicoin** (reflects real recent AI spend —
-see `CONTRACT.md`'s "Ledger (Redis)" section for the exact formula):
+The proxy verifies the token, checks that wallet's balance against the
+ledger, forwards the request to OpenAI using the proxy's *own* configured
+key, relays the response back to you unchanged, and — in the background —
+records the call's cost into the price history. `X-AI` also accepts
+`anthropic`, `google`, `mistral`, `cohere`, `elevenlabs`, `stability`.
+
+**Check the current price of 1 aicoin:**
 
 ```
 curl http://localhost:8080/price
+{"price_usd":0.0086,"total_spend_usd":0.52,"weighted_total":60.0,"half_life_days":110.0}
 ```
+
+### How that price is calculated
+
+`price_usd` is **what a call has actually been costing lately** — a
+recency-weighted average over every paid call this proxy has ever forwarded.
+Nothing about it is set by hand. (One coin in the wallet is always enough to
+make one call, which is where reading it as "the price of a coin" comes from;
+a long or expensive call is metered at more than one coin, so the two are the
+same figure only for a typical call.)
+
+Every successful billed call records one event carrying its real dollar
+cost, computed from the provider's own reported usage at that provider and
+model's configured rates (input and output priced separately, cache reads at
+0.1x and writes at 1.25x of the input rate; providers that report no token
+counts fall back to a flat per-call figure). The price is then the weighted
+mean of those costs:
+
+```
+price_usd = Σ(weight(age_i) × cost_usd_i) / Σ(weight(age_i))
+
+weight(age) = 2 ^ (-age_days / 110)
+```
+
+So a call recorded today counts fully, one from a month ago counts about
+0.83, one from a year ago about 0.10. With no events recorded yet the price
+is `0`.
+
+**Why the 110-day half-life:** AI inference pricing has fallen roughly 10x
+per year across the major providers, and a 10x annual decline is exactly a
+half-life of `365.25 × ln2/ln10 ≈ 110` days. An old cost figure shouldn't
+count as much toward today's price precisely because AI got that much
+cheaper since it was recorded. It's a continuous curve — no calendar
+buckets, so the price never jumps at a day or month boundary. Tune it with
+`aicoin.decayHalflifeDays`.
+
+The other two fields are there to check the arithmetic: `total_spend_usd` is
+the plain unweighted all-time sum, and `weighted_total` is the formula's
+denominator (`Σweight`), which also doubles as "how much real signal is
+behind this number" — the offer pricing refuses to run below 50.
+
+**This price is observational, not a tariff.** It doesn't decide what a call
+charges. That uses a separate fixed rate, `pricing.coinValueUsd` (default
+`$0.009`, the per-coin price of the largest coin pack — the cheapest a coin
+is ever sold for, so metering against it never under-charges a bulk buyer). A
+call costs `ceil(cost_usd / coinValueUsd)` coins, never less than 1 and never
+more than 100. Where `price_usd` *does* have teeth is deciding what to sell:
+it converts an offer's coin amount into the USD price point users are charged
+(see "See what's on sale" below).
+
+`GET /price/history?points=N` replays the same formula at N past timestamps
+to show how the number got where it is. Full derivation and the weight table
+are under "Price (final formula...)" in `CONTRACT.md`'s "Ledger (Redis)"
+section.
 
 **Manage a wallet in the browser** — check balance, claim your hourly free
 coin, and send coins to another wallet, all from one page:
@@ -109,11 +171,118 @@ curl -X POST http://localhost:8080/wallet/api/transfer \
   -d '{"from_user_id":"alice","to_user_id":"bob","amount":0.4}'
 ```
 
+**See what's on sale**, and set it. One number — the coins every app is
+selling right now — which each app displays, re-checks immediately before
+charging, and buys the matching fixed-price product for:
+
+```
+curl http://localhost:8080/iap/offer
+
+AICOIN_PROXY_ADMIN_TOKEN=<token> \
+  aicoin-proxy/scripts/set-coin-offer.sh 350
+```
+
+The server prices those coins off the live `/price` signal and picks the
+cheapest of the four fixed price points that covers them, rounding up. On a
+fresh instance there's no price signal yet, so it refuses to guess — name a
+point yourself with `--price 9.99`. Also `--show`, `--close`, and `--url`;
+see `aicoin-proxy/README.md`'s IAP section for the full model.
+
 **Check provider health** (rate-limit/budget status per AI provider):
 
 ```
 curl http://localhost:8080/health
 ```
+
+## Integrating aicoin into your own app
+
+There are two levels of integration, and the first is useful on its own —
+you do not have to sell anything to use aicoin.
+
+### Level 1 — wallet only (no purchases, no App Store setup)
+
+Your app gets a wallet, routes its AI calls through the proxy, and users fund
+it from the free faucet or a transfer from another wallet. Nothing is sold,
+so there is no App Store Connect work, no review risk, and no server-side
+registration.
+
+What you get: **no provider API key in your app.** The proxy holds the paid
+OpenAI/Anthropic/Google/Mistral/Cohere/ElevenLabs/Stability keys and injects
+them server-side, so your binary ships with no secret to extract, and you can
+add or switch providers without a client release.
+
+On iOS/macOS, `AICoinKit` (in [`mobile-purchase/ios/`](./mobile-purchase/ios/))
+is a local Swift package that does the whole thing:
+
+```swift
+.package(path: "../aicoin/mobile-purchase/ios")
+
+let identity = try WalletKeychainStore().loadOrCreateIdentity()  // Ed25519, stays in the Keychain
+let tokens = AICoinTokenCache(identity: identity)                // signs + auto-renews the token
+let transport = AICoinRouter(underlying: URLSession.shared,
+                             tokenProvider: { tokens.currentToken() })
+// point your existing provider SDK/URLSession calls at `transport` and you're done
+```
+
+`AICoinRouter` conforms to `HTTPTransport`, so it wraps a `URLSession`: it
+rewrites requests aimed at a known AI host onto the proxy and attaches the
+token, and passes everything else straight through untouched.
+
+Drop in `CoinBalanceBadge` for a balance display, `SendReceiveView` for
+transfers, and catch `AICoinError.insufficientBalance` (the proxy's `402`) to
+prompt the user. There is deliberately no bring-your-own-key fallback.
+
+**Any other platform** works too — none of this is iOS-specific on the wire.
+Generate an Ed25519 keypair, issue a token by signing the payload described
+in the "Using it" section above, and send it as `X-Api-Key`. The wallet
+endpoints (`/wallet/api/balance/{address}`, `claim`, `transfer`) are plain
+JSON over HTTP. `CONTRACT.md` fixes the exact bytes to sign; the Swift
+`WalletSignerTests` are the readable spec for it, and
+`mobile-purchase/README.md` describes what an Android port would mirror.
+
+### Level 2 — wallet + in-app purchase (sell coins)
+
+Everything above, plus users buying coins with real money. Add
+`BuyAICoinSheet` and `IAPManager` and the client side is essentially done —
+what's on sale is server-driven, so changing it never needs an app release:
+
+```swift
+await iapManager.loadOffer()                       // the one amount on sale
+try await iapManager.purchaseCurrentOffer(         // re-checks, pins, buys, redeems
+    address: identity.address, confirmedCoins: offer.coins)
+```
+
+This level is **not** self-service today, and that is a deliberate property
+of a shared ledger rather than an oversight — every coin sold has to be
+backed by a purchase this server can verify. Adding an app requires three
+server-side changes:
+
+1. Its real bundle ID added to `KNOWN_BUNDLE_IDS` in `IapPackages.java`.
+   Redemption rejects any bundle ID not on that allowlist, however valid the
+   Apple signature.
+2. Its products added to `iap.packages` (config or the live catalog via
+   `scripts/set-coin-packages.sh`), using the
+   `<bundle-id>.aicoin.{small,medium,large,xl}` scheme. Note Apple forbids
+   hyphens in product IDs, so a hyphenated bundle ID drops it there and only
+   there.
+3. Those same product IDs registered as consumables in your App Store Connect
+   account, at the **fixed** prices the catalog lists — the offer model maps
+   coin amounts onto those price points, so a product repriced behind the
+   server's back sells coins at the wrong price.
+
+If you'd rather not coordinate that, run your own instance: it's one Java
+process plus Redis (`docker compose up --build`), and then the allowlist and
+catalog are simply yours to edit.
+
+### Which to pick
+
+| | Wallet only | Wallet + IAP |
+| --- | --- | --- |
+| Provider keys in your app | none | none |
+| App Store Connect setup | none | 4 consumables per app |
+| Changes to this server | none | bundle ID + catalog |
+| How users get coins | faucet, transfers | that, plus buying |
+| Good for | tools, scripts, internal apps, trying it out | shipping consumer apps |
 
 ## Configure real provider keys
 
@@ -139,7 +308,7 @@ faucet, transfer.
 ## Repo layout
 
 - [`CONTRACT.md`](./CONTRACT.md) — the authoritative spec this project is built against.
-- [`aicoin-proxy/`](./aicoin-proxy/) — the Java/Netty proxy and the Redis-backed coin ledger. Full flag/API/config reference in its own README. Includes `scripts/set-coin-packages.sh` (admin CLI to change IAP coin packages) and `scripts/adjust-iap-prices.sh` (hourly cron job that re-derives IAP package prices from the live `/price` signal).
+- [`aicoin-proxy/`](./aicoin-proxy/) — the Java/Netty proxy and the Redis-backed coin ledger. Full flag/API/config reference in its own README. Admin CLIs in `scripts/`: `set-coin-offer.sh` (**the** one that changes what users can buy right now), `set-coin-amounts.sh` and `set-coin-packages.sh` (the underlying product catalog), and `adjust-iap-prices.sh` (hourly cron job that re-derives product prices from the live `/price` signal — report-only while an offer is live, since the offer model needs those price points to stay fixed).
 - [`mobile-purchase/`](./mobile-purchase/) — client-side purchase → wallet-credit integration, one directory per platform: [`ios/`](./mobile-purchase/ios/) is the `AICoinKit` Swift package every app here builds on (previously `ios-iap-redeem/`); `android/` is where a Play Billing counterpart would go.
 - [`e2e/run.sh`](./e2e/run.sh) — the end-to-end test.
 - [`site/`](./site/) — the static landing page deployed at aicoin.oeaio.com. The Caddy config that serves it lives on the host, not in this repo; DNS is a Route 53 zone for `oeaio.com` whose `proxy.aicoin`, `aicoin`, `apps`, `www`, and apex A records all point at the same server. `proxy.aicoin` is the proxy's canonical host; `apps` is the previous one, kept resolving so already-shipped app builds keep working.

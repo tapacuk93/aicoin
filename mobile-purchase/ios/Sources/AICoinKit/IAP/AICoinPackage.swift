@@ -35,8 +35,15 @@ public extension Array where Element == AICoinPackage {
     /// only ever needs the subset whose `product_id` starts with its own bundle ID." An empty
     /// prefix returns every package unfiltered (defensive default — better to show every tier than
     /// silently show none if the bundle ID couldn't be determined).
+    ///
+    /// The prefix is run through `AICoinProductID.prefix(forBundleID:)` first, because a bundle ID
+    /// is not always a legal product-id prefix: Learn It's `com.tarasmaslov.learn-it` has to name
+    /// its products `com.tarasmaslov.learnit.*` (Apple forbids the hyphen), so matching the raw
+    /// bundle ID against the real server catalog would find nothing and leave that app's paywall
+    /// permanently empty.
     func filtered(byBundleIDPrefix prefix: String) -> [AICoinPackage] {
-        guard !prefix.isEmpty else { return self }
-        return filter { $0.productId.hasPrefix(prefix) }
+        let normalized = AICoinProductID.prefix(forBundleID: prefix)
+        guard !normalized.isEmpty else { return self }
+        return filter { $0.productId.hasPrefix(normalized) }
     }
 }

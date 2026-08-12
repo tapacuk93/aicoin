@@ -35,6 +35,32 @@ public struct WalletClient: Sendable {
         return try JSONDecoder().decode(AICoinPackagesResponse.self, from: data).packages
     }
 
+    /// `GET /iap/offer` — the single coin amount every app is selling right now, or nil when the
+    /// operator has closed sales. This is what a paywall displays; see `checkOffer()` for the
+    /// re-check that must happen immediately before charging.
+    public func currentOffer() async throws -> AICoinOffer? {
+        let request = URLRequest(url: Self.endpointURL(baseURL, "/iap/offer"))
+        let (data, response) = try await transport.data(for: request)
+        try Self.requireOK(response, data)
+        return try JSONDecoder().decode(AICoinOfferResponse.self, from: data).offer
+    }
+
+    /// `POST /iap/offer/check` — re-reads the offer and pins it, returning the `offerID` to hand
+    /// back to `redeemIAP`. Call this immediately before opening Apple's purchase sheet: it is
+    /// what guarantees the user is charged for, and credited with, the amount they were shown,
+    /// even if the operator changes the offer mid-purchase. Returns nil if sales have closed.
+    public func checkOffer() async throws -> AICoinPinnedOffer? {
+        var request = URLRequest(url: Self.endpointURL(baseURL, "/iap/offer/check"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("{}".utf8)
+        let (data, response) = try await transport.data(for: request)
+        try Self.requireOK(response, data)
+        let decoded = try JSONDecoder().decode(AICoinOfferCheckResponse.self, from: data)
+        guard let offer = decoded.offer, let offerID = decoded.offerID else { return nil }
+        return AICoinPinnedOffer(offer: offer, offerID: offerID, expiresIn: decoded.expiresIn ?? 0)
+    }
+
     /// `GET /price` — informational market-rate signal only; never changes the fixed
     /// 1-aicoin-per-call spend rate.
     public func price() async throws -> PriceResult {
@@ -102,8 +128,13 @@ public struct WalletClient: Sendable {
     /// `POST /wallet/api/redeem-iap` — unsigned (crediting a wallet can't harm anyone; the
     /// security burden is on Apple's JWS, verified server-side). Idempotent server-side on
     /// `transactionId`, so it's safe to call again if a previous attempt's response was lost.
-    public func redeemIAP(to address: String, signedTransaction: String) async throws -> RedeemResult {
-        let body = try JSONEncoder().encode(RedeemIAPRequestBody(toUserId: address, signedTransaction: signedTransaction))
+    /// - Parameter offerID: the pin from `checkOffer()`, when the purchase was started against a
+    ///   checked offer. Passing it is what makes the server credit the amount the user was shown
+    ///   rather than whatever the offer says by the time redemption lands; omitting it (an older
+    ///   client, or a redelivery whose pin has since expired) falls back to the live offer.
+    public func redeemIAP(to address: String, signedTransaction: String, offerID: String? = nil) async throws -> RedeemResult {
+        let body = try JSONEncoder().encode(
+            RedeemIAPRequestBody(toUserId: address, signedTransaction: signedTransaction, offerId: offerID))
         var request = URLRequest(url: Self.endpointURL(baseURL, "/wallet/api/redeem-iap"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -117,7 +148,7 @@ public struct WalletClient: Sendable {
     // MARK: - Plumbing
 
     /// Joins `path` (which must start with `/`) onto `baseURL` (which is assumed to carry no path
-    /// of its own, e.g. `https://apps.oeaio.com`) via `URLComponents` rather than
+    /// of its own, e.g. `https://proxy.aicoin.oeaio.com`) via `URLComponents` rather than
     /// `appendingPathComponent`, so the resulting `url.path` is exactly `path` — this matters
     /// because `WalletSigner`'s canonical message is signed over that exact path string.
     static func endpointURL(_ baseURL: URL, _ path: String) -> URL {

@@ -89,7 +89,7 @@ final class WalletSignerTests: XCTestCase {
     // MARK: - applyLiveSignature(to:identity:) — the URLRequest integration point
 
     func testApplyLiveSignatureSetsExactlyTheThreeDocumentedHeaders() throws {
-        var request = URLRequest(url: URL(string: "https://apps.oeaio.com/wallet/api/transfer?ignored=query")!)
+        var request = URLRequest(url: URL(string: "https://proxy.aicoin.oeaio.com/wallet/api/transfer?ignored=query")!)
         request.httpMethod = "POST"
         request.httpBody = Data(#"{"to_user_id":"x","amount":5}"#.utf8)
         let identity = WalletIdentity.generate()

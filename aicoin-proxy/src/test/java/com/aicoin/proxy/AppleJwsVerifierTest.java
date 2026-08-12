@@ -251,6 +251,85 @@ class AppleJwsVerifierTest {
         assertEquals(1, result.getQuantity());
     }
 
+    /**
+     * The security property the whole sandbox check rests on: a Sandbox transaction carries a
+     * signature just as genuine as a Production one, so {@code isValid()} cannot distinguish them
+     * and the {@code environment} field is the only thing that can. If this ever starts failing
+     * because sandbox JWSes stop verifying, the check downstream is redundant — but until then it
+     * is the sole barrier between a free tester account and unlimited coins.
+     */
+    @Test
+    void aSandboxTransactionVerifiesJustAsGenuinelyAndIsFlaggedByEnvironment() throws Exception {
+        TestChain chain = buildGenuineTestChain();
+        String payload = "{\"bundleId\":\"com.tarasmaslov.infiniteairadio\","
+                + "\"productId\":\"com.tarasmaslov.infiniteairadio.aicoin.xl\","
+                + "\"transactionId\":\"tx-sandbox\",\"quantity\":1,\"environment\":\"Sandbox\"}";
+        String jws = buildJws(chain, payload);
+
+        AppleJwsVerifier.VerifyResult result = AppleJwsVerifier.verify(jws, System.currentTimeMillis(), chain.root);
+
+        assertTrue(result.isValid(), "a sandbox JWS is cryptographically genuine — that is the whole problem");
+        assertTrue(result.isSandbox());
+        assertEquals("Sandbox", result.getEnvironment());
+    }
+
+    @Test
+    void aProductionTransactionIsNotFlaggedAsSandbox() throws Exception {
+        TestChain chain = buildGenuineTestChain();
+        String payload = "{\"bundleId\":\"com.tarasmaslov.infiniteairadio\","
+                + "\"productId\":\"com.tarasmaslov.infiniteairadio.aicoin.small\","
+                + "\"transactionId\":\"tx-prod\",\"environment\":\"Production\"}";
+
+        AppleJwsVerifier.VerifyResult result =
+                AppleJwsVerifier.verify(buildJws(chain, payload), System.currentTimeMillis(), chain.root);
+
+        assertTrue(result.isValid(), result.getFailureReason());
+        assertFalse(result.isSandbox());
+    }
+
+    /**
+     * Defaulting the other way would be catastrophic in the opposite direction: if Apple ever
+     * omitted or renamed the field, treating "unknown" as Sandbox would reject every real
+     * purchase. Absent means Production.
+     */
+    @Test
+    void anAbsentEnvironmentIsTreatedAsProduction() throws Exception {
+        TestChain chain = buildGenuineTestChain();
+        String payload = "{\"bundleId\":\"com.tarasmaslov.infiniteairadio\","
+                + "\"productId\":\"com.tarasmaslov.infiniteairadio.aicoin.small\",\"transactionId\":\"tx-2\"}";
+
+        AppleJwsVerifier.VerifyResult result =
+                AppleJwsVerifier.verify(buildJws(chain, payload), System.currentTimeMillis(), chain.root);
+
+        assertTrue(result.isValid(), result.getFailureReason());
+        assertFalse(result.isSandbox());
+        assertEquals("Production", result.getEnvironment());
+    }
+
+    @Test
+    void aRefundedTransactionIsFlaggedRevoked() throws Exception {
+        TestChain chain = buildGenuineTestChain();
+        String payload = "{\"bundleId\":\"com.tarasmaslov.infiniteairadio\","
+                + "\"productId\":\"com.tarasmaslov.infiniteairadio.aicoin.large\","
+                + "\"transactionId\":\"tx-refunded\",\"revocationDate\":1700000000000}";
+
+        AppleJwsVerifier.VerifyResult result =
+                AppleJwsVerifier.verify(buildJws(chain, payload), System.currentTimeMillis(), chain.root);
+
+        assertTrue(result.isValid(), "a refunded purchase is still a genuine signature");
+        assertTrue(result.isRevoked(), "revocationDate present means the money went back");
+    }
+
+    @Test
+    void aNormalTransactionIsNotFlaggedRevoked() throws Exception {
+        TestChain chain = buildGenuineTestChain();
+
+        AppleJwsVerifier.VerifyResult result =
+                AppleJwsVerifier.verify(buildJws(chain, SAMPLE_PAYLOAD), System.currentTimeMillis(), chain.root);
+
+        assertFalse(result.isRevoked());
+    }
+
     @Test
     void quantityDefaultsToOneWhenAbsent() throws Exception {
         TestChain chain = buildGenuineTestChain();

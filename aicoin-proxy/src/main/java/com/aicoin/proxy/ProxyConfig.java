@@ -46,13 +46,15 @@ public final class ProxyConfig {
     private final double defaultCostUsdPerCall;
     private final int healthWindowSize;
     private final List<IapPackageConfig> iapPackages;
+    private final boolean acceptSandboxPurchases;
 
     private ProxyConfig(int port, String redisHost, int redisPort, String redisUsername, String redisPassword, boolean redisSsl,
                          double decayHalflifeDays, int freeClaimCooldownSeconds, int signatureSkewSeconds,
                          int freeCoinsPoolSize, String adminToken, Map<String, ProviderConfig> providers,
                          double costPerTokenUsd, double defaultCostUsdPerCall,
                          int healthWindowSize, List<IapPackageConfig> iapPackages,
-                         ModelPricing modelPricing, double coinValueUsd, boolean meteredBilling) {
+                         ModelPricing modelPricing, double coinValueUsd, boolean meteredBilling,
+                         boolean acceptSandboxPurchases) {
         this.port = port;
         this.redisHost = redisHost;
         this.redisPort = redisPort;
@@ -72,6 +74,7 @@ public final class ProxyConfig {
         this.modelPricing = modelPricing;
         this.coinValueUsd = coinValueUsd;
         this.meteredBilling = meteredBilling;
+        this.acceptSandboxPurchases = acceptSandboxPurchases;
     }
 
     /**
@@ -195,6 +198,21 @@ public final class ProxyConfig {
         return iapPackages;
     }
 
+    /**
+     * @return {@code iap.acceptSandboxPurchases} (env {@code AICOIN_PROXY_IAP_ACCEPT_SANDBOX}):
+     * whether {@code POST /wallet/api/redeem-iap} honours StoreKit <b>Sandbox</b> transactions.
+     *
+     * <p>Defaults to <b>false</b>, and production must leave it there. Apple signs sandbox
+     * transactions with the same certificate chain as real ones, so they verify identically —
+     * anyone with a free sandbox tester account could otherwise mint unlimited genuine-looking
+     * purchases and credit themselves unbounded coins, which is precisely the "spend more than was
+     * actually bought" hole. Turn it on only against a non-production deployment, to test the
+     * purchase flow end to end.
+     */
+    public boolean isAcceptSandboxPurchases() {
+        return acceptSandboxPurchases;
+    }
+
     public static ProxyConfig load() {
         return load(System.getenv());
     }
@@ -269,6 +287,7 @@ public final class ProxyConfig {
         double defaultCostUsdPerCall = getDouble(yaml, "pricing.defaultCostUsdPerCall", 0.001);
         int healthWindowSize = getInt(yaml, "health.windowSize", 50);
         List<IapPackageConfig> iapPackages = getIapPackageList(yaml);
+        boolean acceptSandboxPurchases = getBoolean(yaml, "iap.acceptSandboxPurchases", false);
 
         // Env var overrides (highest precedence).
         port = envInt(env, "AICOIN_PROXY_PORT", port);
@@ -286,6 +305,7 @@ public final class ProxyConfig {
         defaultCostUsdPerCall = envDouble(env, "AICOIN_PROXY_DEFAULT_COST_USD", defaultCostUsdPerCall);
         coinValueUsd = envDouble(env, "AICOIN_PROXY_COIN_VALUE_USD", coinValueUsd);
         meteredBilling = envBool(env, "AICOIN_PROXY_METERED", meteredBilling);
+        acceptSandboxPurchases = envBool(env, "AICOIN_PROXY_IAP_ACCEPT_SANDBOX", acceptSandboxPurchases);
         healthWindowSize = envInt(env, "AICOIN_PROXY_HEALTH_WINDOW_SIZE", healthWindowSize);
 
         ModelPricing modelPricing = parseModelPricing(yaml, costPerTokenUsd, defaultCostUsdPerCall);
@@ -293,7 +313,7 @@ public final class ProxyConfig {
         return new ProxyConfig(port, redisHost, redisPort, redisUsername, redisPassword, redisSsl,
                 decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
                 costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages, modelPricing,
-                coinValueUsd, meteredBilling);
+                coinValueUsd, meteredBilling, acceptSandboxPurchases);
     }
 
     /**
