@@ -153,3 +153,16 @@ iap:
     - { productId: com.tarasmaslov.learnit.aicoin.medium,              coins: 200,  usdPriceHint: 2.99 }
     - { productId: com.tarasmaslov.learnit.aicoin.large,               coins: 1000, usdPriceHint: 9.99 }
     - { productId: com.tarasmaslov.learnit.aicoin.xl,                  coins: 5000, usdPriceHint: 44.99 }
+checkout:
+  # Card checkout (Stripe). Both secrets empty = the card path is off: POST /checkout/session
+  # answers 503 and POST /checkout/webhook rejects everything, which is the safe direction for an
+  # endpoint whose whole job is crediting wallets.
+  # Env: AICOIN_PROXY_STRIPE_SECRET_KEY
+  stripeSecretKey: ""
+  # The signing secret of the Stripe webhook endpoint (whsec_...). Unset means no delivery can ever
+  # verify — deliberately fails closed rather than treating "no secret" as "skip the check".
+  # Env: AICOIN_PROXY_STRIPE_WEBHOOK_SECRET
+  stripeWebhookSecret: ""
+  # Where Stripe returns the buyer. Env: AICOIN_PROXY_CHECKOUT_SUCCESS_URL / _CANCEL_URL
+  successUrl: "https://aicoin.oeaio.com/paid"
+  cancelUrl: "https://aicoin.oeaio.com/"
