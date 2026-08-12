@@ -10,7 +10,7 @@ settings:
     TARGETED_DEVICE_FAMILY: "1,2"
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
-    DEVELOPMENT_TEAM: ""
+    DEVELOPMENT_TEAM: "HTS38ZPRVH"
     CODE_SIGN_STYLE: Automatic
     ENABLE_PREVIEWS: YES
 
@@ -20,16 +20,34 @@ targets:
     platform: iOS
     sources:
       - path: AICoinWallet
+    # An explicit plist rather than GENERATE_INFOPLIST_FILE: the branded launch
+    # screen needs a UILaunchScreen dictionary, and no INFOPLIST_KEY_ build
+    # setting can express UIImageName/UIColorName.
+    info:
+      path: AICoinWallet/Info.plist
+      properties:
+        CFBundleDisplayName: AICoin Wallet
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+          UIImageName: LaunchLogo
+        # iPhone stays portrait-only. iPad must offer all four or the App Store
+        # rejects the build (error 90474 — iPad multitasking), and this target
+        # is universal via TARGETED_DEVICE_FAMILY "1,2".
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Ed25519 signing + HTTPS only — exempt, so uploads skip the
+        # export-compliance prompt.
+        ITSAppUsesNonExemptEncryption: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oeaio.aicoin.wallet
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_CFBundleDisplayName: AICoin Wallet
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
-        GENERATE_INFOPLIST_FILE: YES
 
   AICoinWalletTests:
     type: bundle.unit-test
