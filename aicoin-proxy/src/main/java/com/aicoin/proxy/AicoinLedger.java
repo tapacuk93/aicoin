@@ -888,31 +888,6 @@ final class AicoinLedger implements AutoCloseable {
         });
     }
 
-    /**
-     * Credits a completed card checkout, idempotent on Stripe's session id.
-     *
-     * <p>Shares {@link #REDEEM_IAP_SCRIPT}: the operation is identical — set a marker, credit the
-     * balance, log the entry, all atomically — and the two paths must not drift apart in how they
-     * guard against double-crediting. Only the marker key and the log's {@code product_id} field
-     * differ, the latter carrying the session id so a credit can be traced back to a payment.
-     */
-    void creditCheckout(String sessionId, String address, double coins, Consumer<RedeemResult> onResult) {
-        long nowMillis = Instant.now().toEpochMilli();
-        RedisFuture<List<Object>> future = commands.eval(REDEEM_IAP_SCRIPT, ScriptOutputType.MULTI,
-                new String[] {checkoutCreditedKey(sessionId), balanceKey(address), KNOWN_WALLETS_KEY, txKey(address)},
-                String.valueOf(coins), address, "checkout:" + sessionId, String.valueOf(nowMillis));
-        future.whenComplete((raw, err) -> {
-            if (err != null) {
-                LOG.log(Level.WARNING, "ledger checkout credit failed for " + address, err);
-                onResult.accept(RedeemResult.unreachable());
-                return;
-            }
-            boolean freshCredit = ((Number) raw.get(0)).longValue() == 1L;
-            double balance = Double.parseDouble(String.valueOf(raw.get(1)));
-            onResult.accept(RedeemResult.decided(freshCredit, balance));
-        });
-    }
-
     @Override
     public void close() {
         connection.close();
@@ -937,15 +912,6 @@ final class AicoinLedger implements AutoCloseable {
 
     private static String iapRedeemedKey(String transactionId) {
         return "aicoin:" + TAG + ":iap-redeemed:" + transactionId;
-    }
-
-    /**
-     * Marker for a credited card checkout, keyed by Stripe's session id. Stripe retries a webhook
-     * until it gets a 2xx — for hours — so a delivery that succeeded but whose response was lost
-     * arrives again, and this is what keeps the second one from paying out twice.
-     */
-    private static String checkoutCreditedKey(String sessionId) {
-        return "aicoin:" + TAG + ":checkout-credited:" + sessionId;
     }
 
     private static String offerPinKey(String offerId) {

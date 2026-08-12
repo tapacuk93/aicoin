@@ -130,17 +130,6 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             CoinOfferHandler.serveAdminSet(ctx, request, ledger, config);
             return;
         }
-        // The card path. Both are public: creating a session grants nothing, and the webhook's
-        // safety is its Stripe signature rather than any credential this proxy issues — so both sit
-        // ahead of the X-Api-Key gate below, like /price and /iap/*.
-        if (request.method() == HttpMethod.POST && "/checkout/session".equals(path)) {
-            CheckoutHandler.createSession(ctx, request, ledger, config);
-            return;
-        }
-        if (request.method() == HttpMethod.POST && "/checkout/webhook".equals(path)) {
-            CheckoutHandler.webhook(ctx, request, ledger, config);
-            return;
-        }
         if (request.method() == HttpMethod.GET && "/health".equals(path)) {
             HealthHandler.respond(ctx, healthTracker, config);
             return;
