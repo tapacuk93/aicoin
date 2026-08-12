@@ -24,6 +24,9 @@ public final class ProxyMain {
         ProviderHealthTracker healthTracker = new ProviderHealthTracker(config.getHealthWindowSize());
         AicoinLedger ledger = new AicoinLedger(config.getRedisHost(), config.getRedisPort(),
                 config.getRedisUsername(), config.getRedisPassword(), config.isRedisSsl());
+        // Null when accessLog.path is empty, or when the file couldn't be opened — an unwritable
+        // log is reported and then ignored, never a reason to refuse to serve traffic.
+        AccessLog accessLog = AccessLog.create(config);
 
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
         EventLoopGroup workerGroup = new NioEventLoopGroup();
@@ -31,7 +34,7 @@ public final class ProxyMain {
             ServerBootstrap bootstrap = new ServerBootstrap();
             bootstrap.group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
-                    .childHandler(new ProxyServerInitializer(config, workerGroup, healthTracker, ledger))
+                    .childHandler(new ProxyServerInitializer(config, workerGroup, healthTracker, ledger, accessLog))
                     .childOption(ChannelOption.AUTO_READ, true)
                     .option(ChannelOption.SO_BACKLOG, 1024);
 
@@ -42,6 +45,9 @@ public final class ProxyMain {
             bossGroup.shutdownGracefully();
             workerGroup.shutdownGracefully();
             ledger.close();
+            if (accessLog != null) {
+                accessLog.close();
+            }
         }
     }
 }

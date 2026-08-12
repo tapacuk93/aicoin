@@ -2,16 +2,28 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "60", "1000"]
+    restart: unless-stopped
     ports:
       - "6379:6379"
 
   aicoin-proxy:
     build: ./aicoin-proxy
+    # Pairs with -XX:+ExitOnOutOfMemoryError in the Dockerfile: exhausting the heap now ends the
+    # process, and this is what brings it back. Without a restart policy that fix would trade a
+    # slow proxy for a dead one.
+    restart: unless-stopped
     environment:
       AICOIN_PROXY_PORT: "8080"
       AICOIN_PROXY_REDIS_HOST: "redis"
       AICOIN_PROXY_REDIS_PORT: "6379"
     ports:
       - "8080:8080"
+    volumes:
+      # The access log is the record of what actually happened; without a volume it lives inside
+      # the container and every redeploy throws away exactly the history you'd want to read after
+      # an incident. The proxy's WORKDIR is /opt/aicoin-proxy, so the default relative
+      # accessLog.path of "logs/access.log" lands here. Rotation caps it (default 50MB), so this
+      # bind mount cannot grow without bound.
+      - ./logs:/opt/aicoin-proxy/logs
     depends_on:
       - redis

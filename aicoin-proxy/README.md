@@ -62,6 +62,10 @@ aicoin:
   signatureSkewSeconds: 120       # AICOIN_PROXY_SIGNATURE_SKEW_SECONDS
   freeCoinsPoolSize: 5000         # AICOIN_PROXY_FREE_COINS_POOL_SIZE (total coins the faucet will ever give away)
   adminToken: ""                  # AICOIN_PROXY_ADMIN_TOKEN (empty = admin page/API disabled)
+accessLog:
+  path: logs/access.log          # AICOIN_PROXY_ACCESS_LOG_PATH ("none" disables; see "Access log")
+  maxBytes: 10485760             # AICOIN_PROXY_ACCESS_LOG_MAX_BYTES — rotate at this size
+  count: 5                       # AICOIN_PROXY_ACCESS_LOG_COUNT — files kept; maxBytes x count caps disk
 iap:
   acceptSandboxPurchases: false   # AICOIN_PROXY_IAP_ACCEPT_SANDBOX — production MUST leave this false; see "IAP" below
 providers:
@@ -329,6 +333,62 @@ curl https://proxy.aicoin.oeaio.com/v1/chat/completions \
 If the token is later compromised, click "Revoke all tokens" on the wallet
 page — every token issued before that moment stops working immediately,
 even if it hasn't expired yet.
+
+## Access log
+
+One JSON object per line, per request, to a size-rotated file — the thing whose
+absence makes a report like "the ElevenLabs request timed out" unanswerable
+after the fact.
+
+```
+{"at":"2026-08-12T16:43:59.608Z","method":"POST","path":"/v1/text-to-speech/x/with-timestamps",
+ "provider":"elevenlabs","wallet":"281c9103...","status":-1,"req_bytes":52,"resp_bytes":0,
+ "duration_ms":4963,"coins":"","outcome":"client_gone"}
+```
+
+JSON Lines so a line survives being grepped out of context and the file can be
+fed straight to `jq`:
+
+```bash
+# slowest calls
+jq -s 'sort_by(-.duration_ms) | .[:20]' logs/access.log.0
+# requests that never got a response — clients that gave up waiting
+jq 'select(.outcome == "client_gone")' logs/access.log.0
+# spend by provider
+jq -r 'select(.coins != "") | .provider' logs/access.log.0 | sort | uniq -c
+```
+
+`AccessLogHandler` sits at the head of the inbound pipeline rather than at each
+place that sends a response, because there are many of those (auth rejections,
+the balance gate, synthetic upstream errors, the wallet page, real proxied
+responses) and a log that silently misses whichever one a future change adds is
+worse than none.
+
+`status:-1` with `outcome:"client_gone"` is a request the client abandoned
+before any response existed — it produces no status code anywhere else, so
+without this line it leaves **no trace at all**. That is the shape of every
+client-side "request timed out" report.
+
+**Never written:** the `X-Api-Key` token (it can spend the wallet's coins, so a
+leaked log would otherwise be a leaked wallet), any provider API key, request
+and response bodies, and the query string — Google's credential is injected as
+a query parameter, and a redaction rule that must stay correct as providers
+change is a worse bet than never writing the query at all. The wallet *address*
+is written in full: it is public by design and is the only way to attribute
+usage.
+
+Rotation is by size (`maxBytes` per file, `count` files, oldest overwritten),
+so `maxBytes × count` is a hard ceiling on disk — the default caps the whole
+log at 50MB, which matters on a 20GB Lightsail volume shared with Redis
+snapshots. Set `AICOIN_PROXY_ACCESS_LOG_PATH=none` to turn logging off; an
+*empty* env value means "unset" and leaves the default in place. Writes go to a
+single daemon thread with a bounded queue, so file I/O never runs on an event
+loop and a slow disk drops log lines rather than stalling requests. An
+unwritable path is reported once at startup and then ignored — logging must
+never be a reason to stop serving traffic.
+
+Under Docker the log lives on a bind mount (`./logs`), since otherwise every
+redeploy discards exactly the history worth reading after an incident.
 
 ## Forwarding pipeline
 

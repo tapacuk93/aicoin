@@ -26,11 +26,14 @@ import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.timeout.ReadTimeoutException;
+import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.CharsetUtil;
 import java.net.URI;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -102,6 +105,13 @@ final class UpstreamForwarder {
             return;
         }
 
+        // Exactly one of: the upstream answered, the upstream timed out/failed, or the client gave
+        // up first. Whichever happens first owns the debit — the other paths must not also refund
+        // it (a double refund credits coins that were never spent) and must not write a second
+        // response. Shared across the response handler, the read-timeout path, and the
+        // client-disconnect listener below, all of which can fire on different event loops.
+        AtomicBoolean settled = new AtomicBoolean(false);
+
         Bootstrap bootstrap = new Bootstrap();
         bootstrap.group(group)
                 .channel(NioSocketChannel.class)
@@ -113,21 +123,57 @@ final class UpstreamForwarder {
                             SslContext sslCtx = SslContextBuilder.forClient().build();
                             ch.pipeline().addLast(sslCtx.newHandler(ch.alloc(), host, port));
                         }
+                        // The only bound on a call once the socket is up. CONNECT_TIMEOUT_MILLIS
+                        // above covers establishing the connection and nothing past it, so a
+                        // provider that accepted and then stalled used to be waited on forever:
+                        // the client's own timeout fired, the client walked away, and this side
+                        // kept the socket, the aggregation buffer and an unrefunded debit alive
+                        // with nobody left to deliver to. See
+                        // ProxyConfig#getUpstreamReadTimeoutSeconds for the duration.
+                        ch.pipeline().addLast(new ReadTimeoutHandler(config.getUpstreamReadTimeoutSeconds()));
                         ch.pipeline().addLast(new HttpClientCodec());
                         ch.pipeline().addLast(new HttpObjectAggregator(MAX_CONTENT_LENGTH));
                         ch.pipeline().addLast(new UpstreamResponseHandler(
-                                config, healthTracker, ledger, clientCtx, provider, walletAddress, callCostAicoin));
+                                config, healthTracker, ledger, clientCtx, provider, walletAddress, callCostAicoin,
+                                settled));
                     }
                 });
 
         bootstrap.connect(host, port).addListener((ChannelFutureListener) future -> {
             if (!future.isSuccess()) {
                 LOG.log(Level.WARNING, "upstream connect failed for provider " + provider + " at " + baseUrl, future.cause());
-                refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
-                sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream connection failed");
+                if (settled.compareAndSet(false, true)) {
+                    refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+                    sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream connection failed");
+                }
                 return;
             }
             Channel upstreamCh = future.channel();
+
+            // A client that gave up is a call nobody can receive, and continuing it spends real
+            // money on an answer that will be written to a closed socket. Without this, a client
+            // whose own timeout fired first (mobile clients all have one) still paid: the debit is
+            // taken before forwarding, the upstream 2xx arrives later, and settlement runs against
+            // a wallet whose owner never got the bytes. The retry that client then makes pays
+            // again, and again, for as long as this side stays slower than its timeout.
+            //
+            // AccessLogHandler already records this case as status -1 / "client_gone"; that only
+            // ever noted it happened. This ends the upstream call and returns the coins.
+            ChannelFutureListener clientGone = f -> {
+                if (settled.compareAndSet(false, true)) {
+                    LOG.log(Level.FINE, "client gone before upstream answered; aborting " + provider + " call");
+                    refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+                }
+                upstreamCh.close();
+            };
+            clientCtx.channel().closeFuture().addListener(clientGone);
+            // Dropped again the moment this call is over, because the client channel outlives it:
+            // clients keep the connection alive across requests, so a listener left registered
+            // stays for the life of the connection, pinning this call's upstream channel and
+            // stacking one more listener per request until the client finally disconnects. The
+            // upstream channel closes on every terminal path here — response relayed, read
+            // timeout, error, or this listener itself — so it is the reliable place to unhook.
+            upstreamCh.closeFuture().addListener(f -> clientCtx.channel().closeFuture().removeListener(clientGone));
             String hostHeader = (port == (tls ? 443 : 80)) ? host : host + ":" + port;
             FullHttpRequest req = new DefaultFullHttpRequest(
                     HttpVersion.HTTP_1_1, method, forwardUri, Unpooled.wrappedBuffer(body));
@@ -140,8 +186,10 @@ final class UpstreamForwarder {
             upstreamCh.writeAndFlush(req).addListener((ChannelFutureListener) writeFuture -> {
                 if (!writeFuture.isSuccess()) {
                     LOG.log(Level.WARNING, "upstream write failed for provider " + provider, writeFuture.cause());
-                    refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
-                    sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream write failed");
+                    if (settled.compareAndSet(false, true)) {
+                        refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+                        sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream write failed");
+                    }
                     upstreamCh.close();
                 }
             });
@@ -224,9 +272,11 @@ final class UpstreamForwarder {
         private final String provider;
         private final String walletAddress;
         private final double callCostAicoin;
+        private final AtomicBoolean settled;
 
         UpstreamResponseHandler(ProxyConfig config, ProviderHealthTracker healthTracker, AicoinLedger ledger,
-                                 ChannelHandlerContext clientCtx, String provider, String walletAddress, double callCostAicoin) {
+                                 ChannelHandlerContext clientCtx, String provider, String walletAddress, double callCostAicoin,
+                                 AtomicBoolean settled) {
             this.config = config;
             this.healthTracker = healthTracker;
             this.ledger = ledger;
@@ -234,12 +284,23 @@ final class UpstreamForwarder {
             this.provider = provider;
             this.walletAddress = walletAddress;
             this.callCostAicoin = callCostAicoin;
+            this.settled = settled;
         }
 
         @Override
         protected void channelRead0(ChannelHandlerContext upstreamCtx, FullHttpResponse response) {
-            byte[] bodyBytes = ByteBufUtil.getBytes(response.content());
             HttpResponseStatus status = response.status();
+
+            // The client's own timeout beat this answer, and the disconnect listener has already
+            // refunded. Record it for provider health — the upstream really did respond, and that
+            // is worth knowing — but bill nothing and write nothing to a socket that is gone.
+            if (!settled.compareAndSet(false, true)) {
+                healthTracker.record(provider, status.code());
+                upstreamCtx.close();
+                return;
+            }
+
+            byte[] bodyBytes = ByteBufUtil.getBytes(response.content());
 
             healthTracker.record(provider, status.code());
 
@@ -252,8 +313,7 @@ final class UpstreamForwarder {
                 // formula — recording defaultCostUsdPerCall for a model listing would inflate
                 // GET /price with spend the proxy was never billed for.
                 if (callCostAicoin > 0) {
-                    String bodyStr = decodedForPricing(response.headers(), bodyBytes);
-                    double costUsd = CostCalculator.computeCostUsd(provider, bodyStr, config.getModelPricing());
+                    double costUsd = costUsdFor(response.headers(), bodyBytes);
                     ledger.recordEvent(provider, costUsd, Instant.now());
 
                     // Metering settles AFTER the upstream answers, because that answer is the only
@@ -280,10 +340,46 @@ final class UpstreamForwarder {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext upstreamCtx, Throwable cause) {
-            LOG.log(Level.WARNING, "upstream response handling failed for provider " + provider, cause);
-            refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
-            sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream error");
+            boolean timedOut = cause instanceof ReadTimeoutException;
+            if (timedOut) {
+                // Distinct from a transport error: the provider is reachable and simply took
+                // longer than any client is still waiting for. Logged at a lower level because on
+                // a slow provider this is expected traffic, not a fault in this proxy.
+                LOG.log(Level.INFO, "upstream read timed out for provider " + provider
+                        + " after " + config.getUpstreamReadTimeoutSeconds() + "s");
+            } else {
+                LOG.log(Level.WARNING, "upstream response handling failed for provider " + provider, cause);
+            }
+            if (settled.compareAndSet(false, true)) {
+                refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+                sendSynthetic(clientCtx,
+                        timedOut ? HttpResponseStatus.GATEWAY_TIMEOUT : HttpResponseStatus.BAD_GATEWAY,
+                        timedOut ? "upstream timed out" : "upstream error");
+            }
             upstreamCtx.close();
+        }
+
+        /**
+         * What this call cost the proxy upstream — without reading the body at all when the
+         * provider is priced per call.
+         *
+         * <p>ElevenLabs and Stability report no token usage and are configured with a flat
+         * {@code usdPerCall}, so parsing their bodies could only ever end at that same figure. It
+         * was not free to find that out: {@link #decodedForPricing} gunzips the body and builds a
+         * Java String from it (UTF-16, so twice the bytes again), then {@link CostCalculator} runs
+         * a full YAML/JSON parse over the result. For a speech response — base64 audio plus
+         * per-character alignment arrays, routinely megabytes — that is several times the response
+         * size in short-lived allocation, plus the parse, per call, on a host with a 512MB budget
+         * shared with Redis. Three concurrent narration requests made it the largest allocator in
+         * the process, to reach a constant.
+         */
+        private double costUsdFor(HttpHeaders headers, byte[] bodyBytes) {
+            Double perCall = config.getModelPricing().perCallUsd(provider);
+            if (perCall != null) {
+                return perCall;
+            }
+            String bodyStr = decodedForPricing(headers, bodyBytes);
+            return CostCalculator.computeCostUsd(provider, bodyStr, config.getModelPricing());
         }
 
         private static void copyHeaders(HttpHeaders from, HttpHeaders to) {
