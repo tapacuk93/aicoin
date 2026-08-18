@@ -16,6 +16,25 @@ services:
       AICOIN_PROXY_PORT: "8080"
       AICOIN_PROXY_REDIS_HOST: "redis"
       AICOIN_PROXY_REDIS_PORT: "6379"
+      # Honour StoreKit *Sandbox* transactions in redeem-iap.
+      #
+      # DELIBERATE DEVIATION from CONTRACT.md's "production MUST leave this
+      # false" and from ProxyConfig#isAcceptSandboxPurchases. Turned on so
+      # TestFlight builds can actually buy coins: a TestFlight purchase is a
+      # sandbox purchase, so with this off every one of them verifies fine and
+      # is then refused, and the app shows "your purchase went through, but we
+      # couldn't credit your AICoin wallet yet" while StoreKit retries forever.
+      # Observed against production on 2026-08-18 in All Languages Learner.
+      #
+      # The cost is exactly what the contract warns about, and it is real:
+      # Apple signs sandbox transactions with the same certificate chain as
+      # paid ones, so anyone with a free sandbox tester account can now mint
+      # genuine-looking purchases and credit themselves unbounded coins. The
+      # spend budget (aicoin:budget, currently $200) is the only thing left
+      # bounding what that can cost.
+      #
+      # Set back to "false" and redeploy once TestFlight validation is done.
+      AICOIN_PROXY_IAP_ACCEPT_SANDBOX: "true"
     ports:
       - "8080:8080"
     volumes:
