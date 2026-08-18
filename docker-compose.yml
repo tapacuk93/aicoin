@@ -33,7 +33,12 @@ services:
       # spend budget (aicoin:budget, currently $200) is the only thing left
       # bounding what that can cost.
       #
-      # Set back to "false" and redeploy once TestFlight validation is done.
+      # NOTE: this file is the local/dev stack. Production on Lightsail runs
+      # docker-compose.prod.yml with env_file: .env.prod, so setting this here
+      # does NOT affect production — the live flag lives in .env.prod on the
+      # host and takes effect only when the proxy container is recreated.
+      #
+      # Set back to "false" in BOTH places once TestFlight validation is done.
       AICOIN_PROXY_IAP_ACCEPT_SANDBOX: "true"
     ports:
       - "8080:8080"
