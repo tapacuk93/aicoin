@@ -243,10 +243,29 @@ public final class IAPManager: ObservableObject {
     /// transaction. `address` is the buyer's own wallet address (`WalletIdentity.address`) — the
     /// destination `to_user_id` for `/wallet/api/redeem-iap`.
     public func purchase(_ package: AICoinPackage, address: String) async throws -> AICoinPurchaseOutcome {
-        guard let product = products[package.productId] else {
-            throw AICoinPurchaseError.productNotFound(package.productId)
-        }
+        let product = try await resolvedProduct(for: package.productId)
         return try await run(product: product, address: address, offerID: nil)
+    }
+
+    /// The StoreKit product for an id, loading it first if the catalog isn't there yet.
+    ///
+    /// A paywall raised the instant a wallet runs dry opens *before* `loadPackages` has come back
+    /// — it is opened by the empty-balance error itself, not by a user who has been sitting on the
+    /// screen — so the first tap on a package found `products` still empty and failed with
+    /// `productNotFound`. By the second tap the load had landed and the same tap worked, which is
+    /// exactly the "first press errors, second press works" a reader sees, and why it never
+    /// happens when the sheet is opened with coins already in hand.
+    ///
+    /// Waiting for the load in flight is the fix rather than disabling the buttons until it
+    /// finishes: the tap is a perfectly good instruction either way, and it should be honoured
+    /// rather than refused for being early.
+    private func resolvedProduct(for productId: String) async throws -> Product {
+        if let product = products[productId] { return product }
+        await loadPackages()
+        guard let product = products[productId] else {
+            throw AICoinPurchaseError.productNotFound(productId)
+        }
+        return product
     }
 
     /// The shared purchase → verify → redeem → finish sequence behind both `purchase(_:address:)`
