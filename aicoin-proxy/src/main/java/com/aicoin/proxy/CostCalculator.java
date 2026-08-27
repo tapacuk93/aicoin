@@ -97,6 +97,13 @@ public final class CostCalculator {
     public static double computeCostUsd(String provider, String jsonBody, ModelPricing pricing) {
         Usage usage = extractUsage(jsonBody);
         if (usage != null) {
+            // A model billed per call is billed per call whatever it reports. Image models answer
+            // with a token count like any other, and charging them by it prices a four-cent image
+            // at a fraction of a cent — which is then published as the coin price.
+            Double perCallForModel = pricing.modelPerCallUsd(provider, usage.model);
+            if (perCallForModel != null) {
+                return perCallForModel;
+            }
             ModelPricing.Rates rates = pricing.ratesFor(provider, usage.model);
             if (rates != null) {
                 // Cache reads bill at a tenth of the input rate and cache writes at 1.25x, so a
@@ -158,7 +165,12 @@ public final class CostCalculator {
             return null;
         }
         Map<?, ?> root = (Map<?, ?>) parsed;
-        String model = root.get("model") instanceof String ? (String) root.get("model") : null;
+        // Google names it `modelVersion`; everyone else uses `model`. Reading only the latter left
+        // every Gemini response with no model at all, so per-model pricing could never apply to
+        // one — which is how image generation came to be billed at Google's text rates.
+        String model = root.get("model") instanceof String ? (String) root.get("model")
+                : root.get("modelVersion") instanceof String ? (String) root.get("modelVersion")
+                : null;
 
         Object usageObj = root.get("usage");
         if (usageObj instanceof Map) {

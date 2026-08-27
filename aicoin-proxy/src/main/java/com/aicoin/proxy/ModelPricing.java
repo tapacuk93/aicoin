@@ -44,6 +44,9 @@ final class ModelPricing {
     }
 
     private final Map<String, Rates> providerDefaults;
+    /** Keyed by provider, then by model-id prefix: a flat charge for one call to that model. */
+    private final Map<String, Map<String, Double>> modelPerCallUsd;
+
     /** Keyed by provider, then by model-id prefix — see {@link #ratesFor}. */
     private final Map<String, Map<String, Rates>> modelRates;
     /** For providers that don't bill by token at all (speech, images). */
@@ -54,11 +57,13 @@ final class ModelPricing {
     ModelPricing(Map<String, Rates> providerDefaults,
                  Map<String, Map<String, Rates>> modelRates,
                  Map<String, Double> perCallUsd,
+                 Map<String, Map<String, Double>> modelPerCallUsd,
                  double fallbackCostPerTokenUsd,
                  double fallbackCostUsdPerCall) {
         this.providerDefaults = providerDefaults;
         this.modelRates = modelRates;
         this.perCallUsd = perCallUsd;
+        this.modelPerCallUsd = modelPerCallUsd == null ? Map.of() : modelPerCallUsd;
         this.fallbackCostPerTokenUsd = fallbackCostPerTokenUsd;
         this.fallbackCostUsdPerCall = fallbackCostUsdPerCall;
     }
@@ -97,6 +102,40 @@ final class ModelPricing {
      * The flat charge for one call to a provider that reports no usage — ElevenLabs speech,
      * image generation. `null` when none is configured, leaving the global default.
      */
+    /**
+     * The flat charge for one call to a particular *model*, where its cost has nothing to do with
+     * the tokens it reports.
+     *
+     * <p>Image generation is the case this exists for. Gemini's image models answer with a token
+     * count like any other Google model, so pricing them by Google's text rates looks correct and
+     * is wrong by an order of magnitude: an image costs about four cents to make and prices out at
+     * a fraction of a cent. Every such call then drags the published coin price down, and the
+     * whole catalogue is sold below what it costs to serve.
+     *
+     * <p>Longest matching prefix wins, as with {@link #ratesFor}.
+     */
+    Double modelPerCallUsd(String provider, String model) {
+        Map<String, Double> forProvider = modelPerCallUsd.get(provider);
+        if (forProvider == null || model == null) {
+            return null;
+        }
+        String normalized = model.toLowerCase(Locale.ROOT);
+        Double best = null;
+        int bestLength = -1;
+        for (Map.Entry<String, Double> entry : forProvider.entrySet()) {
+            if (normalized.startsWith(entry.getKey()) && entry.getKey().length() > bestLength) {
+                best = entry.getValue();
+                bestLength = entry.getKey().length();
+            }
+        }
+        return best;
+    }
+
+    /** Every per-model flat charge configured for a provider, for merging defaults with config. */
+    Map<String, Double> modelPerCallUsdFor(String provider) {
+        return modelPerCallUsd.getOrDefault(provider, Map.of());
+    }
+
     Double perCallUsd(String provider) {
         return perCallUsd.get(provider);
     }
@@ -143,7 +182,17 @@ final class ModelPricing {
         perCall.put("elevenlabs", 0.03);
         perCall.put("stability", 0.03);
 
-        return new ModelPricing(providerDefaults, models, perCall,
+        // Google's image models *do* report tokens, and pricing them by Google's text rates
+        // under-charges them by more than tenfold — an image is billed per image, whatever its
+        // response says about tokens. Listed by prefix so a new revision of either model is
+        // covered without a config change.
+        Map<String, Map<String, Double>> modelPerCall = new LinkedHashMap<>();
+        Map<String, Double> googlePerCall = new LinkedHashMap<>();
+        googlePerCall.put("gemini-2.5-flash-image", 0.039);
+        googlePerCall.put("gemini-2.0-flash-preview-image-generation", 0.039);
+        modelPerCall.put("google", googlePerCall);
+
+        return new ModelPricing(providerDefaults, models, perCall, modelPerCall,
                 fallbackCostPerTokenUsd, fallbackCostUsdPerCall);
     }
 }
