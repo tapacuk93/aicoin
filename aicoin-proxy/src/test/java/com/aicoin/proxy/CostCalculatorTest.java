@@ -55,4 +55,33 @@ class CostCalculatorTest {
         double cost = CostCalculator.computeCostUsd(body, COST_PER_TOKEN, DEFAULT_COST);
         assertEquals(50 * COST_PER_TOKEN, cost, 1e-12);
     }
+
+    /**
+     * An image model reports a token count like any other Google model, and pricing it by those
+     * tokens charges a fraction of a cent for a four-cent image. Every such call then drags down
+     * the published coin price, and the whole catalogue ends up sold below what it costs to serve.
+     */
+    @Test
+    void imageModelsArePricedPerCallDespiteReportingTokens() {
+        ModelPricing pricing = ModelPricing.defaults(0.000002, 0.001);
+        String body = "{\"modelVersion\":\"gemini-2.5-flash-image\","
+                + "\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":1290}}";
+
+        double cost = CostCalculator.computeCostUsd("google", body, pricing);
+
+        assertEquals(0.039, cost, 1e-9,
+                "an image is billed per image, whatever its response says about tokens");
+    }
+
+    /** Google's text models keep their token pricing — the flat charge is for image models alone. */
+    @Test
+    void textModelsKeepTheirTokenPricing() {
+        ModelPricing pricing = ModelPricing.defaults(0.000002, 0.001);
+        String body = "{\"modelVersion\":\"gemini-2.5-flash\","
+                + "\"usageMetadata\":{\"promptTokenCount\":1000,\"candidatesTokenCount\":1000}}";
+
+        double cost = CostCalculator.computeCostUsd("google", body, pricing);
+
+        assertEquals((1000 * 0.30 + 1000 * 2.50) / 1_000_000.0, cost, 1e-9);
+    }
 }

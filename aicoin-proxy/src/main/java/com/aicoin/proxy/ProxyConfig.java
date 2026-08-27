@@ -407,7 +407,12 @@ public final class ProxyConfig {
         Map<String, ModelPricing.Rates> providerDefaults = new LinkedHashMap<>();
         Map<String, Map<String, ModelPricing.Rates>> models = new LinkedHashMap<>();
         Map<String, Double> perCall = new LinkedHashMap<>();
+        Map<String, Map<String, Double>> modelPerCall = new LinkedHashMap<>();
         for (String provider : PROVIDERS) {
+            Map<String, Double> fallbackModelPerCall = defaults.modelPerCallUsdFor(provider);
+            if (!fallbackModelPerCall.isEmpty()) {
+                modelPerCall.put(provider, new LinkedHashMap<>(fallbackModelPerCall));
+            }
             ModelPricing.Rates fallbackRates = defaults.ratesFor(provider, null);
             if (fallbackRates != null) {
                 providerDefaults.put(provider, fallbackRates);
@@ -438,9 +443,18 @@ public final class ProxyConfig {
                     if (!(modelEntry.getKey() instanceof String) || !(modelEntry.getValue() instanceof Map)) {
                         continue;
                     }
-                    ModelPricing.Rates modelRates = ratesFromMap((Map<?, ?>) modelEntry.getValue());
+                    String modelKey = ((String) modelEntry.getKey()).toLowerCase(java.util.Locale.ROOT);
+                    Map<?, ?> modelBody = (Map<?, ?>) modelEntry.getValue();
+                    // A per-model flat charge, for models whose cost has nothing to do with the
+                    // tokens they report — image generation above all.
+                    Object modelUsdPerCall = modelBody.get("usdPerCall");
+                    if (modelUsdPerCall instanceof Number) {
+                        modelPerCall.computeIfAbsent(provider, key -> new LinkedHashMap<>())
+                                .put(modelKey, ((Number) modelUsdPerCall).doubleValue());
+                    }
+                    ModelPricing.Rates modelRates = ratesFromMap(modelBody);
                     if (modelRates != null) {
-                        perModel.put(((String) modelEntry.getKey()).toLowerCase(java.util.Locale.ROOT), modelRates);
+                        perModel.put(modelKey, modelRates);
                     }
                 }
                 if (!perModel.isEmpty()) {
@@ -448,7 +462,8 @@ public final class ProxyConfig {
                 }
             }
         }
-        return new ModelPricing(providerDefaults, models, perCall, costPerTokenUsd, defaultCostUsdPerCall);
+        return new ModelPricing(providerDefaults, models, perCall, modelPerCall,
+                costPerTokenUsd, defaultCostUsdPerCall);
     }
 
     private static ModelPricing.Rates ratesFromMap(Map<?, ?> body) {

@@ -103,6 +103,12 @@ pricing:
     google:
       inputUsdPerMillionTokens: 0.30
       outputUsdPerMillionTokens: 2.50
+      models:
+        # Billed per image, not by the tokens the response happens to report. Left here as well as
+        # in the built-in defaults so the figure can be corrected without a release when Google
+        # moves it.
+        gemini-2.5-flash-image: { usdPerCall: 0.039 }
+        gemini-2.0-flash-preview-image-generation: { usdPerCall: 0.039 }
     # Billed per character and per image respectively, and neither reports token usage, so both
     # get a flat per-call figure instead of token rates.
     elevenlabs:
