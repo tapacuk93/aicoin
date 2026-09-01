@@ -124,6 +124,7 @@ consortium:                        # POST /consortium — see its own section be
   enabled: true                    # AICOIN_PROXY_CONSORTIUM_ENABLED (false serves 404)
   maxRounds: 3                     # AICOIN_PROXY_CONSORTIUM_MAX_ROUNDS
   maxOutputTokens: 4000            # AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS
+  maxContextChars: 60000           # AICOIN_PROXY_CONSORTIUM_MAX_CONTEXT_CHARS (the shared record)
   editor: ""                       # AICOIN_PROXY_CONSORTIUM_EDITOR (empty: the first panelist)
   models:                          # AICOIN_PROXY_CONSORTIUM_<PROVIDER>_MODEL
     anthropic: claude-sonnet-5
@@ -554,9 +555,22 @@ curl -X POST http://localhost:8080/consortium \
  "errors":[]}
 ```
 
-Body fields, all but `prompt` optional: `providers` (narrow the panel),
-`editor`, `max_rounds` (may only lower `consortium.maxRounds`),
-`include_transcript` (also return every draft).
+Body fields, all but `prompt` optional: `context` (background the whole panel
+sees), `providers` (narrow the panel), `editor`, `max_rounds` (may only lower
+`consortium.maxRounds`), `include_transcript` (also return every draft).
+
+**Every turn sees the same shared record**: the request, the caller's
+`context`, the drafts attributed to the model that wrote each, every answer
+the editor produced, and every round of comments — naming who objected and
+who cleared it — then one line saying what this turn is to do with it.
+Without it a panel is a queue of strangers: reviewers repeat objections the
+editor already fixed, and nobody can tell a settled point from a new one.
+
+The record is capped at `consortium.maxContextChars` (default 60,000),
+because it goes to every panelist on every round and every character is
+billed as input. Past the cap the oldest rounds are dropped and the text
+says so; the request, the caller's `context` and the answer under discussion
+never are.
 
 **The panel** is every provider this proxy knows a chat shape for —
 `anthropic`, `openai`, `google`, `mistral`, `kimi` — that this deployment
@@ -832,6 +846,9 @@ JUnit5 pure-function tests, with no network/Redis dependency required:
   scratchpad and not its answer.
 - `ConsortiumPromptsTest` — the `NO COMMENTS` reading. Strict on purpose:
   "no comments, but X is wrong" is comments.
+- `SharedContextTest` — the record every turn is given: the request and the
+  current answer survive whatever else is trimmed, contributions stay
+  attributed, and the oldest rounds go first when it hits the cap.
 - `ConsortiumHandlerTest` — panel and editor selection: only chat-capable
   providers with a key and a model, in a stable order, narrowable by the
   caller but never extendable.

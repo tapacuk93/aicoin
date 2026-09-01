@@ -161,8 +161,11 @@ TEST_KEYS=(openai-test-key anthropic-test-key google-test-key mistral-test-key c
 FREE_COINS_POOL_SIZE=$(( CLAIM_AMOUNT * (3 + ${#PROVIDERS[@]} + 3) ))
 
 PROXY_BIN="$REPO_ROOT/aicoin-proxy/build/install/aicoin-proxy/bin/aicoin-proxy"
-if [ -x "$PROXY_BIN" ]; then
-  log "reusing existing aicoin-proxy build at $PROXY_BIN (delete build/install to force a rebuild)"
+# Reuse the existing build only when nothing has been edited since it was made. Reusing it
+# unconditionally meant a source change could be tested against the previous binary — the suite
+# then passes or fails on code that is no longer in the tree, which is worse than a slow run.
+if [ -x "$PROXY_BIN" ] && [ -z "$(find "$REPO_ROOT/aicoin-proxy/src" "$REPO_ROOT/aicoin-proxy/build.gradle" -newer "$PROXY_BIN" -print -quit 2>/dev/null)" ]; then
+  log "reusing existing aicoin-proxy build at $PROXY_BIN (nothing newer in src/)"
 else
   log "building aicoin-proxy"
   (cd "$REPO_ROOT/aicoin-proxy" && ./gradlew installDist -q --no-daemon) || { log "gradle build failed"; exit 1; }

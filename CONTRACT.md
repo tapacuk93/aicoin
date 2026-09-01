@@ -8,6 +8,7 @@ keys here without updating this file.
 ```
 aicoin/            (this repo root)
   aicoin-proxy/     Java 26 + Netty reverse proxy AND the coin ledger (Gradle)
+  cli/              `aicoin` command-line wallet and AI client (Go)
   e2e/              end-to-end test
   site/             static landing page (aicoin.oeaio.com)
 ```
@@ -160,6 +161,7 @@ Auth is the same API token as any AI-proxy call (`X-Api-Key`, never a bare addre
 ```json
 {
   "prompt": "...",                      // required, max 32,000 characters
+  "context": "...",                     // optional background the whole panel sees, max 32,000 characters
   "providers": ["anthropic", "kimi"],   // optional; default: the whole panel
   "editor": "anthropic",                // optional; default: the first panelist
   "max_rounds": 2,                      // optional; may only lower consortium.maxRounds, never raise it
@@ -169,8 +171,12 @@ Auth is the same API token as any AI-proxy call (`X-Api-Key`, never a bare addre
 
 **The panel** is every provider that (a) this proxy knows a chat shape for — `anthropic`, `openai`, `google`, `mistral`, `kimi` — and (b) this deployment has both a non-empty `apiKey` and a `consortium.models.<provider>` entry for, in that order. `elevenlabs` and `stability` are not chat APIs and are never on it; `cohere` is one but its shape is not implemented, so it is not either. A caller's `providers` list can only narrow that set, never extend it. An empty panel is `503`, not an empty answer.
 
+**Every turn sees the same shared record.** A panel with no shared context is a queue of strangers: reviewers who cannot see the previous round raise the same objection twice and cannot tell whether the editor addressed the last one, the editor cannot tell a comment it has already answered from a new one, and none of them sees the caller's background. So each turn is given the panel's record of the call so far — the request, the caller's `context`, the drafts (attributed to the model that wrote each), every answer the editor produced, and every round of comments (naming both who objected and who cleared it) — followed by one line saying what this turn is to do with it. Reviewers are told not to repeat a comment the current answer has addressed, nor to re-litigate one the editor rejected without saying why the rejection was wrong.
+
+The record is bounded by `consortium.maxContextChars` (default 60,000), because it goes to every panelist on every round and every character of it is billed as input. Past the limit the oldest **rounds** are dropped, oldest first, and the text says so; the request, the caller's `context` and the answer currently under discussion are never dropped, since a turn without those cannot be answered at all. If those alone exceed the limit, the record is truncated rather than sent to fail upstream on a context-length error.
+
 **The rounds**, in order:
-1. **Draft** — every panelist answers the prompt independently, seeing neither the others nor their answers.
+1. **Draft** — every panelist answers the request independently: at this point the shared record holds only the request and the caller's `context`, so no panelist sees another's answer. That independence is the point of drafting; it is also the last turn where it holds.
 2. **Merge** — the editor is given all the drafts and produces one answer. With a single draft this step is skipped: there is nothing to merge, and it would cost a call to rewrite one input.
 3. **Review** — every panelist, editor included, is given the request and the current answer and must reply either with exactly `NO COMMENTS` or with a list of substantive problems. The clean reply is read strictly: the entire reply, ignoring case, surrounding whitespace and markdown emphasis, must be that phrase. "No comments, but X is wrong" counts as comments, because reading it the other way ships an answer a reviewer just objected to.
 4. **Revise** — if any reviewer had comments, the editor is given the request, the answer and every comment, and rewrites the answer; then step 3 runs again on the result.
@@ -204,6 +210,7 @@ consortium:
   enabled: true          # false serves 404, as if the endpoint did not exist
   maxRounds: 3
   maxOutputTokens: 4000  # per turn; generous because thinking models spend part of it before writing
+  maxContextChars: 60000 # of the shared record per turn; past it the oldest rounds are dropped
   editor: ""             # empty: the first panelist
   models:
     anthropic: claude-sonnet-5

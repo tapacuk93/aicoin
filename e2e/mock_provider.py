@@ -123,7 +123,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return "The answer is missing the part the request asked for."
             return "NO COMMENTS"
         if editing:
-            return "REVISED ANSWER" if "Review from" in body_text else "MERGED ANSWER"
+            return "REVISED ANSWER" if "review ===" in body_text else "MERGED ANSWER"
         return "DRAFT from mock"
 
     def do_GET(self):

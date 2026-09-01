@@ -162,9 +162,18 @@ final class ConsortiumHandler {
             maxRounds = Math.max(1, Math.min(maxRounds, asked));
         }
         boolean includeTranscript = Boolean.TRUE.equals(body.get("include_transcript"));
+        // Background every panelist sees, on every turn, alongside the request: the caller's own
+        // context for the question. Part of the shared record rather than glued onto the prompt,
+        // so the editor and the reviewers weigh it too, not only the drafters.
+        String background = body.get("context") instanceof String ? (String) body.get("context") : null;
+        if (background != null && background.length() > MAX_PROMPT_CHARS) {
+            sendError(ctx, HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE,
+                    "context must be at most " + MAX_PROMPT_CHARS + " characters");
+            return;
+        }
 
         new Session(ctx, config, clientGroup, healthTracker, ledger, walletAddress,
-                prompt, panel, editor, maxRounds, includeTranscript).start();
+                prompt, background, panel, editor, maxRounds, includeTranscript).start();
     }
 
     private static Map<?, ?> parseBody(byte[] bytes) {
@@ -198,6 +207,8 @@ final class ConsortiumHandler {
         private final int maxRounds;
         private final boolean includeTranscript;
 
+        private final SharedContext context;
+
         private final List<String> draftProviders = new ArrayList<>();
         private final List<String> drafts = new ArrayList<>();
         private final List<String> reviewJson = new ArrayList<>();
@@ -216,12 +227,13 @@ final class ConsortiumHandler {
         private int outstanding;
         private final List<String> commentProviders = new ArrayList<>();
         private final List<String> comments = new ArrayList<>();
+        private final List<String> clearedBy = new ArrayList<>();
 
         private final ChannelFutureListener clientGone;
 
         Session(ChannelHandlerContext ctx, ProxyConfig config, EventLoopGroup group,
                  ProviderHealthTracker healthTracker, AicoinLedger ledger, String wallet, String prompt,
-                 List<String> panel, String editor, int maxRounds, boolean includeTranscript) {
+                 String background, List<String> panel, String editor, int maxRounds, boolean includeTranscript) {
             this.ctx = ctx;
             this.config = config;
             this.group = group;
@@ -233,6 +245,7 @@ final class ConsortiumHandler {
             this.editor = editor;
             this.maxRounds = maxRounds;
             this.includeTranscript = includeTranscript;
+            this.context = new SharedContext(prompt, background, config.getConsortium().getMaxContextChars());
             // A consortium runs for minutes. A client that gave up in the middle is nobody to
             // spend the next round's coins for, so the rounds stop at the next boundary — the
             // turns already in flight are paid for and cannot be recalled.
@@ -257,8 +270,9 @@ final class ConsortiumHandler {
                 outstanding = panel.size();
             }
             String system = ConsortiumPrompts.draftSystem();
+            String user = context.forTurn(ConsortiumPrompts.draftTask());
             for (String provider : panel) {
-                turn(provider, system, prompt, "draft", (text, error) -> {
+                turn(provider, system, user, "draft", (text, error) -> {
                     synchronized (this) {
                         if (text != null) {
                             draftProviders.add(provider);
@@ -290,19 +304,23 @@ final class ConsortiumHandler {
                 }
                 return;
             }
+            context.addDrafts(providersSnapshot, draftsSnapshot);
             if (draftsSnapshot.size() == 1) {
                 // One draft is already the merged answer; a merge turn here would only cost a call
                 // to rewrite a single input.
                 setAnswer(draftsSnapshot.get(0));
+                context.addAnswer("The answer as it now stands", draftsSnapshot.get(0));
                 beginReviewRound();
                 return;
             }
             turn(editor, ConsortiumPrompts.mergeSystem(draftsSnapshot.size()),
-                    ConsortiumPrompts.mergeUser(prompt, providersSnapshot, draftsSnapshot), "merge",
+                    context.forTurn(ConsortiumPrompts.mergeTask()), "merge",
                     (text, error) -> {
                         // An editor that failed to merge must not sink the call: the first draft is
                         // a real answer to the request, and the review rounds still run over it.
-                        setAnswer(text != null ? text : draftsSnapshot.get(0));
+                        String merged = text != null ? text : draftsSnapshot.get(0);
+                        setAnswer(merged);
+                        context.addAnswer("The answer as it now stands", merged);
                         beginReviewRound();
                     });
         }
@@ -323,9 +341,13 @@ final class ConsortiumHandler {
                 outstanding = panel.size();
                 commentProviders.clear();
                 comments.clear();
+                clearedBy.clear();
             }
             String system = ConsortiumPrompts.reviewSystem();
-            String user = ConsortiumPrompts.reviewUser(prompt, answer());
+            // Rendered once: every reviewer in a round reviews the same record, which is what
+            // makes their comments comparable — and what lets the editor tell agreement from
+            // one model having seen something the others did not.
+            String user = context.forTurn(ConsortiumPrompts.reviewTask());
             int thisRound = round;
             for (String provider : panel) {
                 turn(provider, system, user, "review", (text, error) -> {
@@ -336,7 +358,9 @@ final class ConsortiumHandler {
                                     + ",\"provider\":" + Json.string(provider)
                                     + ",\"clean\":" + clean
                                     + ",\"comments\":" + (clean ? "null" : Json.string(text)) + "}");
-                            if (!clean) {
+                            if (clean) {
+                                clearedBy.add(provider);
+                            } else {
                                 commentProviders.add(provider);
                                 comments.add(text);
                             }
@@ -353,9 +377,16 @@ final class ConsortiumHandler {
         private void afterReviewRound() {
             List<String> providersSnapshot;
             List<String> commentsSnapshot;
+            List<String> clearedSnapshot;
+            int thisRound;
             synchronized (this) {
                 providersSnapshot = new ArrayList<>(commentProviders);
                 commentsSnapshot = new ArrayList<>(comments);
+                clearedSnapshot = new ArrayList<>(clearedBy);
+                thisRound = round;
+            }
+            if (!commentsSnapshot.isEmpty() || !clearedSnapshot.isEmpty()) {
+                context.addReviews(thisRound, providersSnapshot, commentsSnapshot, clearedSnapshot);
             }
             if (commentsSnapshot.isEmpty()) {
                 // A whole round with nothing to say: this is what the call was asking for.
@@ -374,7 +405,7 @@ final class ConsortiumHandler {
                 return;
             }
             turn(editor, ConsortiumPrompts.reviseSystem(commentsSnapshot.size()),
-                    ConsortiumPrompts.reviseUser(prompt, answer(), providersSnapshot, commentsSnapshot), "revise",
+                    context.forTurn(ConsortiumPrompts.reviseTask()), "revise",
                     (text, error) -> {
                         if (text == null) {
                             // The comments stand unanswered and there is no revised text to review.
@@ -386,6 +417,8 @@ final class ConsortiumHandler {
                             return;
                         }
                         setAnswer(text);
+                        context.addAnswer("The answer as it now stands (revised after round "
+                                + thisRound + ")", text);
                         beginReviewRound();
                     });
         }

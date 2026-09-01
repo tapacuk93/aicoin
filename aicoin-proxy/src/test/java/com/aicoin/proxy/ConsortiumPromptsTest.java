@@ -3,7 +3,6 @@ package com.aicoin.proxy;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -49,17 +48,22 @@ class ConsortiumPromptsTest {
     }
 
     @Test
-    void mergeAndReviseTurnsCarryTheRequestAndEveryContribution() {
-        String merged = ConsortiumPrompts.mergeUser("What is 2+2?", List.of("anthropic", "kimi"),
-                List.of("four", "4"));
-        assertTrue(merged.contains("What is 2+2?"));
-        assertTrue(merged.contains("four") && merged.contains("4"));
-        assertTrue(merged.contains("Claude") && merged.contains("Kimi"),
-                "drafts are labelled so the editor can weigh disagreement between named panelists");
+    void everyTurnIsToldWhatToDoWithTheSharedRecord() {
+        // The system prompt says who the model is; the record says what has happened; the task
+        // line says what to write now. A turn missing the last one is a model reading a transcript
+        // with no instruction.
+        assertTrue(ConsortiumPrompts.draftTask().toLowerCase().contains("answer"));
+        assertTrue(ConsortiumPrompts.mergeTask().toLowerCase().contains("merge"));
+        assertTrue(ConsortiumPrompts.reviewTask().contains(ConsortiumPrompts.CLEAN_REVIEW));
+        assertTrue(ConsortiumPrompts.reviseTask().toLowerCase().contains("revise"));
+    }
 
-        String revise = ConsortiumPrompts.reviseUser("What is 2+2?", "five", List.of("openai"),
-                List.of("five is wrong; it is four"));
-        assertTrue(revise.contains("five is wrong; it is four"));
-        assertTrue(revise.contains("What is 2+2?"), "the editor needs the request, not only the comments");
+    @Test
+    void reviewersAreToldNotToRepeatWhatTheRecordAlreadySettled() {
+        // The point of giving reviewers the earlier rounds: without this they raise the same
+        // objection every round, and a call that could have settled runs to the cap instead.
+        String system = ConsortiumPrompts.reviewSystem().toLowerCase();
+        assertTrue(system.contains("earlier round"));
+        assertTrue(system.contains("do not repeat"));
     }
 }
