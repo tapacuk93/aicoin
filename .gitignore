@@ -18,3 +18,7 @@ logs/
 # IDE
 .idea/
 *.iml
+
+# Go CLI binary (built to ~/.local/bin, never into the tree)
+cli/aicoin
+__pycache__/

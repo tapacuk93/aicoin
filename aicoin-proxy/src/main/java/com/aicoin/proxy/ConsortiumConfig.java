@@ -17,13 +17,16 @@ final class ConsortiumConfig {
     private final boolean enabled;
     private final int maxRounds;
     private final int maxOutputTokens;
+    private final int maxContextChars;
     private final String editor;
     private final Map<String, String> models;
 
-    ConsortiumConfig(boolean enabled, int maxRounds, int maxOutputTokens, String editor, Map<String, String> models) {
+    ConsortiumConfig(boolean enabled, int maxRounds, int maxOutputTokens, int maxContextChars,
+                      String editor, Map<String, String> models) {
         this.enabled = enabled;
         this.maxRounds = maxRounds;
         this.maxOutputTokens = maxOutputTokens;
+        this.maxContextChars = maxContextChars;
         this.editor = editor == null ? "" : editor;
         this.models = models == null ? Map.of() : new LinkedHashMap<>(models);
     }
@@ -45,6 +48,15 @@ final class ConsortiumConfig {
     /** Output cap sent to every panelist on every turn. */
     int getMaxOutputTokens() {
         return maxOutputTokens;
+    }
+
+    /**
+     * How much of the panel's shared record one turn may be given. It is sent to every panelist on
+     * every turn, so its size is multiplied by the panel and by the rounds, and every character of
+     * it is billed as input. Past this, the oldest rounds are dropped — see {@link SharedContext}.
+     */
+    int getMaxContextChars() {
+        return maxContextChars;
     }
 
     /**

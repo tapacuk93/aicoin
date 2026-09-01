@@ -269,6 +269,7 @@ class ProxyConfigTest {
         assertTrue(consortium.isEnabled());
         assertEquals(3, consortium.getMaxRounds());
         assertEquals(4000, consortium.getMaxOutputTokens());
+        assertEquals(60000, consortium.getMaxContextChars());
         assertEquals("", consortium.getEditor(), "empty means the first panelist");
         for (String provider : ChatAdapter.CHAT_PROVIDERS) {
             assertNotNull(consortium.modelFor(provider), provider + " needs a model to be on a panel");
