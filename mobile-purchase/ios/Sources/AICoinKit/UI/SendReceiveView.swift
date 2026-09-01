@@ -159,7 +159,7 @@ public struct SendReceiveView: View {
         defer { isSending = false }
         do {
             _ = try await walletClient.transfer(to: target, amount: amount, identity: identity)
-            statusMessage = "Sent \(amount.formatted(.number.precision(.fractionLength(0...2)))) AICoin to \(target.prefix(10))…"
+            statusMessage = "Sent \(amount.formatted(.number.precision(.fractionLength(0...2)))) aicoins to \(target.prefix(10))…"
             recipient = ""
             amountText = ""
             await walletStore.refresh()

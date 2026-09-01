@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The "Buy AICoin" sheet: a dynamic, server-driven list of coin packages (via `IAPManager`) with
+/// The "Buy aicoins" sheet: a dynamic, server-driven list of coin packages (via `IAPManager`) with
 /// a prominent statement of how coins are spent — metered per call against what the call cost
 /// to run, floored at one coin, as CONTRACT.md defines — plus a secondary "Send / Receive" tab
 /// for the peer-transfer feature. This is the surface an app should present when
@@ -38,7 +38,7 @@ public struct BuyAICoinSheet: View {
         public static let tabPicker = "aicoin.buySheet.tabPicker"
         /// The headline stating how coins are spent.
         public static let exchangeRate = "aicoin.buySheet.exchangeRate"
-        /// "Current balance: N AICoin" (absent until a balance is known).
+        /// "Current balance: N aicoins" (absent until a balance is known).
         public static let balance = "aicoin.buySheet.balance"
         /// The purchase-failure message (absent unless a purchase failed).
         public static let error = "aicoin.buySheet.error"
@@ -123,7 +123,7 @@ public struct BuyAICoinSheet: View {
             // every unnamed descendant.
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier(Identifiers.root)
-            .navigationTitle("AICoin")
+            .navigationTitle("aicoins")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -147,7 +147,7 @@ public struct BuyAICoinSheet: View {
         // package could be read, let alone bought, which made the sheet a dead end on the Mac.
         //
         // The vertical squeeze also reached the copy above the list: with no room to wrap, the
-        // "A call costs from 1 AICoin…" paragraph collapsed to a single truncated line, so the
+        // "A call costs from 1 aicoin…" paragraph collapsed to a single truncated line, so the
         // pricing explanation was unreadable too.
         //
         // Sized here rather than at each call site because the sheet is presented from several
@@ -161,17 +161,20 @@ public struct BuyAICoinSheet: View {
 
     private var buyTab: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("AICoin pays for AI calls")
+            Text("aicoins pay for AI calls")
                 .font(.title3.bold())
                 .padding(.horizontal)
+                // The heading is the first thing in the tab and was sitting flush against the
+                // top edge, which reads as clipped rather than as a title.
+                .padding(.top)
                 .accessibilityIdentifier(Identifiers.exchangeRate)
-            Text("A call costs from 1 AICoin, more if it's a long one — you're charged what it costs to run, never a subscription and never your own API key.")
+            Text("A call costs from 1 aicoin, more if it's a long one — you're charged what it costs to run, never a subscription and never your own API key.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal)
 
             if let balance = walletStore.balance {
-                Text("Current balance: \(balance.formatted(.number.precision(.fractionLength(0...1)))) AICoin")
+                Text("Current balance: \(balance.formatted(.number.precision(.fractionLength(0...1)))) aicoins")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
@@ -188,7 +191,13 @@ public struct BuyAICoinSheet: View {
 
             if iapManager.isLoading && iapManager.offer == nil && iapManager.packages.isEmpty {
                 Spacer()
+                // Centered across the sheet, not left-aligned with the paragraphs above it. The
+                // enclosing stack is `.leading` so that the copy reads as a column, but a spinner
+                // standing alone in the middle of an otherwise empty sheet belongs in the middle
+                // of it — pinned to the left edge it looks like a stalled row rather than the
+                // whole sheet loading.
                 ProgressView()
+                    .frame(maxWidth: .infinity)
                 Spacer()
             } else if let offer = iapManager.offer {
                 // The offer model: one server-set amount, the same for every app. The package
@@ -196,11 +205,14 @@ public struct BuyAICoinSheet: View {
                 // server with no offer set still has something to sell.
                 Spacer()
                 offerButton(offer)
+                    .frame(maxWidth: .infinity)
                 Spacer()
             } else if iapManager.packages.isEmpty {
                 Spacer()
-                Text("No AICoin packages are available right now.")
+                Text("No aicoins packages are available right now.")
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
                     .accessibilityIdentifier(Identifiers.emptyPackages)
                 Spacer()
             } else {
@@ -218,7 +230,7 @@ public struct BuyAICoinSheet: View {
             Task { await buyOffer(offer) }
         } label: {
             VStack(spacing: 6) {
-                Text("\(offer.coins) AICoin")
+                Text("\(offer.coins) aicoins")
                     .font(.title2.bold())
                 if purchasingProductId != nil {
                     ProgressView()
@@ -265,7 +277,7 @@ public struct BuyAICoinSheet: View {
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(package.coins) AICoin")
+                    Text("\(package.coins) aicoins")
                         .font(.body.weight(.semibold))
                     Text("from \(package.coins) AI calls")
                         .font(.caption)

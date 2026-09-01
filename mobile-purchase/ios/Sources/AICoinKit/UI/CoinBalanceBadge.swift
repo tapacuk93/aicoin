@@ -19,7 +19,7 @@ import SwiftUI
 /// does) overrides that one, so the *balance number* is additionally exposed
 /// two ways that survive any such override: as the button's accessibility
 /// **value** (just the number, e.g. `"1234"` — the stable thing to assert on),
-/// and inside its accessibility **label** (`"1234 AICoin"`, which is what
+/// and inside its accessibility **label** (`"1234 aicoins"`, which is what
 /// VoiceOver reads).
 public struct CoinBalanceBadge: View {
     /// The stable accessibility identifiers this badge exposes. Referenced by
@@ -91,8 +91,8 @@ public struct CoinBalanceBadge: View {
     }
 
     private var accessibilityText: String {
-        guard let balance = store.balance else { return "AICoin balance unavailable" }
-        return "\(Self.format(balance)) AICoin"
+        guard let balance = store.balance else { return "aicoins balance unavailable" }
+        return "\(Self.format(balance)) aicoins"
     }
 
     private var accessibilityValueText: String {
