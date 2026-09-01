@@ -135,6 +135,7 @@ final class AICoinRouterTests: XCTestCase {
             "api.cohere.ai": .cohere,
             "api.elevenlabs.io": .elevenlabs,
             "api.stability.ai": .stability,
+            "api.moonshot.ai": .kimi,
         ]
         XCTAssertEqual(AICoinRouter.knownHosts, expected)
         XCTAssertEqual(AICoinRouter.knownHosts.count, AIProviderRoute.allCases.count, "every provider CONTRACT.md lists should have exactly one host mapping")

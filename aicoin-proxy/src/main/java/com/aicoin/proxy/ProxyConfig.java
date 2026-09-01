@@ -22,7 +22,7 @@ import org.yaml.snakeyaml.Yaml;
 public final class ProxyConfig {
 
     private static final String[] PROVIDERS =
-            {"openai", "anthropic", "google", "mistral", "cohere", "elevenlabs", "stability"};
+            {"openai", "anthropic", "google", "mistral", "cohere", "elevenlabs", "stability", "kimi"};
 
     /** Stable, canonical provider order used everywhere a full provider list must be reported (e.g. {@code GET /health}). */
     public static final List<String> PROVIDER_NAMES = Collections.unmodifiableList(Arrays.asList(PROVIDERS));
@@ -301,6 +301,11 @@ public final class ProxyConfig {
                 List.of("GET /v1/models", "GET /v1/voices", "GET /v1/voices/*", "GET /v1/user", "GET /v1/user/subscription")));
         defaults.put("stability", new ProviderConfig("https://api.stability.ai", "", "Authorization", "Bearer ", false, null,
                 List.of("GET /v1/engines/list", "GET /v1/user/account", "GET /v1/user/balance")));
+        // Moonshot's Kimi, on its OpenAI-compatible surface (`POST /v1/chat/completions`,
+        // `Authorization: Bearer`), which is why it needs no routing of its own beyond this entry.
+        // api.moonshot.ai is still the API host after the platform docs moved to kimi.ai.
+        defaults.put("kimi", new ProviderConfig("https://api.moonshot.ai", "", "Authorization", "Bearer ", false, null,
+                List.of("GET /v1/models", "GET /v1/models/*")));
 
         Map<String, ProviderConfig> providers = new LinkedHashMap<>();
         for (String provider : PROVIDERS) {

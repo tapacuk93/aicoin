@@ -114,6 +114,12 @@ providers:
     authHeader: Authorization                # AICOIN_PROXY_STABILITY_AUTHHEADER
     authPrefix: "Bearer "                    # AICOIN_PROXY_STABILITY_AUTHPREFIX
     freePaths: ["GET /v1/engines/list", "GET /v1/user/account", "GET /v1/user/balance"]   # AICOIN_PROXY_STABILITY_FREEPATHS
+  kimi:
+    baseUrl: https://api.moonshot.ai          # AICOIN_PROXY_KIMI_BASEURL
+    apiKey: ""                               # AICOIN_PROXY_KIMI_APIKEY
+    authHeader: Authorization                # AICOIN_PROXY_KIMI_AUTHHEADER
+    authPrefix: "Bearer "                    # AICOIN_PROXY_KIMI_AUTHPREFIX
+    freePaths: ["GET /v1/models", "GET /v1/models/*"]   # AICOIN_PROXY_KIMI_FREEPATHS
 pricing:
   costPerTokenUsd: 0.000002       # AICOIN_PROXY_COST_PER_TOKEN_USD
   defaultCostUsdPerCall: 0.001    # AICOIN_PROXY_DEFAULT_COST_USD
@@ -136,13 +142,18 @@ through the wallet too — OpenAI's own image generation (DALL-E) already
 goes through the existing `openai` entry, since it's the same
 `api.openai.com` host.
 
+`kimi` is Moonshot's Kimi, reached on its OpenAI-compatible surface
+(`POST /v1/chat/completions`, `Authorization: Bearer`), so it needs no
+handling beyond its own `providers.kimi` entry. Its API host is still
+`api.moonshot.ai` even though the platform docs now live at `kimi.ai`.
+
 ## Routing — same path, header selects the provider, proxy owns the upstream key
 
 The client calls the proxy at **exactly the same path** a real provider
 would use (e.g. `POST /v1/chat/completions`) — only the domain changes to
 the proxy's. There is no path-prefix stripping. A request header `X-AI:
 <provider>` (one of `openai`, `anthropic`, `google`, `mistral`, `cohere`,
-`elevenlabs`, `stability`, case-insensitive) tells the proxy which
+`elevenlabs`, `stability`, `kimi`, case-insensitive) tells the proxy which
 upstream/config to use:
 
 1. The proxy reads `X-AI` and looks up the matching `providers.<name>`
@@ -521,8 +532,9 @@ of them block an event-loop thread.
   counter `POST /wallet/api/claim` atomically decrements, not a static
   admin-managed file. Returns `{"available": N}`; a ledger-lookup failure
   resolves to `{"available": 0}`.
-- `GET /health` — for each of the 7 configured providers (`openai`,
-  `anthropic`, `google`, `mistral`, `cohere`, `elevenlabs`, `stability`),
+- `GET /health` — for each of the 8 configured providers (`openai`,
+  `anthropic`, `google`, `mistral`, `cohere`, `elevenlabs`, `stability`,
+  `kimi`),
   reports whether it has a real (non-empty) `apiKey` configured (`enabled`
   — this is what the landing page reads to show which AI backends are
   actually live) and whether recent upstream calls have hit rate-limiting
@@ -805,9 +817,9 @@ JUnit5 pure-function tests, with no network/Redis dependency required:
   synthetic status codes, per-provider independence, and window-eviction
   behavior once more than `windowSize` calls have been recorded for a
   provider.
-- `HealthHandlerTest` — the `GET /health` JSON body always lists all 7
+- `HealthHandlerTest` — the `GET /health` JSON body always lists all 8
   providers, in the stable `openai, anthropic, google, mistral, cohere,
-  elevenlabs, stability` order, defaulting to the all-clear state for
+  elevenlabs, stability, kimi` order, defaulting to the all-clear state for
   providers with zero recorded calls, and reflecting recorded
   rate-limit/budget statuses for others.
 - `WalletPageHandlerTest` — `GET /wallet` serves the bundled HTML page

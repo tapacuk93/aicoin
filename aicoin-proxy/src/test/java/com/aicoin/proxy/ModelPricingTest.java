@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 /**
- * Pins per-provider, per-model pricing against the shapes the three text providers actually return.
+ * Pins per-provider, per-model pricing against the shapes the text providers actually return.
  *
  * <p>The behaviour under test is that two calls of identical token count but different model, or
  * identical token count split differently between input and output, cost different amounts — which
@@ -68,6 +68,29 @@ class ModelPricingTest {
                 + "\"completion_tokens\":500,\"total_tokens\":1500}}";
         double cost = CostCalculator.computeCostUsd("openai", body, pricing);
         assertEquals(1_000 * 2.50 / 1e6 + 500 * 10.00 / 1e6, cost, 1e-9);
+    }
+
+    @Test
+    void kimiPricesAtItsModelsRatesOnTheOpenAiShape() {
+        // Kimi answers on the OpenAI-compatible surface, so it reports prompt/completion tokens.
+        String body = "{\"model\":\"kimi-k2.6\",\"usage\":{\"prompt_tokens\":10000,"
+                + "\"completion_tokens\":1000,\"total_tokens\":11000}}";
+        double cost = CostCalculator.computeCostUsd("kimi", body, pricing);
+        assertEquals(10_000 * 0.95 / 1e6 + 1_000 * 4.00 / 1e6, cost, 1e-9);
+    }
+
+    @Test
+    void kimiHighSpeedCodeModelBeatsTheShorterPrefix() {
+        // "kimi-k2.7-code" is a prefix of "kimi-k2.7-code-highspeed"; the longer entry must win,
+        // since the high-speed variant bills output at twice the standard rate.
+        String highspeed = "{\"model\":\"kimi-k2.7-code-highspeed\",\"usage\":"
+                + "{\"prompt_tokens\":1000,\"completion_tokens\":1000}}";
+        String standard = "{\"model\":\"kimi-k2.7-code\",\"usage\":"
+                + "{\"prompt_tokens\":1000,\"completion_tokens\":1000}}";
+        assertEquals(1_000 * 0.95 / 1e6 + 1_000 * 8.00 / 1e6,
+                CostCalculator.computeCostUsd("kimi", highspeed, pricing), 1e-9);
+        assertEquals(1_000 * 0.95 / 1e6 + 1_000 * 4.00 / 1e6,
+                CostCalculator.computeCostUsd("kimi", standard, pricing), 1e-9);
     }
 
     @Test

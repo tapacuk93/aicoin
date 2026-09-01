@@ -33,6 +33,7 @@ class ProxyConfigTest {
         assertEquals("https://api.cohere.ai", config.getProviderBaseUrl("cohere"));
         assertEquals("https://api.elevenlabs.io", config.getProviderBaseUrl("elevenlabs"));
         assertEquals("https://api.stability.ai", config.getProviderBaseUrl("stability"));
+        assertEquals("https://api.moonshot.ai", config.getProviderBaseUrl("kimi"));
 
         ProviderConfig openai = config.getProvider("openai");
         assertEquals("", openai.getApiKey());
@@ -57,6 +58,12 @@ class ProxyConfigTest {
         assertEquals("Authorization", stability.getAuthHeader());
         assertEquals("Bearer ", stability.getAuthPrefix());
         assertFalse(stability.isAuthAsQueryParam());
+
+        ProviderConfig kimi = config.getProvider("kimi");
+        assertEquals("Authorization", kimi.getAuthHeader());
+        assertEquals("Bearer ", kimi.getAuthPrefix());
+        assertFalse(kimi.isAuthAsQueryParam());
+        assertTrue(FreeTargets.isFree("GET", "/v1/models", kimi.getFreePaths()));
 
         assertEquals(0.000002, config.getCostPerTokenUsd(), 1e-12);
         assertEquals(0.001, config.getDefaultCostUsdPerCall(), 1e-12);
@@ -251,5 +258,18 @@ class ProxyConfigTest {
 
         // Unrelated providers stay at their defaults.
         assertEquals("https://api.elevenlabs.io", config.getProviderBaseUrl("elevenlabs"));
+    }
+
+    @Test
+    void envVarsOverrideKimiFields() {
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_KIMI_APIKEY", "kimi-key-123");
+        env.put("AICOIN_PROXY_KIMI_BASEURL", "http://localhost:3333");
+
+        ProxyConfig config = ProxyConfig.load(env);
+
+        ProviderConfig kimi = config.getProvider("kimi");
+        assertEquals("kimi-key-123", kimi.getApiKey());
+        assertEquals("http://localhost:3333", kimi.getBaseUrl());
     }
 }

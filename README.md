@@ -91,7 +91,8 @@ The proxy verifies the token, checks that wallet's balance against the
 ledger, forwards the request to OpenAI using the proxy's *own* configured
 key, relays the response back to you unchanged, and — in the background —
 records the call's cost into the price history. `X-AI` also accepts
-`anthropic`, `google`, `mistral`, `cohere`, `elevenlabs`, `stability`.
+`anthropic`, `google`, `mistral`, `cohere`, `elevenlabs`, `stability`,
+`kimi`.
 
 **Check the current price of 1 aicoin:**
 
