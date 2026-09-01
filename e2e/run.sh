@@ -142,18 +142,23 @@ MOCK_PORT=18090
 PROXY_PORT=18080
 REDIS_PORT=16379
 # Each successful claim mints CLAIM_AMOUNT (10) aicoin, not 1 — mirrors the
-# server's hardcoded FREE_CLAIM_AMOUNT_AICOIN in ProxyFrontendHandler. 3
-# legitimate claims before the exhaustion test (carol, alice, dave) + 7
-# funder claims (one per provider tested below) = 10 claims x 10 aicoin =
-# 100 exactly; the pool must hit zero right when the exhaustion test's
-# wallet (erin) tries.
+# live pool. Sized so the legitimate claims add up to exactly the pool, which
+# is what lets the exhaustion test below assert that erin — and only erin —
+# finds it empty. Derived rather than hand-counted: the funder claims are one
+# per provider, so a provider added to PROVIDERS used to silently overdraw the
+# pool and fail an unrelated test three hundred lines away.
+#   3 claims before the exhaustion test (carol, alice, dave)
+# + one funder claim per provider swept below
+# + 3 consortium wallets (grace, heidi, ivan): a consortium is several paid
+#   calls, so each needs a claim of its own
 CLAIM_AMOUNT=10
-FREE_COINS_POOL_SIZE=100
+# (the size itself is computed below, once PROVIDERS is known)
 
 PROVIDERS=(openai anthropic google mistral cohere elevenlabs stability kimi)
 AUTH_HEADERS=(Authorization x-api-key "" Authorization Authorization xi-api-key Authorization Authorization)
 AUTH_PREFIXES=("Bearer " "" "" "Bearer " "Bearer " "" "Bearer " "Bearer ")
 TEST_KEYS=(openai-test-key anthropic-test-key google-test-key mistral-test-key cohere-test-key elevenlabs-test-key stability-test-key kimi-test-key)
+FREE_COINS_POOL_SIZE=$(( CLAIM_AMOUNT * (3 + ${#PROVIDERS[@]} + 3) ))
 
 PROXY_BIN="$REPO_ROOT/aicoin-proxy/build/install/aicoin-proxy/bin/aicoin-proxy"
 if [ -x "$PROXY_BIN" ]; then
@@ -177,7 +182,17 @@ for p in "$MOCK_PORT" "$PROXY_PORT" "$REDIS_PORT"; do
 done
 
 log "starting Redis on :$REDIS_PORT"
-REDIS_CONTAINER=$(docker run -d --rm -p "$REDIS_PORT:6379" redis:7-alpine) || { log "docker run redis failed"; exit 1; }
+# A local redis-server is preferred over the container purely so this suite runs on a machine
+# with no Docker daemon up (a laptop with colima stopped, say). Same server either way — the
+# ledger's Lua scripts are what is under test, not how Redis was started.
+if command -v redis-server >/dev/null 2>&1; then
+  redis-server --port "$REDIS_PORT" --save "" --appendonly no > "$WORKDIR/redis.log" 2>&1 &
+  PIDS+=($!)
+  log "using local redis-server"
+else
+  REDIS_CONTAINER=$(docker run -d --rm -p "$REDIS_PORT:6379" redis:7-alpine) || { log "no redis-server on PATH and docker run redis failed"; exit 1; }
+  log "using the redis:7-alpine container"
+fi
 
 log "starting mock AI provider on :$MOCK_PORT (stands in for all 7 real providers)"
 python3 "$REPO_ROOT/e2e/mock_provider.py" "$MOCK_PORT" > "$WORKDIR/mock.log" 2>&1 &
@@ -206,6 +221,8 @@ AICOIN_PROXY_ELEVENLABS_BASEURL="http://127.0.0.1:$MOCK_PORT" \
 AICOIN_PROXY_ELEVENLABS_APIKEY="${TEST_KEYS[5]}" \
 AICOIN_PROXY_STABILITY_BASEURL="http://127.0.0.1:$MOCK_PORT" \
 AICOIN_PROXY_STABILITY_APIKEY="${TEST_KEYS[6]}" \
+AICOIN_PROXY_KIMI_BASEURL="http://127.0.0.1:$MOCK_PORT" \
+AICOIN_PROXY_KIMI_APIKEY="${TEST_KEYS[7]}" \
   "$PROXY_BIN" > "$WORKDIR/proxy.log" 2>&1 &
 PIDS+=($!)
 
@@ -247,10 +264,10 @@ fi
 bal_carol_after_call=$(balance_of "$ADDR_CAROL")
 [ "$bal_carol_after_call" = "$((CLAIM_AMOUNT - 1))" ] && pass "carol's paid call debited exactly 1 aicoin (balance $CLAIM_AMOUNT -> $((CLAIM_AMOUNT - 1)))" || fail "expected carol balance $((CLAIM_AMOUNT - 1)) after the call, got $bal_carol_after_call"
 
-log "--- test 4: proxy /health lists all 7 providers ---"
+log "--- test 4: proxy /health lists every configured provider ---"
 health=$(curl -s "http://127.0.0.1:$PROXY_PORT/health")
 count=$(echo "$health" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['providers']))")
-[ "$count" = "7" ] && pass "7 providers listed" || fail "expected 7 providers, got: $health"
+[ "$count" = "${#PROVIDERS[@]}" ] && pass "${#PROVIDERS[@]} providers listed" || fail "expected ${#PROVIDERS[@]} providers, got: $health"
 
 log "--- test 5: proxy /price reflects the paid call (and only the paid call — not the free claim) ---"
 sleep 1
@@ -290,18 +307,34 @@ log "--- test 10: overdraft transfer is rejected ---"
 code=$(live_signed_request "$KEY_BOB" "$ADDR_BOB" "POST" "/wallet/api/transfer" "{\"to_user_id\":\"$ADDR_ALICE\",\"amount\":999}" "$WORKDIR/t10.json")
 [ "$code" = "400" ] && pass "400 insufficient balance" || fail "expected 400, got $code: $(cat "$WORKDIR/t10.json")"
 
-log "--- funding: dave claims (for test 16's refund check) and 7 fresh wallets claim+transfer 1 aicoin each to frank (for the one-call-per-provider test) ---"
+# 2 aicoin per funder, not 1: billing is metered, so a call costs what it cost to run rather
+# than a flat coin — the two providers priced per call (ElevenLabs, Stability at $0.03) come to
+# 4 coins each at the current coin value, and a wallet funded one-coin-per-provider ran dry
+# partway through the sweep below.
+FUNDING_PER_PROVIDER=2
+log "--- funding: dave claims (for test 16's refund check) and one fresh wallet per provider claims + transfers $FUNDING_PER_PROVIDER aicoin to frank (for the one-call-per-provider test) ---"
 code=$(live_signed_request "$KEY_DAVE" "$ADDR_DAVE" "POST" "/wallet/api/claim" "" "$WORKDIR/dave-claim.json")
 [ "$code" = "200" ] || fail "expected dave's claim to succeed, got $code: $(cat "$WORKDIR/dave-claim.json")"
 for i in "${!PROVIDERS[@]}"; do
   fkey="$WORKDIR/funder$i.pem"; gen_wallet "$fkey"; faddr=$(wallet_address "$fkey")
   code=$(live_signed_request "$fkey" "$faddr" "POST" "/wallet/api/claim" "" "$WORKDIR/funder$i-claim.json")
   [ "$code" = "200" ] || fail "expected funder$i's claim to succeed, got $code"
-  code=$(live_signed_request "$fkey" "$faddr" "POST" "/wallet/api/transfer" "{\"to_user_id\":\"$ADDR_FRANK\",\"amount\":1}" "$WORKDIR/funder$i-transfer.json")
+  code=$(live_signed_request "$fkey" "$faddr" "POST" "/wallet/api/transfer" "{\"to_user_id\":\"$ADDR_FRANK\",\"amount\":$FUNDING_PER_PROVIDER}" "$WORKDIR/funder$i-transfer.json")
   [ "$code" = "200" ] || fail "expected funder$i's transfer to frank to succeed, got $code"
 done
 bal_frank=$(balance_of "$ADDR_FRANK")
-[ "$bal_frank" = "${#PROVIDERS[@]}" ] || fail "expected frank funded to ${#PROVIDERS[@]}, got $bal_frank"
+[ "$bal_frank" = "$(( FUNDING_PER_PROVIDER * ${#PROVIDERS[@]} ))" ] \
+  || fail "expected frank funded to $(( FUNDING_PER_PROVIDER * ${#PROVIDERS[@]} )), got $bal_frank"
+
+log "--- funding: three wallets claim for the consortium tests (a consortium is many paid calls, not one) ---"
+KEY_GRACE="$WORKDIR/grace.pem"; gen_wallet "$KEY_GRACE"; ADDR_GRACE=$(wallet_address "$KEY_GRACE")
+KEY_HEIDI="$WORKDIR/heidi.pem"; gen_wallet "$KEY_HEIDI"; ADDR_HEIDI=$(wallet_address "$KEY_HEIDI")
+KEY_IVAN="$WORKDIR/ivan.pem"; gen_wallet "$KEY_IVAN"; ADDR_IVAN=$(wallet_address "$KEY_IVAN")
+for pair in "$KEY_GRACE:$ADDR_GRACE" "$KEY_HEIDI:$ADDR_HEIDI" "$KEY_IVAN:$ADDR_IVAN"; do
+  ckey="${pair%%:*}"; caddr="${pair##*:}"
+  code=$(live_signed_request "$ckey" "$caddr" "POST" "/wallet/api/claim" "" "$WORKDIR/consortium-claim.json")
+  [ "$code" = "200" ] || fail "expected a consortium wallet's claim to succeed, got $code"
+done
 
 log "--- test 11: the shared free-coins pool is now exhausted for a brand-new wallet ---"
 code=$(live_signed_request "$KEY_ERIN" "$ADDR_ERIN" "POST" "/wallet/api/claim" "" "$WORKDIR/t11.json")
@@ -318,8 +351,9 @@ for i in "${!PROVIDERS[@]}"; do
   header_name="${AUTH_HEADERS[$i]}"
   expected_value="${AUTH_PREFIXES[$i]}${TEST_KEYS[$i]}"
   outfile="$WORKDIR/t12-$provider.json"
+  headerfile="$WORKDIR/t12-$provider.headers"
   bal_before=$(balance_of "$ADDR_FRANK")
-  code=$(curl -s -o "$outfile" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
+  code=$(curl -s -o "$outfile" -D "$headerfile" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
     -H "X-AI: $provider" -H "X-Api-Key: $FRANK_TOKEN" -H "Content-Type: application/json" -d '{"model":"test"}')
   if [ "$code" != "200" ]; then
     fail "$provider: expected 200, got $code: $(cat "$outfile")"
@@ -335,15 +369,26 @@ print(headers.get('$header_name'.lower()))
 ")
   fi
   bal_after=$(balance_of "$ADDR_FRANK")
-  expected_bal=$(python3 -c "print($bal_before - 1)")
-  if [ "$got_value" = "$expected_value" ] && [ "$bal_after" = "$expected_bal" ]; then
-    pass "$provider: correct key injected ($got_value) and 1 aicoin debited (frank $bal_before -> $bal_after)"
+  # Billing is metered, so what the call costs is the call's own cost rounded up to whole coins —
+  # not a constant this test can hardcode. The proxy states the figure in X-Aicoin-Charged, and
+  # what this asserts is that the wallet moved by exactly that and by nothing else.
+  charged=$(grep -i "^X-Aicoin-Charged:" "$headerfile" | tr -d "\r" | awk "{print \$2}")
+  expected_bal=$(python3 -c "print($bal_before - ${charged:-0})")
+  if [ "$got_value" = "$expected_value" ] && [ -n "$charged" ] && [ "$bal_after" = "$expected_bal" ]; then
+    pass "$provider: correct key injected ($got_value) and $charged aicoin debited (frank $bal_before -> $bal_after)"
   else
-    fail "$provider: expected key '$expected_value' and balance $expected_bal, got key '$got_value' balance $bal_after"
+    fail "$provider: expected key '$expected_value' and balance $expected_bal (charged '$charged'), got key '$got_value' balance $bal_after"
   fi
 done
+# Whatever the sweep left, spend it down to nothing: the zero-balance tests below are about the
+# balance gate, and they should not depend on the sweep's arithmetic landing exactly on zero.
 bal_frank_final=$(balance_of "$ADDR_FRANK")
-[ "$bal_frank_final" = "0" ] && pass "frank spent exactly ${#PROVIDERS[@]} aicoin for ${#PROVIDERS[@]} paid calls (balance now 0)" || fail "expected frank balance 0 after all provider calls, got $bal_frank_final"
+if python3 -c "import sys; sys.exit(0 if float('$bal_frank_final') > 0 else 1)"; then
+  live_signed_request "$KEY_FRANK" "$ADDR_FRANK" "POST" "/wallet/api/transfer" \
+    "{\"to_user_id\":\"$ADDR_BOB\",\"amount\":$bal_frank_final}" "$WORKDIR/frank-drain.json" > /dev/null
+  bal_frank_final=$(balance_of "$ADDR_FRANK")
+fi
+[ "$bal_frank_final" = "0" ] && pass "frank paid for every provider call and is now at 0" || fail "expected frank balance 0 after all provider calls, got $bal_frank_final"
 
 log "--- test 13: an expired API token is rejected ---"
 EXPIRED_TOKEN=$(build_token "$KEY_CAROL" "$ADDR_CAROL" "$((NOW - 200000))" "$((NOW - 100000))")
@@ -455,11 +500,16 @@ weighted_after_free=$(curl -s "http://127.0.0.1:$PROXY_PORT/price" | python3 -c 
 # The mock echoes the injected key back, so this also confirms a free target still goes out with
 # the proxy's own paid credential — free to the wallet, not unauthenticated upstream.
 injected=$(python3 -c "import json;print(json.load(open('$WORKDIR/t21.json')).get('received_authorization'))")
+# weighted_total is a decayed sum, so it drifts down by a hair between any two reads simply
+# because time passed — comparing the two figures as strings made this test fail whenever the
+# run was slow enough for the last digits to move. What it is actually asserting is that no
+# *event* was recorded, and one event is worth ~1.0, so anything under half of that is noise.
+no_new_event=$(python3 -c "print('yes' if 0 <= float('$weighted_before_free') - float('$weighted_after_free') < 0.5 else 'no')")
 if [ "$code" = "200" ] && [ "$bal_after_free" = "$bal_before_free" ] \
-   && [ "$weighted_after_free" = "$weighted_before_free" ] && [ "$injected" = "${AUTH_PREFIXES[0]}${TEST_KEYS[0]}" ]; then
-  pass "free target relayed (200, key injected) with balance unchanged ($bal_after_free) and no price event (weighted_total still $weighted_after_free)"
+   && [ "$no_new_event" = "yes" ] && [ "$injected" = "${AUTH_PREFIXES[0]}${TEST_KEYS[0]}" ]; then
+  pass "free target relayed (200, key injected) with balance unchanged ($bal_after_free) and no price event (weighted_total still ~$weighted_after_free)"
 else
-  fail "expected 200 with balance $bal_before_free and weighted_total $weighted_before_free, got code=$code balance=$bal_after_free weighted=$weighted_after_free injected=$injected"
+  fail "expected 200 with balance $bal_before_free and weighted_total ~$weighted_before_free, got code=$code balance=$bal_after_free weighted=$weighted_after_free injected=$injected"
 fi
 
 log "--- test 22: a free target works at a zero balance, while a paid call at the same balance still 402s ---"
@@ -485,6 +535,114 @@ if [ "$code" = "200" ] && [ "$spent" = "1.0" ]; then
 else
   fail "expected a 1-aicoin debit for the traversal path, got code=$code spent=$spent"
 fi
+
+log "--- test 24: a consortium call drafts with every panelist, merges, reviews, and stops when a round is clean ---"
+NOW=$(epoch_seconds)
+GRACE_TOKEN=$(build_token "$KEY_GRACE" "$ADDR_GRACE" "$NOW" "$((NOW + 86400))")
+bal_grace_before=$(balance_of "$ADDR_GRACE")
+code=$(curl -s -o "$WORKDIR/t24.json" -D "$WORKDIR/t24.headers" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $GRACE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"In one sentence, what is an aicoin?","providers":["openai","anthropic"]}')
+bal_grace_after=$(balance_of "$ADDR_GRACE")
+if [ "$code" = "200" ]; then
+  read -r answer settled rounds calls charged panel editor <<<"$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t24.json'))
+print(d['answer'].replace(' ', '_'), d['settled'], d['rounds'], d['calls'], d['coins_charged'],
+      ','.join(d['panel']), d['editor'])
+")"
+  # 2 drafts + 1 merge + 2 reviews. Every one of them an ordinary paid call.
+  [ "$calls" = "5" ] && [ "$charged" = "5" ] && pass "5 calls, 5 aicoin charged (2 drafts + merge + 2 reviews)" \
+    || fail "expected 5 calls/5 coins, got calls=$calls charged=$charged"
+  [ "$settled" = "True" ] && [ "$rounds" = "1" ] && pass "settled after one clean review round" \
+    || fail "expected settled/1 round, got settled=$settled rounds=$rounds"
+  [ "$answer" = "MERGED_ANSWER" ] && pass "the answer returned is the editor's merge, not one panelist's draft" \
+    || fail "expected the merged answer, got $answer"
+  # Canonical panel order, not the order the request happened to list them in.
+  [ "$panel" = "anthropic,openai" ] && [ "$editor" = "anthropic" ] && pass "panel=[anthropic,openai], editor=anthropic (stable order)" \
+    || fail "expected panel anthropic,openai editor anthropic; got panel=$panel editor=$editor"
+  spent=$(python3 -c "print(round(float('$bal_grace_before') - float('$bal_grace_after'), 6))")
+  [ "$spent" = "5.0" ] && pass "wallet actually paid 5 aicoin" || fail "expected 5 aicoin spent, got $spent"
+  grep -qi "^X-Aicoin-Charged: 5" "$WORKDIR/t24.headers" && pass "X-Aicoin-Charged: 5 (same header a single proxied call sets)" \
+    || fail "missing/incorrect X-Aicoin-Charged: $(grep -i aicoin "$WORKDIR/t24.headers")"
+else
+  fail "expected 200 from /consortium, got $code: $(cat "$WORKDIR/t24.json")"
+fi
+
+log "--- test 25: a round with comments is revised and reviewed again, until a round comes back clean ---"
+NOW=$(epoch_seconds)
+HEIDI_TOKEN=$(build_token "$KEY_HEIDI" "$ADDR_HEIDI" "$NOW" "$((NOW + 86400))")
+code=$(curl -s -o "$WORKDIR/t25.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $HEIDI_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"NEEDS_ONE_ROUND_OF_COMMENTS: what is an aicoin?","providers":["openai","anthropic"]}')
+if [ "$code" = "200" ]; then
+  read -r answer settled rounds calls reason clean_first <<<"$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t25.json'))
+first = [r for r in d['reviews'] if r['round'] == 1]
+print(d['answer'].replace(' ', '_'), d['settled'], d['rounds'], d['calls'], d['stopped_reason'],
+      all(r['clean'] for r in first))
+")"
+  [ "$clean_first" = "False" ] && pass "round 1 reviewers had comments" || fail "expected comments in round 1"
+  [ "$rounds" = "2" ] && [ "$settled" = "True" ] && [ "$reason" = "clean" ] \
+    && pass "round 2 came back clean; the call stopped there" || fail "expected 2 rounds ending clean, got rounds=$rounds settled=$settled reason=$reason"
+  [ "$answer" = "REVISED_ANSWER" ] && pass "the answer returned is the revision, not the text the reviewers objected to" \
+    || fail "expected the revised answer, got $answer"
+  # 2 drafts + merge + 2 reviews + revise + 2 reviews.
+  [ "$calls" = "8" ] && pass "8 calls for two rounds" || fail "expected 8 calls, got $calls"
+else
+  fail "expected 200 from /consortium, got $code: $(cat "$WORKDIR/t25.json")"
+fi
+
+log "--- test 26: reviewers that never clear are ended by the round cap, not by agreement ---"
+NOW=$(epoch_seconds)
+IVAN_TOKEN=$(build_token "$KEY_IVAN" "$ADDR_IVAN" "$NOW" "$((NOW + 86400))")
+code=$(curl -s -o "$WORKDIR/t26.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $IVAN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"ALWAYS_COMMENTS: what is an aicoin?","providers":["openai","anthropic"],"max_rounds":1}')
+if [ "$code" = "200" ]; then
+  read -r settled rounds reason calls <<<"$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t26.json'))
+print(d['settled'], d['rounds'], d['stopped_reason'], d['calls'])
+")"
+  [ "$settled" = "False" ] && [ "$reason" = "round_limit" ] && [ "$rounds" = "1" ] \
+    && pass "stopped at the cap, and says so (settled=false, stopped_reason=round_limit)" \
+    || fail "expected an unsettled round_limit stop, got settled=$settled reason=$reason rounds=$rounds"
+  [ "$calls" = "5" ] && pass "the cap bounded the spend at 5 calls" || fail "expected 5 calls, got $calls"
+else
+  fail "expected 200 from /consortium, got $code: $(cat "$WORKDIR/t26.json")"
+fi
+
+log "--- test 27: a wallet that runs dry mid-consortium keeps the answer it paid for ---"
+bal_ivan=$(balance_of "$ADDR_IVAN")
+log "ivan has $bal_ivan aicoin left — enough for the drafts, the merge and one review round, not for the revision"
+code=$(curl -s -o "$WORKDIR/t27.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $IVAN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"ALWAYS_COMMENTS: what is an aicoin?","providers":["openai","anthropic"],"max_rounds":3}')
+if [ "$code" = "200" ]; then
+  read -r answer reason settled <<<"$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t27.json'))
+print(d['answer'].replace(' ', '_'), d['stopped_reason'], d['settled'])
+")"
+  [ "$reason" = "insufficient_balance" ] && [ "$settled" = "False" ] \
+    && pass "stopped on an empty wallet and said so, rather than 402-ing away work already paid for" \
+    || fail "expected stopped_reason=insufficient_balance, got reason=$reason settled=$settled"
+  [ "$answer" = "MERGED_ANSWER" ] && pass "the answer paid for is still returned" || fail "expected an answer, got $answer"
+else
+  fail "expected 200 from a consortium that ran out of coins, got $code: $(cat "$WORKDIR/t27.json")"
+fi
+bal_ivan_after=$(balance_of "$ADDR_IVAN")
+python3 -c "import sys; sys.exit(0 if float('$bal_ivan_after') >= 0 else 1)" \
+  && pass "balance never went negative ($bal_ivan_after)" || fail "balance went negative: $bal_ivan_after"
+
+log "--- test 28: /consortium is a paid endpoint and validates its body ---"
+code=$(curl -s -o "$WORKDIR/t28a.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" -d '{"prompt":"hi"}')
+[ "$code" = "401" ] && pass "401 without an API token" || fail "expected 401, got $code: $(cat "$WORKDIR/t28a.json")"
+code=$(curl -s -o "$WORKDIR/t28b.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $GRACE_TOKEN" -H "Content-Type: application/json" -d '{"providers":["openai"]}')
+[ "$code" = "400" ] && pass "400 with no prompt (before any provider is touched)" || fail "expected 400, got $code: $(cat "$WORKDIR/t28b.json")"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

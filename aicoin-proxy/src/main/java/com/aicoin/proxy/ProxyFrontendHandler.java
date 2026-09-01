@@ -188,6 +188,19 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
 
+        if (request.method() == HttpMethod.POST && "/consortium".equals(path)) {
+            if (!config.getConsortium().isEnabled()) {
+                sendJsonError(ctx, HttpResponseStatus.NOT_FOUND, "consortium is not enabled");
+                return;
+            }
+            // Read before the token check goes asynchronous: this request object is recycled the
+            // moment channelRead0 returns, and the body is needed after it.
+            byte[] consortiumBody = ByteBufUtil.getBytes(request.content());
+            requireApiToken(ctx, request, walletAddress -> ConsortiumHandler.serve(
+                    ctx, consortiumBody, config, clientGroup, healthTracker, ledger, walletAddress));
+            return;
+        }
+
         Optional<String> apiKeyOpt = WalletValidation.extractWalletId(request.headers().get(X_API_KEY_HEADER));
         if (!apiKeyOpt.isPresent()) {
             sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, "missing X-Api-Key (API token)");
@@ -297,6 +310,40 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
         onVerified.accept(result.getAddress());
+    }
+
+    /**
+     * Verifies the {@code X-Api-Key} API token the same way the generic {@code X-AI} path does —
+     * peek the address, read that wallet's revocation cut-off, then {@link
+     * WalletSignature#verifyToken} — and invokes {@code onVerified} with the signer's address.
+     * On any failure it responds {@code 401} with the specific reason and never invokes it.
+     *
+     * <p>Used by the proxy's own POST endpoints that spend a wallet's coins without forwarding a
+     * client's request ({@code POST /consortium}). Those need the same credential as a proxied
+     * call — a token, never a bare address — because they are the same thing to a wallet: calls
+     * that cost it money.
+     */
+    private void requireApiToken(ChannelHandlerContext ctx, FullHttpRequest request, Consumer<String> onVerified) {
+        Optional<String> apiKeyOpt = WalletValidation.extractWalletId(request.headers().get(X_API_KEY_HEADER));
+        if (!apiKeyOpt.isPresent()) {
+            sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, "missing X-Api-Key (API token)");
+            return;
+        }
+        String apiKeyHeader = apiKeyOpt.get();
+        Optional<String> peekedAddress = WalletSignature.peekTokenAddress(apiKeyHeader);
+        if (!peekedAddress.isPresent()) {
+            sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, "invalid API token");
+            return;
+        }
+        ledger.getTokenRevokedBefore(peekedAddress.get(), revokedBefore -> {
+            WalletSignature.AuthResult authResult = WalletSignature.verifyToken(
+                    apiKeyHeader, Instant.now().toEpochMilli(), revokedBefore.orElse(null));
+            if (!authResult.isValid()) {
+                sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, authResult.getFailureReason());
+                return;
+            }
+            onVerified.accept(authResult.getAddress());
+        });
     }
 
     private void sendPrice(ChannelHandlerContext ctx) {

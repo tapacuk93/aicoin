@@ -51,6 +51,7 @@ public final class ProxyConfig {
     private final int accessLogMaxBytes;
     private final int accessLogCount;
     private final int upstreamReadTimeoutSeconds;
+    private final ConsortiumConfig consortium;
 
     private ProxyConfig(int port, String redisHost, int redisPort, String redisUsername, String redisPassword, boolean redisSsl,
                          double decayHalflifeDays, int freeClaimCooldownSeconds, int signatureSkewSeconds,
@@ -60,7 +61,7 @@ public final class ProxyConfig {
                          ModelPricing modelPricing, double coinValueUsd, boolean meteredBilling,
                          boolean acceptSandboxPurchases,
                          String accessLogPath, int accessLogMaxBytes, int accessLogCount,
-                         int upstreamReadTimeoutSeconds) {
+                         int upstreamReadTimeoutSeconds, ConsortiumConfig consortium) {
         this.port = port;
         this.redisHost = redisHost;
         this.redisPort = redisPort;
@@ -85,6 +86,7 @@ public final class ProxyConfig {
         this.accessLogMaxBytes = accessLogMaxBytes;
         this.accessLogCount = accessLogCount;
         this.upstreamReadTimeoutSeconds = upstreamReadTimeoutSeconds;
+        this.consortium = consortium;
     }
 
     /**
@@ -264,6 +266,11 @@ public final class ProxyConfig {
         return upstreamReadTimeoutSeconds;
     }
 
+    /** @return the {@code consortium} block — see {@link ConsortiumHandler}. */
+    ConsortiumConfig getConsortium() {
+        return consortium;
+    }
+
     public static ProxyConfig load() {
         return load(System.getenv());
     }
@@ -373,12 +380,63 @@ public final class ProxyConfig {
         healthWindowSize = envInt(env, "AICOIN_PROXY_HEALTH_WINDOW_SIZE", healthWindowSize);
 
         ModelPricing modelPricing = parseModelPricing(yaml, costPerTokenUsd, defaultCostUsdPerCall);
+        ConsortiumConfig consortium = parseConsortium(yaml, env);
 
         return new ProxyConfig(port, redisHost, redisPort, redisUsername, redisPassword, redisSsl,
                 decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
                 costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages, modelPricing,
                 coinValueUsd, meteredBilling, acceptSandboxPurchases,
-                accessLogPath, accessLogMaxBytes, accessLogCount, upstreamReadTimeoutSeconds);
+                accessLogPath, accessLogMaxBytes, accessLogCount, upstreamReadTimeoutSeconds, consortium);
+    }
+
+    /**
+     * Reads the optional {@code consortium} block. The defaults name a current, generally-available
+     * chat model on each provider this proxy can hold a turn with; a deployment that wants another
+     * one sets {@code consortium.models.<provider>} or {@code AICOIN_PROXY_CONSORTIUM_<PROVIDER>_MODEL}
+     * rather than waiting for a release.
+     *
+     * <pre>
+     * consortium:
+     *   enabled: true
+     *   maxRounds: 3
+     *   maxOutputTokens: 4000
+     *   editor: ""            # empty: the first panelist
+     *   models:
+     *     anthropic: claude-sonnet-5
+     * </pre>
+     */
+    private static ConsortiumConfig parseConsortium(Map<String, Object> yaml, Map<String, String> env) {
+        boolean enabled = getBoolean(yaml, "consortium.enabled", true);
+        int maxRounds = getInt(yaml, "consortium.maxRounds", 3);
+        int maxOutputTokens = getInt(yaml, "consortium.maxOutputTokens", 4000);
+        String editor = getString(yaml, "consortium.editor", "");
+
+        Map<String, String> defaults = new LinkedHashMap<>();
+        defaults.put("anthropic", "claude-sonnet-5");
+        defaults.put("openai", "gpt-5");
+        defaults.put("google", "gemini-3.5-flash");
+        defaults.put("mistral", "mistral-large-latest");
+        defaults.put("kimi", "kimi-k2.6");
+
+        Map<String, String> models = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : defaults.entrySet()) {
+            String provider = entry.getKey();
+            String model = getString(yaml, "consortium.models." + provider, entry.getValue());
+            model = envStr(env, "AICOIN_PROXY_CONSORTIUM_" + provider.toUpperCase(java.util.Locale.ROOT) + "_MODEL", model);
+            models.put(provider, model);
+        }
+
+        enabled = envBool(env, "AICOIN_PROXY_CONSORTIUM_ENABLED", enabled);
+        maxRounds = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_ROUNDS", maxRounds);
+        maxOutputTokens = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS", maxOutputTokens);
+        editor = envStr(env, "AICOIN_PROXY_CONSORTIUM_EDITOR", editor);
+
+        // A round cap of zero would mean "draft, merge, and ship unreviewed", which is not a
+        // consortium; a negative one is meaningless. One round is the floor.
+        if (maxRounds < 1) {
+            maxRounds = 1;
+        }
+        return new ConsortiumConfig(enabled, maxRounds, maxOutputTokens, editor, models);
     }
 
     /**

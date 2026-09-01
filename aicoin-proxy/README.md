@@ -120,6 +120,17 @@ providers:
     authHeader: Authorization                # AICOIN_PROXY_KIMI_AUTHHEADER
     authPrefix: "Bearer "                    # AICOIN_PROXY_KIMI_AUTHPREFIX
     freePaths: ["GET /v1/models", "GET /v1/models/*"]   # AICOIN_PROXY_KIMI_FREEPATHS
+consortium:                        # POST /consortium — see its own section below
+  enabled: true                    # AICOIN_PROXY_CONSORTIUM_ENABLED (false serves 404)
+  maxRounds: 3                     # AICOIN_PROXY_CONSORTIUM_MAX_ROUNDS
+  maxOutputTokens: 4000            # AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS
+  editor: ""                       # AICOIN_PROXY_CONSORTIUM_EDITOR (empty: the first panelist)
+  models:                          # AICOIN_PROXY_CONSORTIUM_<PROVIDER>_MODEL
+    anthropic: claude-sonnet-5
+    openai: gpt-5
+    google: gemini-3.5-flash
+    mistral: mistral-large-latest
+    kimi: kimi-k2.6
 pricing:
   costPerTokenUsd: 0.000002       # AICOIN_PROXY_COST_PER_TOKEN_USD
   defaultCostUsdPerCall: 0.001    # AICOIN_PROXY_DEFAULT_COST_USD
@@ -521,6 +532,75 @@ All operations are async (Lettuce's `RedisFuture`/`CompletableFuture`
 API), matching the rest of this codebase's non-blocking Netty style — none
 of them block an event-loop thread.
 
+## Consortium — one request, every AI, reviewed until nobody objects
+
+`POST /consortium` is the one endpoint where this proxy *writes* provider
+requests rather than forwarding somebody else's. The client sends a prompt;
+every configured AI answers it; the answers are merged into one; then every
+AI reviews that answer, round after round, until a round comes back with no
+comments.
+
+```
+curl -X POST http://localhost:8080/consortium \
+  -H "X-Api-Key: $AICOIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"What breaks first when a proxy meters billing per call?"}'
+```
+
+```json
+{"answer":"...","settled":true,"stopped_reason":"clean","rounds":2,
+ "panel":["anthropic","openai","google","kimi"],"editor":"anthropic",
+ "calls":13,"coins_charged":15,
+ "reviews":[{"round":1,"provider":"openai","clean":false,"comments":"..."}],
+ "errors":[]}
+```
+
+Body fields, all but `prompt` optional: `providers` (narrow the panel),
+`editor`, `max_rounds` (may only lower `consortium.maxRounds`),
+`include_transcript` (also return every draft).
+
+**The panel** is every provider this proxy knows a chat shape for —
+`anthropic`, `openai`, `google`, `mistral`, `kimi` — that this deployment
+has both a key and a `consortium.models.<provider>` entry for. `elevenlabs`
+and `stability` are not chat APIs; `cohere` is one whose shape is not
+implemented here. A caller can narrow the panel, never extend it. No panel
+at all is a `503`.
+
+**The rounds:** draft (every panelist, independently) → merge (the editor,
+skipped when there is only one draft) → review (every panelist replies
+either exactly `NO COMMENTS` or with a list of problems) → revise (the
+editor applies the comments) → review again. It stops on a clean round
+(`settled: true`) or at `consortium.maxRounds` (`settled: false`,
+`stopped_reason: "round_limit"`).
+
+The cap is what makes it terminate. Reviewers asked to find fault can always
+find some, so "until no more comments" without a bound is an unbounded
+spend, and every round is one paid call per panelist.
+
+`NO COMMENTS` is read strictly — the whole reply, ignoring case, whitespace
+and markdown emphasis, must be that phrase. "No comments, though section 2
+is wrong" is comments. The strictness costs an extra round when a reviewer
+rambles; the other reading ships an answer a reviewer just objected to.
+
+**Billing is not special.** Every turn is an ordinary paid call: one aicoin
+held before it, the metered remainder settled from that provider's own
+reported usage, a refund when the provider never answered. Four panelists
+over two rounds is 13 calls, billed as 13 calls; `calls` and
+`coins_charged` say so, and the response carries the same
+`X-Aicoin-Charged` header a single proxied call does.
+
+**Partial results come back rather than being thrown away.** A wallet that
+runs dry mid-call stops there and returns the best answer so far
+(`stopped_reason: "insufficient_balance"`); only a call that cannot afford
+its first turn gets `402`. A panelist that errors, times out, or returns a
+2xx with no text in it (a reasoning model can spend its whole output cap
+thinking) is dropped from that round, recorded in `errors`, and the rest
+carry on. Only if *nobody* drafts is it a `502`. A client that disconnects
+stops the rounds at the next boundary — the turns already in flight are
+paid for and cannot be recalled.
+
+A consortium call takes minutes, not seconds, and holds one HTTP connection
+open for the whole of it.
+
 ## Additional proxy-side endpoints
 
 - `GET /price` — computed directly from the ledger, returns
@@ -743,7 +823,20 @@ degrades to report-only whenever an offer exists, whatever was asked for.
 JUnit5 pure-function tests, with no network/Redis dependency required:
 
 - `ProviderRoutingTest` — `X-AI` header → provider resolution, including
-  case-insensitivity and the missing/unknown case, across all 7 providers.
+  case-insensitivity and the missing/unknown case, across every provider.
+- `ChatAdapterTest` — the consortium's per-provider chat shapes: Anthropic's
+  top-level `system`, OpenAI's `max_completion_tokens` (its newer models
+  reject `max_tokens` outright), Gemini's model-in-the-path and `parts[]`,
+  and reading the assistant's text back out of each — including a 2xx that
+  carries no text at all, and a Gemini `thought` part, which is the model's
+  scratchpad and not its answer.
+- `ConsortiumPromptsTest` — the `NO COMMENTS` reading. Strict on purpose:
+  "no comments, but X is wrong" is comments.
+- `ConsortiumHandlerTest` — panel and editor selection: only chat-capable
+  providers with a key and a model, in a stable order, narrowable by the
+  caller but never extendable.
+- `JsonTest` — the escape that carries model output into a provider request
+  body and into this proxy's own response.
 - `WalletValidationTest` — `X-Api-Key` header extraction
   (missing/blank/whitespace-trimmed) — pure logic only; the balance gate is
   now the atomic `AicoinLedger.debitForCall`, which needs a live Redis

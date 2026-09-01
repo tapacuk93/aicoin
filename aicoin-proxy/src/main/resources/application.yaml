@@ -108,10 +108,19 @@ pricing:
     openai:
       inputUsdPerMillionTokens: 2.50
       outputUsdPerMillionTokens: 10.00
+      models:
+        # The consortium's default OpenAI panelist. Named here because the provider default above
+        # is dearer on input than GPT-5 actually is, and a rate this proxy gets wrong in either
+        # direction ends up in GET /price.
+        gpt-5: { inputUsdPerMillionTokens: 1.25, outputUsdPerMillionTokens: 10.00 }
     google:
       inputUsdPerMillionTokens: 0.30
       outputUsdPerMillionTokens: 2.50
       models:
+        # The consortium's default Google panelist, at five times the provider default's input
+        # rate. Without this line every consortium call through Gemini would be recorded at a
+        # fraction of what it cost.
+        gemini-3.5-flash: { inputUsdPerMillionTokens: 1.50, outputUsdPerMillionTokens: 9.00 }
         # Billed per image, not by the tokens the response happens to report. Left here as well as
         # in the built-in defaults so the figure can be corrected without a release when Google
         # moves it.
@@ -134,6 +143,32 @@ pricing:
       usdPerCall: 0.03
     stability:
       usdPerCall: 0.03
+# One request answered by every configured AI at once, merged, then reviewed by all of them until
+# a whole round comes back with no comments. See CONTRACT.md's "Consortium" section; every turn is
+# an ordinary paid call, so the round cap is also a spend cap.
+consortium:
+  # Env: AICOIN_PROXY_CONSORTIUM_ENABLED. Off serves 404, as if the endpoint did not exist.
+  enabled: true
+  # The most review rounds one call may run before it returns what it has. Reviewers asked to find
+  # fault can always find some, so this — not agreement — is what guarantees the call ends.
+  # Env: AICOIN_PROXY_CONSORTIUM_MAX_ROUNDS.
+  maxRounds: 3
+  # Output cap per turn. Generous because the reasoning models on this panel spend part of it
+  # thinking, and a turn that runs out mid-thought comes back with no text at all.
+  # Env: AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS.
+  maxOutputTokens: 4000
+  # Who merges the drafts and applies the comments. Empty means the first panelist.
+  # Env: AICOIN_PROXY_CONSORTIUM_EDITOR.
+  editor: ""
+  # What each panelist answers with. Config, not code: providers rename and retire models on their
+  # own schedule, and a consortium that 400s because an id lapsed should be a restart away from
+  # working. Env: AICOIN_PROXY_CONSORTIUM_<PROVIDER>_MODEL.
+  models:
+    anthropic: claude-sonnet-5
+    openai: gpt-5
+    google: gemini-3.5-flash
+    mistral: mistral-large-latest
+    kimi: kimi-k2.6
 health:
   windowSize: 50
 upstream:
