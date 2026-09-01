@@ -69,13 +69,27 @@ matching step 1's defaults, so no extra config is needed for a local setup.
 ```
 cd cli && go build -o ~/.local/bin/aicoin .
 aicoin new && aicoin claim
-aicoin consortium "what breaks first when a proxy meters billing per call?"
+
+cd ~/src/my-project
+aicoin "why does the build fail on a clean checkout?" -f "*.go"
 ```
 
-A single Go binary, no dependencies outside the standard library, that does everything the wallet
-page does — create a wallet, check a balance, claim, transfer, issue and revoke tokens — plus
-`ask` (one model) and `consortium` (all of them, reviewed until nobody objects). The answer goes to
-stdout and the accounting to stderr, so it pipes. Full reference: [`cli/README.md`](./cli/README.md).
+A single Go binary, no dependencies outside the standard library. With no command word the whole
+line is a question for the **panel**: every configured model answers it, an editor merges the
+answers, and then all of them review the result until a round comes back with no comments. The files
+in the working directory are listed for them by default and `-f` includes the ones you name, so a
+question asked inside a project is answered about that project.
+
+It also does everything the wallet page does — create a wallet, check a balance, claim, transfer,
+issue and revoke tokens — plus `ask` for a single model. While a call runs it shows the wallet and a
+clock; when it lands it shows what the call took out of the balance:
+
+```
+◆◆◆◆◇◇◇◇◇◇  15 aicoin spent · 27 left
+```
+
+The answer goes to stdout and all of that to stderr, so it pipes. Full reference:
+[`cli/README.md`](./cli/README.md).
 
 ## Using it
 

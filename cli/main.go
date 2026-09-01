@@ -25,6 +25,10 @@ const defaultProxyURL = "https://proxy.aicoin.oeaio.com"
 
 const usage = `aicoin — command-line wallet and AI client for an aicoin-proxy
 
+  aicoin "<question>"              ask the whole panel: every model answers, then they
+                                   review the answer until nobody objects. Files in the
+                                   current directory are listed for them; -f adds contents.
+
   Wallet
     aicoin new [-force]              create a wallet (refuses to overwrite without -force)
     aicoin show                      address and balance
@@ -37,8 +41,12 @@ const usage = `aicoin — command-line wallet and AI client for an aicoin-proxy
     aicoin revoke                    invalidate every token issued so far
 
   Calls (these spend coins)
+    aicoin consortium [flags] <prompt>         the same thing, spelled out
+      -f <glob>       include a file's contents (repeatable: -f "*.go" -f README.md)
+      -dir <path>     which directory the panel sees (default: this one; -dir "" for none)
+      -providers a,b  narrow the panel      -rounds N   cap the review rounds
+      -v              show each round's comments        -json  the raw response
     aicoin ask [-ai p] [-model m] <prompt>     one model, one answer
-    aicoin consortium [flags] <prompt>         every model, then reviewed until nobody objects
     aicoin call -ai <p> <path> [-data <json>]  raw pass-through to a provider's own API
 
   Proxy
@@ -91,13 +99,30 @@ func main() {
 		fmt.Print(usage)
 		return
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", command, usage)
-		os.Exit(2)
+		// No command word: the whole line is a question for the panel. `aicoin "why does this
+		// build fail?"` is the thing this CLI is for, and making people type `consortium` first
+		// only buys them a longer way to say it.
+		err = cmdConsortium(os.Args[1:])
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "aicoin: "+err.Error())
 		os.Exit(1)
 	}
+}
+
+// stringList collects a flag given more than once: -f "*.go" -f README.md.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(value string) error {
+	// A comma-separated single use is what people try first, so accept both forms.
+	for _, part := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			*l = append(*l, trimmed)
+		}
+	}
+	return nil
 }
 
 // common registers the flags every command shares and returns accessors for them.
@@ -585,10 +610,22 @@ func cmdAsk(args []string) error {
 	} else {
 		fmt.Println(text)
 	}
-	if charged := headers.Get("X-Aicoin-Charged"); charged != "" {
-		fmt.Fprintf(os.Stderr, "%s aicoin\n", charged)
-	}
+	reportCharge(newClient(*url, 30*time.Second), wallet, headers.Get("X-Aicoin-Charged"))
 	return nil
+}
+
+// reportCharge says what a single call took and what the wallet has left. The charge is in the
+// response header; the remainder costs one more read, which is worth it — "1 aicoin" alone does
+// not tell anyone whether they are about to run out.
+func reportCharge(client *Client, wallet *Wallet, charged string) {
+	if charged == "" {
+		return
+	}
+	if balance, err := client.balance(wallet.Address); err == nil {
+		fmt.Fprintf(os.Stderr, "%s aicoin · %s left\n", charged, formatCoins(balance))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s aicoin\n", charged)
 }
 
 func cmdConsortium(args []string) error {
@@ -597,7 +634,11 @@ func cmdConsortium(args []string) error {
 	providers := fs.String("providers", "", "comma-separated panel (default: every configured model)")
 	editor := fs.String("editor", "", "which model merges and revises (default: the first panelist)")
 	rounds := fs.Int("rounds", 0, "cap the review rounds (may only lower the proxy's own cap)")
-	context := fs.String("context", "", "background every panelist sees; @file reads a file")
+	context := fs.String("context", "", "extra background every panelist sees; @file reads a file")
+	dir := fs.String("dir", ".", "directory the panel is shown; empty for none")
+	var include stringList
+	fs.Var(&include, "f", "include this file's contents (glob; repeatable)")
+	budget := fs.Int("budget", 40000, "how many characters of directory context to send at most")
 	verbose := fs.Bool("v", false, "also print each round's comments")
 	asJSON := fs.Bool("json", false, "print the proxy's response verbatim")
 	if err := parse(fs, args); err != nil {
@@ -619,6 +660,25 @@ func cmdConsortium(args []string) error {
 	wallet, err := loadWallet(*walletPath)
 	if err != nil {
 		return err
+	}
+
+	// What the panel is told about where this was run. The listing goes by default because a
+	// question asked inside a project is nearly always about that project; contents are opt-in,
+	// because every character of them is billed to every panelist on every round.
+	if *dir != "" {
+		gathered, dirErr := gatherDir(*dir, include, *budget)
+		if dirErr != nil {
+			return dirErr
+		}
+		background = strings.TrimSpace(gathered.Text + "\n\n" + background)
+		note := fmt.Sprintf("context: %d files listed", gathered.Listed)
+		if gathered.FileCount > 0 {
+			note += fmt.Sprintf(", %d included in full", gathered.FileCount)
+		}
+		if gathered.Truncated {
+			note += " (trimmed to fit)"
+		}
+		fmt.Fprintf(os.Stderr, "%s, %d chars\n", note, gathered.Chars)
 	}
 
 	request := map[string]any{"prompt": prompt}
@@ -645,10 +705,21 @@ func cmdConsortium(args []string) error {
 		return err
 	}
 
-	fmt.Fprintln(os.Stderr, "asking the panel — this takes minutes, and every turn is a paid call...")
+	client := newClient(*url, 30*time.Minute)
+	// The balance before, so the cost of this call can be stated afterwards rather than left for
+	// the user to work out from two `aicoin show`s.
+	balanceBefore, balanceErr := client.balance(wallet.Address)
+	if balanceErr == nil {
+		fmt.Fprintf(os.Stderr, "wallet %s… · %s aicoin\n", wallet.Address[:12], formatCoins(balanceBefore))
+	}
+
+	// Nothing comes back until every round is done, so this is the only thing between the user and
+	// a call that legitimately runs for minutes — and the only way to tell it apart from a hang.
+	spin := startSpinner("asking the panel · every turn is a paid call")
 	// Long, because it is: a full consortium is one call per panelist per round, run to
 	// completion before anything comes back.
-	responseBody, _, err := newClient(*url, 30*time.Minute).withToken(wallet, "POST", "/consortium", body, nil)
+	responseBody, _, err := client.withToken(wallet, "POST", "/consortium", body, nil)
+	spin.finish()
 	if err != nil {
 		return err
 	}
@@ -702,9 +773,16 @@ func cmdConsortium(args []string) error {
 	if parsed.Settled {
 		outcome = "settled — a whole round with no comments"
 	}
-	fmt.Fprintf(os.Stderr, "\n%s | %d round(s), %d calls, %d aicoin | panel %s, editor %s\n",
-		outcome, parsed.Rounds, parsed.Calls, parsed.CoinsCharged,
-		strings.Join(parsed.Panel, ","), parsed.Editor)
+	fmt.Fprintf(os.Stderr, "\n%s | %d round(s), %d calls | panel %s, editor %s\n",
+		outcome, parsed.Rounds, parsed.Calls, strings.Join(parsed.Panel, ","), parsed.Editor)
+	if balanceErr == nil {
+		balanceAfter, afterErr := client.balance(wallet.Address)
+		if afterErr == nil {
+			fmt.Fprintln(os.Stderr, coinBar(balanceBefore, balanceAfter, parsed.CoinsCharged))
+			return nil
+		}
+	}
+	fmt.Fprintf(os.Stderr, "%s aicoin spent\n", formatCoins(float64(parsed.CoinsCharged)))
 	return nil
 }
 
