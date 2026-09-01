@@ -36,14 +36,14 @@ class HealthHandlerTest {
     }
 
     @Test
-    void listsAllSevenProvidersEvenWithZeroTraffic() {
+    void listsEveryProviderEvenWithZeroTraffic() {
         ProviderHealthTracker tracker = new ProviderHealthTracker(50);
 
         List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker, configWithNoKeys()));
 
-        assertEquals(7, providers.size());
+        assertEquals(8, providers.size());
         assertEquals(
-                List.of("openai", "anthropic", "google", "mistral", "cohere", "elevenlabs", "stability"),
+                List.of("openai", "anthropic", "google", "mistral", "cohere", "elevenlabs", "stability", "kimi"),
                 providers.stream().map(p -> (String) p.get("name")).collect(java.util.stream.Collectors.toList()));
 
         for (Map<String, Object> p : providers) {
@@ -59,7 +59,7 @@ class HealthHandlerTest {
         tracker.record("openai", 429);
 
         List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker, configWithNoKeys()));
-        assertEquals(7, providers.size());
+        assertEquals(8, providers.size());
 
         Map<String, Object> openai = findByName(providers, "openai");
         assertEquals(Boolean.FALSE, openai.get("healthy"));

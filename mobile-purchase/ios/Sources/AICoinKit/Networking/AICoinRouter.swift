@@ -1,7 +1,7 @@
 import Foundation
 
 /// One AI provider the aicoin-proxy understands, per CONTRACT.md's `providers.*` config block and
-/// its `X-AI` header vocabulary (`openai|anthropic|google|mistral|cohere|elevenlabs|stability`,
+/// its `X-AI` header vocabulary (`openai|anthropic|google|mistral|cohere|elevenlabs|stability|kimi`,
 /// case-insensitive on the wire; this package always sends the canonical lowercase `rawValue`).
 public enum AIProviderRoute: String, CaseIterable, Sendable {
     case anthropic
@@ -11,6 +11,7 @@ public enum AIProviderRoute: String, CaseIterable, Sendable {
     case cohere
     case elevenlabs
     case stability
+    case kimi
 
     public var displayName: String {
         switch self {
@@ -21,6 +22,7 @@ public enum AIProviderRoute: String, CaseIterable, Sendable {
         case .cohere: return "Cohere"
         case .elevenlabs: return "ElevenLabs"
         case .stability: return "Stability AI"
+        case .kimi: return "Kimi (Moonshot)"
         }
     }
 }
@@ -33,8 +35,8 @@ public enum AIProviderRoute: String, CaseIterable, Sendable {
 /// tokens).
 ///
 /// This generalizes All Languages Learner's `AICoinGateway` and Learn It's `AIcoinWalletRouter`
-/// into one host-routing table (now covering all seven providers CONTRACT.md's proxy config
-/// lists, including `cohere`/`stability`, which neither existing app's table had), but makes one
+/// into one host-routing table (now covering every provider CONTRACT.md's proxy config lists,
+/// including `cohere`/`stability`, which neither existing app's table had), but makes one
 /// deliberate behavior change from both of them: **there is no bring-your-own-key fallback**. Per
 /// this task's brief, apps built on this package no longer carry a personal provider key to fall
 /// back to at all, so a `402` (insufficient balance) is thrown as a typed `AICoinError
@@ -55,6 +57,8 @@ public struct AICoinRouter: HTTPTransport {
         "api.cohere.ai": .cohere,
         "api.elevenlabs.io": .elevenlabs,
         "api.stability.ai": .stability,
+        // Kimi's API host, unchanged by the platform docs' move to kimi.ai.
+        "api.moonshot.ai": .kimi,
     ]
 
     private let underlying: any HTTPTransport

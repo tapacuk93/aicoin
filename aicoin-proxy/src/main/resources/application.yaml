@@ -60,6 +60,14 @@ providers:
     authHeader: Authorization
     authPrefix: "Bearer "
     freePaths: ["GET /v1/engines/list", "GET /v1/user/account", "GET /v1/user/balance"]
+  # Moonshot's Kimi, spoken to on its OpenAI-compatible surface. api.moonshot.ai is still the
+  # API host even though the platform docs now live at kimi.ai.
+  kimi:
+    baseUrl: https://api.moonshot.ai
+    apiKey: ""
+    authHeader: Authorization
+    authPrefix: "Bearer "
+    freePaths: ["GET /v1/models", "GET /v1/models/*"]
 pricing:
   # Charge each call what it actually cost, rounded up to whole coins with a floor of one,
   # instead of a flat coin per call. This is the billing model — the flag exists so it can be
@@ -109,6 +117,17 @@ pricing:
         # moves it.
         gemini-2.5-flash-image: { usdPerCall: 0.039 }
         gemini-2.0-flash-preview-image-generation: { usdPerCall: 0.039 }
+    # Kimi K2.6 and K2.7 Code share a rate; the high-speed K2.7 Code doubles the output rate, and
+    # its longer id wins the prefix match. The provider default is K3's rate — the dearest — so an
+    # unlisted model is over-recorded rather than under-recorded.
+    kimi:
+      inputUsdPerMillionTokens: 3.00
+      outputUsdPerMillionTokens: 15.00
+      models:
+        kimi-k3:                    { inputUsdPerMillionTokens: 3.00, outputUsdPerMillionTokens: 15.00 }
+        kimi-k2.7-code-highspeed:   { inputUsdPerMillionTokens: 0.95, outputUsdPerMillionTokens: 8.00 }
+        kimi-k2.7-code:             { inputUsdPerMillionTokens: 0.95, outputUsdPerMillionTokens: 4.00 }
+        kimi-k2.6:                  { inputUsdPerMillionTokens: 0.95, outputUsdPerMillionTokens: 4.00 }
     # Billed per character and per image respectively, and neither reports token usage, so both
     # get a flat per-call figure instead of token rates.
     elevenlabs:

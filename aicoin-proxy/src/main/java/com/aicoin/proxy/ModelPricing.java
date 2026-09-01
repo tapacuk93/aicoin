@@ -178,6 +178,18 @@ final class ModelPricing {
         providerDefaults.put("openai", new Rates(2.50, 10.00));
         providerDefaults.put("google", new Rates(0.30, 2.50));
 
+        Map<String, Rates> kimi = new LinkedHashMap<>();
+        kimi.put("kimi-k3", new Rates(3.00, 15.00));
+        // The high-speed variant of K2.7 Code bills output at twice the standard one's rate, and
+        // its id extends the standard id — listed separately so the longer prefix wins.
+        kimi.put("kimi-k2.7-code-highspeed", new Rates(0.95, 8.00));
+        kimi.put("kimi-k2.7-code", new Rates(0.95, 4.00));
+        kimi.put("kimi-k2.6", new Rates(0.95, 4.00));
+        models.put("kimi", kimi);
+        // The provider fallback is K3's rate, the dearest Kimi sells, so a model this table does
+        // not name yet is over-recorded rather than under-recorded.
+        providerDefaults.put("kimi", new Rates(3.00, 15.00));
+
         // Neither reports token usage: ElevenLabs bills characters, image models bill per image.
         perCall.put("elevenlabs", 0.03);
         perCall.put("stability", 0.03);

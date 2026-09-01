@@ -13,7 +13,7 @@
 # listings, token counting — the endpoints the provider doesn't bill the
 # proxy for) are forwarded with the proxy's key but cost no coin and record
 # no price event; tests 21-23 pin that boundary, including that it fails
-# closed on a path that would normalize onto a billed endpoint. All 7 providers point at the local mock so every paid
+# closed on a path that would normalize onto a billed endpoint. Every provider points at the local mock so every paid
 # call — including the one-per-provider sweep — is exercised deterministically,
 # with no dependency on real provider network/credentials. See CONTRACT.md
 # for the exact API/behavior this asserts against.
@@ -150,10 +150,10 @@ REDIS_PORT=16379
 CLAIM_AMOUNT=10
 FREE_COINS_POOL_SIZE=100
 
-PROVIDERS=(openai anthropic google mistral cohere elevenlabs stability)
-AUTH_HEADERS=(Authorization x-api-key "" Authorization Authorization xi-api-key Authorization)
-AUTH_PREFIXES=("Bearer " "" "" "Bearer " "Bearer " "" "Bearer ")
-TEST_KEYS=(openai-test-key anthropic-test-key google-test-key mistral-test-key cohere-test-key elevenlabs-test-key stability-test-key)
+PROVIDERS=(openai anthropic google mistral cohere elevenlabs stability kimi)
+AUTH_HEADERS=(Authorization x-api-key "" Authorization Authorization xi-api-key Authorization Authorization)
+AUTH_PREFIXES=("Bearer " "" "" "Bearer " "Bearer " "" "Bearer " "Bearer ")
+TEST_KEYS=(openai-test-key anthropic-test-key google-test-key mistral-test-key cohere-test-key elevenlabs-test-key stability-test-key kimi-test-key)
 
 PROXY_BIN="$REPO_ROOT/aicoin-proxy/build/install/aicoin-proxy/bin/aicoin-proxy"
 if [ -x "$PROXY_BIN" ]; then
