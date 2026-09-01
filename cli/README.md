@@ -10,6 +10,18 @@ cd cli && go build -o ~/.local/bin/aicoin .
 
 Go 1.24+, no dependencies outside the standard library.
 
+## The short version
+
+```
+$ cd ~/src/my-project
+$ aicoin "why does the build fail on a clean checkout?" -f "*.go"
+```
+
+With no command word, the whole line is a question for the panel: every configured model answers
+it, an editor merges the answers, and then all of them review the result until a round comes back
+with no comments. The files in the working directory are listed for them by default, and `-f`
+includes the contents of the ones you name.
+
 ## First run
 
 ```
@@ -25,6 +37,7 @@ recovery phrase. Back it up (`aicoin export`) or lose the coins.
 
 | | |
 |---|---|
+| `aicoin "<question>"` | ask the panel — the same as `aicoin consortium` |
 | `aicoin new [-force]` | create a wallet; refuses to overwrite one without `-force` |
 | `aicoin show` | address and balance |
 | `aicoin import -key <hex>` | adopt an existing key (a seed, or an expanded private key) |
@@ -56,25 +69,56 @@ $ aicoin ask -ai kimi -model kimi-k2.7-code "review this function" < handler.go
 ## The consortium
 
 ```
-$ aicoin consortium "what breaks first when a proxy meters billing per call?"
-$ aicoin consortium -providers anthropic,kimi -rounds 2 -v -context @design.md "review this design"
+$ aicoin "what breaks first when a proxy meters billing per call?"
+$ aicoin -providers anthropic,kimi -rounds 2 -v "review this design" -f design.md
+$ aicoin consortium -dir ~/other-project "is anything here unfinished?"
 ```
 
 Every panelist drafts an answer, an editor merges them, and then the whole panel reviews the result
 round after round until one comes back with no comments — or until the round cap, whichever is
-first. Every panelist sees the same shared record on every turn: the request, your `-context`, the
-drafts, and every earlier round of comments.
+first. Every panelist sees the same shared record on every turn: the request, the directory, your
+`-context`, the drafts, and every earlier round of comments.
 
-The answer goes to **stdout** and everything else to stderr, so `aicoin consortium "..." > answer.md`
-gives you the answer and nothing else. `-v` prints each round's comments; `-json` prints the proxy's
-whole response.
+### What the panel can see of your directory
 
-It takes minutes, and **every turn is a paid call** — a four-model panel over two rounds is 13 calls
-and is billed as 13. The last line says what it cost:
+By default it gets a **listing** of the working directory — no contents. A listing is small, and it
+is the difference between an answer about how one usually structures a project and an answer about
+this one.
+
+| flag | |
+|---|---|
+| `-f <glob>` | include a file's contents. Repeatable, and comma-separated works too. A bare pattern (`"*.go"`, `main.go`) matches anywhere in the tree; one with a slash (`cli/*.go`) matches the path; a directory (`cli/`) means everything under it. |
+| `-dir <path>` | which directory to show. `-dir ""` sends none. |
+| `-budget N` | how many characters of directory context to send (default 40,000). |
+
+Build output, dependency trees, `.git`, dotfiles and binaries are never sent. Files over 256KB are
+skipped, and when the budget runs out the last file is dropped whole rather than cut in half — half
+a source file invites confident answers about code the panel cannot see the end of.
+
+Everything here is billed: the record goes to every panelist on every round, so `-f "**"` on a big
+repo is a real amount of money.
+
+### What it costs, while it happens
 
 ```
-settled — a whole round with no comments | 2 round(s), 13 calls, 15 aicoin | panel anthropic,openai,google,kimi, editor anthropic
+context: 34 files listed, 3 included in full, 18432 chars
+wallet 00c0759c5748… · 42 aicoin
+⠹ asking the panel · every turn is a paid call  1m14s
 ```
+
+...and when it lands:
+
+```
+settled — a whole round with no comments | 2 round(s), 13 calls | panel anthropic,openai,google,kimi, editor anthropic
+◆◆◆◆◇◇◇◇◇◇  15 aicoin spent · 27 left
+```
+
+The bar is the share of the wallet this call took. It takes minutes, and **every turn is a paid
+call** — a four-model panel over two rounds is 13 calls and is billed as 13.
+
+The answer goes to **stdout** and all of the above to stderr, so `aicoin "..." > answer.md` gives
+you the answer and nothing else. `-v` prints each round's comments; `-json` prints the proxy's whole
+response.
 
 ## Tokens
 
