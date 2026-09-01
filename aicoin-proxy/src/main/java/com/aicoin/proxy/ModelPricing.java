@@ -178,6 +178,14 @@ final class ModelPricing {
         providerDefaults.put("openai", new Rates(2.50, 10.00));
         providerDefaults.put("google", new Rates(0.30, 2.50));
 
+        // The two models a consortium calls by default on those providers. Both differ from the
+        // provider defaults above — Gemini 3.5 Flash by five times on input — and a consortium
+        // makes a dozen of these calls at a time, so the difference lands squarely in GET /price.
+        models.put("openai", new LinkedHashMap<>(Map.of("gpt-5", new Rates(1.25, 10.00))));
+        Map<String, Rates> google = new LinkedHashMap<>();
+        google.put("gemini-3.5-flash", new Rates(1.50, 9.00));
+        models.put("google", google);
+
         Map<String, Rates> kimi = new LinkedHashMap<>();
         kimi.put("kimi-k3", new Rates(3.00, 15.00));
         // The high-speed variant of K2.7 Code bills output at twice the standard one's rate, and

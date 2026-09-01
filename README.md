@@ -94,6 +94,32 @@ records the call's cost into the price history. `X-AI` also accepts
 `anthropic`, `google`, `mistral`, `cohere`, `elevenlabs`, `stability`,
 `kimi`.
 
+**Ask every AI at once, and have them review the answer.** `POST /consortium`
+sends one prompt to every configured provider, merges their answers into one,
+and then has the whole panel review that answer round after round until a round
+comes back with no comments:
+
+```
+curl http://localhost:8080/consortium \
+  -H "X-Api-Key: <token from the wallet page>" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"What breaks first when a proxy meters billing per call?"}'
+```
+
+```json
+{"answer":"...","settled":true,"stopped_reason":"clean","rounds":2,
+ "panel":["anthropic","openai","google","kimi"],"editor":"anthropic",
+ "calls":13,"coins_charged":15,"reviews":[...],"errors":[]}
+```
+
+Every turn is an ordinary paid call — a four-model panel over two rounds is 13
+calls and is billed as 13 calls, which the response says out loud. It ends on a
+clean round or at the configured round cap, whichever comes first; the cap is
+what stops reviewers who can always find one more thing. A wallet that runs out
+partway keeps the answer it paid for. Expect it to take minutes.
+`aicoin-proxy/README.md` has the full behaviour, including what happens when a
+panelist fails.
+
 **Check the current price of 1 aicoin:**
 
 ```
@@ -302,9 +328,12 @@ AICOIN_PROXY_ANTHROPIC_APIKEY=sk-ant-...
 bash e2e/run.sh
 ```
 
-Builds the proxy, boots a mock AI provider plus a Redis container plus the
-proxy, and exercises the full flow: auth, routing/key-injection, price,
-faucet, transfer.
+Builds the proxy, boots a mock AI provider and a Redis (a local
+`redis-server` if there is one on `PATH`, otherwise a `redis:7-alpine`
+container), and exercises the full flow: auth, routing and key injection per
+provider, metered billing, price, faucet, transfer, free targets, and a
+consortium call from drafts through review rounds — including one that runs
+the wallet dry mid-call.
 
 ## Repo layout
 

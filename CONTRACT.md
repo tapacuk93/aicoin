@@ -153,6 +153,67 @@ Pattern syntax (`FreeTargets`): optional method, a space, then a path glob where
 5. Non-2xx/connection failure: relay the real error to the client (or a synthetic `502` for a connection failure — there is no real status to relay), do not record a price event, and **refund** the 1.0 aicoin debited before forwarding (`AicoinLedger.refund`) — the call never actually cost the proxy anything, so it shouldn't cost the wallet anything either.
 6. Free target: `UpstreamForwarder` is handed a call cost of `0`, so steps 4 and 5's *money* handling is skipped in both directions — nothing was debited, so nothing is refunded on failure, and no price event is recorded on success. Relaying and `/health` recording are unchanged.
 
+### Consortium — one request, every AI, reviewed until nobody objects
+`POST /consortium` — the one endpoint where the proxy *originates* calls instead of forwarding one. The client sends a request; every configured AI answers it; the answers are merged into one; then every AI reviews that answer, round after round, until a round comes back with no comments.
+
+Auth is the same API token as any AI-proxy call (`X-Api-Key`, never a bare address — see "Auth for AI-proxy calls"). Body:
+```json
+{
+  "prompt": "...",                      // required, max 32,000 characters
+  "providers": ["anthropic", "kimi"],   // optional; default: the whole panel
+  "editor": "anthropic",                // optional; default: the first panelist
+  "max_rounds": 2,                      // optional; may only lower consortium.maxRounds, never raise it
+  "include_transcript": false           // optional; true also returns every draft
+}
+```
+
+**The panel** is every provider that (a) this proxy knows a chat shape for — `anthropic`, `openai`, `google`, `mistral`, `kimi` — and (b) this deployment has both a non-empty `apiKey` and a `consortium.models.<provider>` entry for, in that order. `elevenlabs` and `stability` are not chat APIs and are never on it; `cohere` is one but its shape is not implemented, so it is not either. A caller's `providers` list can only narrow that set, never extend it. An empty panel is `503`, not an empty answer.
+
+**The rounds**, in order:
+1. **Draft** — every panelist answers the prompt independently, seeing neither the others nor their answers.
+2. **Merge** — the editor is given all the drafts and produces one answer. With a single draft this step is skipped: there is nothing to merge, and it would cost a call to rewrite one input.
+3. **Review** — every panelist, editor included, is given the request and the current answer and must reply either with exactly `NO COMMENTS` or with a list of substantive problems. The clean reply is read strictly: the entire reply, ignoring case, surrounding whitespace and markdown emphasis, must be that phrase. "No comments, but X is wrong" counts as comments, because reading it the other way ships an answer a reviewer just objected to.
+4. **Revise** — if any reviewer had comments, the editor is given the request, the answer and every comment, and rewrites the answer; then step 3 runs again on the result.
+
+It ends when a whole review round is clean (`settled: true`), or when `consortium.maxRounds` rounds have run (`settled: false`, `stopped_reason: "round_limit"`). **The cap, not agreement, is what guarantees termination**: reviewers asked to find fault can always find some, so an uncapped "until no more comments" is an unbounded spend.
+
+**Billing is not special: every turn is one ordinary paid call.** One aicoin held before it, the metered remainder settled from that provider's own reported usage afterwards, a refund if the provider never answered — exactly the rules in "Forwarding" above. A four-panelist consortium over two rounds is 13 calls and is billed as 13 calls. The response states `calls` and `coins_charged`, and carries the same `X-Aicoin-Charged` header a single proxied call does.
+
+**Partial results are returned, not discarded.** A wallet that runs out mid-call stops the rounds where the coins ran out and returns the best answer so far with `stopped_reason: "insufficient_balance"`; only a call that cannot afford its very first turn gets `402`. A panelist that fails (error status, timeout, or a 2xx carrying no text — a reasoning model can spend its whole output cap thinking) is dropped from that round and recorded in `errors`; the call continues with the rest. If *no* panelist produces a draft, that is `502`. A client that disconnects stops the rounds at the next boundary (`stopped_reason: "client_gone"`) — the turns already in flight are paid for and cannot be recalled.
+
+Response `200`:
+```json
+{
+  "answer": "...",
+  "settled": true,
+  "stopped_reason": "clean",        // or round_limit | insufficient_balance | revision_failed | client_gone
+  "rounds": 2,
+  "panel": ["anthropic", "openai"],
+  "editor": "anthropic",
+  "calls": 8,
+  "coins_charged": 8,
+  "reviews": [{"round": 1, "provider": "openai", "clean": false, "comments": "..."}],
+  "errors": [{"stage": "draft", "provider": "mistral", "error": "upstream timed out"}],
+  "drafts": [{"provider": "anthropic", "text": "..."}]   // only with include_transcript
+}
+```
+
+Config (`consortium`, all env-overridable — `AICOIN_PROXY_CONSORTIUM_ENABLED`, `_MAX_ROUNDS`, `_MAX_OUTPUT_TOKENS`, `_EDITOR`, `_<PROVIDER>_MODEL`):
+```yaml
+consortium:
+  enabled: true          # false serves 404, as if the endpoint did not exist
+  maxRounds: 3
+  maxOutputTokens: 4000  # per turn; generous because thinking models spend part of it before writing
+  editor: ""             # empty: the first panelist
+  models:
+    anthropic: claude-sonnet-5
+    openai: gpt-5
+    google: gemini-3.5-flash
+    mistral: mistral-large-latest
+    kimi: kimi-k2.6
+```
+Models are config rather than code for the same reason rates are: providers rename and retire them on their own schedule, and a consortium that starts failing because an id lapsed should be a restart away from working, not a release.
+
 ### Ledger (Redis)
 
 Backed by a single Redis instance — ElastiCache for Redis (with snapshotting
@@ -344,6 +405,7 @@ history, so it needs its own, separate auth.
 
 ### Tests to include
 - JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs), and the admin token's constant-time comparison + address-format validation — no network/Redis needed.
+- For the consortium: each provider's chat request shape and the extraction of assistant text from each provider's response shape (including a 2xx that carries none), the strict reading of `NO COMMENTS`, and panel/editor selection from config — all pure, no network. The rounds themselves, their billing and the partial-result paths are covered end-to-end in `e2e/run.sh` against the mock provider, which plays drafter, editor and reviewer.
 
 ## Docker / docker-compose
 - `aicoin-proxy/Dockerfile` — multi-stage: build stage on **GraalVM** (not vanilla OpenJDK), copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a matching GraalVM runtime image. Entrypoint runs the generated start script. GraalVM chosen for a smaller heap footprint on the cheap single-vCPU production host (see "Production hosting" below); full ahead-of-time `native-image` is a future option, not required now, since the app plugin's script + GraalVM JIT already meets the cost/perf bar.

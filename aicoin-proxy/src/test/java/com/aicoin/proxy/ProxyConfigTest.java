@@ -2,6 +2,7 @@ package com.aicoin.proxy;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
@@ -258,6 +259,48 @@ class ProxyConfigTest {
 
         // Unrelated providers stay at their defaults.
         assertEquals("https://api.elevenlabs.io", config.getProviderBaseUrl("elevenlabs"));
+    }
+
+    @Test
+    void consortiumDefaultsNameAModelForEveryChatProvider() {
+        ProxyConfig config = ProxyConfig.load(new HashMap<>());
+        ConsortiumConfig consortium = config.getConsortium();
+
+        assertTrue(consortium.isEnabled());
+        assertEquals(3, consortium.getMaxRounds());
+        assertEquals(4000, consortium.getMaxOutputTokens());
+        assertEquals("", consortium.getEditor(), "empty means the first panelist");
+        for (String provider : ChatAdapter.CHAT_PROVIDERS) {
+            assertNotNull(consortium.modelFor(provider), provider + " needs a model to be on a panel");
+        }
+        assertEquals("claude-sonnet-5", consortium.modelFor("anthropic"));
+        assertEquals("kimi-k2.6", consortium.modelFor("kimi"));
+    }
+
+    @Test
+    void envVarsOverrideConsortiumRoundsAndModels() {
+        // The reason these are env-overridable at all: a model id that lapses upstream would
+        // otherwise need a release to replace.
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_CONSORTIUM_MAX_ROUNDS", "1");
+        env.put("AICOIN_PROXY_CONSORTIUM_KIMI_MODEL", "kimi-k2.7-code");
+        env.put("AICOIN_PROXY_CONSORTIUM_ENABLED", "false");
+
+        ConsortiumConfig consortium = ProxyConfig.load(env).getConsortium();
+
+        assertEquals(1, consortium.getMaxRounds());
+        assertEquals("kimi-k2.7-code", consortium.modelFor("kimi"));
+        assertFalse(consortium.isEnabled());
+        assertEquals("claude-sonnet-5", consortium.modelFor("anthropic"), "unrelated models stay put");
+    }
+
+    @Test
+    void aRoundCapBelowOneIsRaisedToOne() {
+        // Zero rounds would mean drafting and merging an answer nobody then reviews, which is not
+        // the thing the endpoint offers.
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_CONSORTIUM_MAX_ROUNDS", "0");
+        assertEquals(1, ProxyConfig.load(env).getConsortium().getMaxRounds());
     }
 
     @Test
