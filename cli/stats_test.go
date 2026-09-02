@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,5 +150,30 @@ func TestStatsTableNamesWhatItMeasured(t *testing.T) {
 	}
 	if !strings.Contains(table, "whether an answer was good") {
 		t.Errorf("the table should say what it does not measure:\n%s", table)
+	}
+}
+
+func TestOnlyTheProviderSFailuresCountAgainstIt(t *testing.T) {
+	// An empty wallet, an expired token, or a request this CLI built wrong never reached the
+	// model. Counting those as its failures would steer single mode away from a model that has
+	// done nothing wrong — which is exactly what a missing anthropic-version header did.
+	for _, err := range []error{
+		&apiError{Status: 402, Body: `{"error":"insufficient aicoin balance"}`},
+		&apiError{Status: 401, Body: `{"error":"invalid API token"}`},
+		&apiError{Status: 400, Body: `{"error":"anthropic-version: header is required"}`},
+	} {
+		if isProviderFailure(err) {
+			t.Errorf("%v is this side's problem, not the model's", err)
+		}
+	}
+	for _, err := range []error{
+		&apiError{Status: 500, Body: "upstream exploded"},
+		&apiError{Status: 429, Body: "slow down"},
+		&apiError{Status: 504, Body: `{"error":"upstream timed out"}`},
+		errors.New("connection refused"),
+	} {
+		if !isProviderFailure(err) {
+			t.Errorf("%v is the model failing to answer", err)
+		}
 	}
 }
