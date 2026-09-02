@@ -47,6 +47,26 @@ enum ProxyAPI {
         return try JSONDecoder().decode(BalanceResponse.self, from: data).balance
     }
 
+    /// A wallet's standing: what it owes, what it has been caught at, and a rating out of five —
+    /// with the reasons, which are the part worth showing.
+    struct Reputation: Decodable {
+        let address: String
+        let balance: Double
+        let owed: Double
+        let double_spends: Int
+        let rating: Int
+        let purchases: Int
+        let calls: Int
+        let reasons: [String]
+    }
+
+    static func fetchReputation(address: String) async throws -> Reputation {
+        let url = baseURL.appendingPathComponent("wallet/api/reputation/\(address)")
+        let (data, response) = try await URLSession.shared.data(from: url)
+        try requireOK(response, data)
+        return try JSONDecoder().decode(Reputation.self, from: data)
+    }
+
     // ---- live-signed wallet-management actions ----
 
     enum ClaimOutcome {

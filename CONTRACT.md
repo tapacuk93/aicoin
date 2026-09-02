@@ -453,7 +453,13 @@ The hash walk is verified in Java, not in the Lua script: Redis's Lua offers onl
 ### Reputation
 `GET /wallet/api/reputation/{address}` → `{"address":..,"balance":N,"owed":N,"double_spends":N}`. Public, like a balance.
 
-Two facts, deliberately not a score: what the wallet owes, and how many double-spends have been **proven** against it — a proven one being two claims on one note, signed by that wallet over two different payees. A single number would blur two different meanings into something that looks like a credit rating and is not one. No counterparties and no history are exposed; a balance is already public, and this adds one counter to it.
+Returns `rating` (0–5) and the `reasons` behind it, alongside the facts it is made of: what the wallet owes, how many double-spends have been **proven** against it — a proven one being two claims on one note, signed by that wallet over two different payees — how many purchases it has made, how many paid calls, and how many **distinct** wallets it has dealt with.
+
+The rating measures **exposure, not honesty**: how much a wallet has to lose. A proven double-spend is 0 — not a deduction, an answer. Owing caps it at 1. Otherwise: one point for having any history at all, and one each for having made calls, having bought coins with real money, having dealt with at least three different wallets, and having been around longer than a week.
+
+The distinction it exists to draw is that **no history is not a clean history**. A wallet made an hour ago to take one payment and vanish has never done anything wrong, and neither has one that has paid for a year; they score 0 and 5. Paying yourself in a circle earns nothing, because what is counted is distinct counterparties rather than volume.
+
+The reasons are published beside the number, and clients are expected to show them: a bare score reads as a verdict on somebody's character, which is not what any of this can support. Counts only — who a wallet dealt with is never exposed, just how many.
 
 A proven double-spend is also written into the **victim's** own transaction log as a `double_spend` entry. Being told once, in the moment a sync happened to print it, is not the same as having a record of it.
 

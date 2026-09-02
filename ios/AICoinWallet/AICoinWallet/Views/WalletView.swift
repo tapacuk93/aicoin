@@ -10,6 +10,7 @@ struct WalletView: View {
     @State private var priceUsd: Double?
     @State private var freeCoinsRemaining: Int?
     @State private var showBackup = false
+    @State private var standing: ProxyAPI.Reputation?
 
     var body: some View {
         ScrollView {
@@ -45,10 +46,19 @@ struct WalletView: View {
             Text("your address (safe to share — used to receive coins):")
                 .font(.caption2)
                 .foregroundColor(WalletTheme.muted)
+            // Shown as a code and as text: the code is for scanning, the text is so anybody can
+            // check that the code says what it claims to.
+            QRCodeView(text: keys.address)
+                .frame(maxWidth: .infinity, alignment: .center)
             Text(keys.address)
                 .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
                 .accessibilityIdentifier("addressLabel")
+            // Your own standing, because it is what the person you are about to receive from will
+            // be shown about you.
+            if let standing {
+                RatingView(rating: standing.rating, reasons: standing.reasons, compact: true)
+            }
             Button("use a different wallet") {
                 store.useADifferentWallet()
             }
@@ -83,6 +93,7 @@ struct WalletView: View {
     private func refreshBalance() {
         Task {
             balance = try? await ProxyAPI.fetchBalance(address: keys.address)
+            standing = try? await ProxyAPI.fetchReputation(address: keys.address)
         }
     }
 

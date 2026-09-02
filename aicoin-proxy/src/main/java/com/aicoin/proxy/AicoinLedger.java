@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -579,6 +580,58 @@ final class AicoinLedger implements AutoCloseable {
                 + ",\"counterparty\":\"" + issuer + "\",\"note_id\":\"" + noteId + "\""
                 + ",\"at\":" + nowMillis + "}");
         commands.ltrim(txKey(victim), -TX_LOG_CAP, -1);
+    }
+
+    /**
+     * What a wallet's own transaction log says about it, in aggregate: how it came by its coins,
+     * how much it has actually used the service, and how far back what we still hold goes.
+     *
+     * <p>Kinds and counts only. Who it paid and who paid it stays where it belongs — the point is
+     * to tell a wallet with a history from a wallet with none, not to publish anybody's dealings.
+     */
+    void walletSummary(String address, Consumer<Optional<Map<String, Long>>> onResult) {
+        commands.lrange(txKey(address), 0, -1).whenComplete((entries, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "wallet summary failed for " + address, err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            Map<String, Long> summary = new LinkedHashMap<>();
+            summary.put("entries", (long) (entries == null ? 0 : entries.size()));
+            long purchases = 0;
+            long calls = 0;
+            long claims = 0;
+            long firstSeen = 0;
+            // Distinct counterparties, counted and then thrown away. How many different wallets a
+            // wallet has actually dealt with is worth publishing; which ones is nobody's business.
+            java.util.Set<String> counterparties = new java.util.HashSet<>();
+            for (String entry : entries == null ? java.util.List.<String>of() : entries) {
+                if (entry.contains("\"type\":\"iap\"")) {
+                    purchases++;
+                } else if (entry.contains("\"type\":\"debit\"")) {
+                    calls++;
+                } else if (entry.contains("\"type\":\"claim\"")) {
+                    claims++;
+                }
+                java.util.regex.Matcher other = java.util.regex.Pattern
+                        .compile("\"counterparty\"\\s*:\\s*\"([0-9a-f]{64})\"").matcher(entry);
+                if (other.find()) {
+                    counterparties.add(other.group(1));
+                }
+                if (firstSeen == 0) {
+                    // The log is trimmed from the front, so on a busy wallet the oldest entry left
+                    // is younger than the wallet. Reported as "the oldest entry still held", never
+                    // as an account age it cannot honestly claim to be.
+                    firstSeen = (long) timestampOf(entry);
+                }
+            }
+            summary.put("purchases", purchases);
+            summary.put("calls", calls);
+            summary.put("claims", claims);
+            summary.put("first_seen", firstSeen);
+            summary.put("counterparties", (long) counterparties.size());
+            onResult.accept(Optional.of(summary));
+        });
     }
 
     /** How many proven double-spends stand against a wallet. Public: it is what a rating is made of. */
