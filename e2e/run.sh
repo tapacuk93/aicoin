@@ -820,6 +820,38 @@ reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t34-c.json'));print(
 [ "$reason" = "False not_issuer" ] && pass "a holder cannot reclaim somebody else's note (only redeem it)" \
   || fail "expected not_issuer, got $reason"
 
+log "--- test 39: a metered call can leave a wallet owing, and it owes until it pays ---"
+KEY_MALLORY="$WORKDIR/mallory.pem"; gen_wallet "$KEY_MALLORY"; ADDR_MALLORY=$(wallet_address "$KEY_MALLORY")
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" -H "X-Admin-Token: $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"address\":\"$ADDR_MALLORY\",\"amount\":1,\"reason\":\"e2e overspend\",\"reference\":\"e2e-overspend-1\"}"
+NOW=$(epoch_seconds)
+MALLORY_TOKEN=$(build_token "$KEY_MALLORY" "$ADDR_MALLORY" "$NOW" "$((NOW + 3600))")
+# ElevenLabs is priced per call ($0.03), which is four coins — three more than this wallet has.
+code=$(curl -s -o "$WORKDIR/t39.json" -D "$WORKDIR/t39.headers" -w "%{http_code}" -X POST \
+  "http://127.0.0.1:$PROXY_PORT/v1/text-to-speech/voice123" \
+  -H "X-AI: elevenlabs" -H "X-Api-Key: $MALLORY_TOKEN" -H "Content-Type: application/json" -d '{"text":"hello"}')
+charged=$(grep -i "^X-Aicoin-Charged:" "$WORKDIR/t39.headers" | tr -d "\r" | awk "{print \$2}")
+bal_mallory=$(balance_of "$ADDR_MALLORY")
+[ "$code" = "200" ] && [ "$charged" = "4" ] && [ "$bal_mallory" = "-3" ] \
+  && pass "the call cost 4 against a balance of 1: the wallet is 3 in debt, not 0 with the cost lost" \
+  || fail "expected a -3 balance after a 4-coin call, got code=$code charged=$charged balance=$bal_mallory"
+
+# And it owes: nothing runs until that is cleared.
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
+  -H "X-AI: openai" -H "X-Api-Key: $MALLORY_TOKEN" -H "Content-Type: application/json" -d '{"model":"test"}')
+[ "$code" = "402" ] && pass "a wallet in debt cannot spend its way further" || fail "expected 402, got $code"
+
+# Paying it off is just being credited: the debt is a balance, not a separate ledger of grudges.
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" -H "X-Admin-Token: $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"address\":\"$ADDR_MALLORY\",\"amount\":4,\"reason\":\"e2e settle\",\"reference\":\"e2e-overspend-2\"}"
+bal_mallory=$(balance_of "$ADDR_MALLORY")
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
+  -H "X-AI: openai" -H "X-Api-Key: $MALLORY_TOKEN" -H "Content-Type: application/json" -d '{"model":"test"}')
+[ "$bal_mallory" = "1" ] && [ "$code" = "200" ] && pass "credited back to 1, and calls work again" \
+  || fail "expected balance 1 and a working call, got balance=$bal_mallory code=$code"
+
 log "--- test 38: a claim-required note is worthless to whoever merely copied it ---"
 curl -s -o /dev/null -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" -H "X-Admin-Token: $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
