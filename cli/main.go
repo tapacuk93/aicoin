@@ -254,6 +254,13 @@ func cmdShow(args []string) error {
 		return nil
 	}
 	price, _ := newClient(*url, 30*time.Second).priceUSD()
+	if balance < 0 {
+		// A wallet can end a call owing money: a metered call is settled at what it really cost,
+		// and the last one can cost more than was left. Nothing runs until it is paid off.
+		fmt.Printf("balance  %s aicoin — owed%s\n", formatCoins(balance), bracketed(usd(-balance, price)))
+		fmt.Fprintln(os.Stderr, "a claim, a transfer in or a purchase clears it; no call runs until it is clear")
+		return nil
+	}
 	fmt.Printf("balance  %s aicoin%s\n", formatCoins(balance), bracketed(usd(balance, price)))
 	return nil
 }

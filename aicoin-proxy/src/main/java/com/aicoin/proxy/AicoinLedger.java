@@ -319,19 +319,31 @@ final class AicoinLedger implements AutoCloseable {
      * shortfall is recorded on the entry so it is visible in the ledger rather than silently
      * absorbed.
      */
+    /**
+     * Settlement takes what the call cost, and lets the balance go below zero doing it.
+     *
+     * <p>It used to stop at zero and record the rest as a shortfall — which quietly moved the cost
+     * from the wallet that ran it to the operator, and left nothing owed by anybody. The cost was
+     * real: the provider billed for that call. It is already in the price signal, because the
+     * event is recorded at its true cost before settlement, so every coin sold afterwards carries
+     * a share of it. What was missing is that the wallet which spent it carries it too.
+     *
+     * <p>A negative balance is a debt, and the balance gate refuses calls while it stands: a wallet
+     * cannot spend its way past zero and keep going. A claim, a transfer in or a purchase pays it
+     * down first, which is what owing means.
+     */
     private static final String SETTLE_SCRIPT =
             "local requested = tonumber(ARGV[1]) "
             + "local balance = tonumber(redis.call('GET', KEYS[1]) or '0') "
-            + "local taken = requested "
-            + "if balance < requested then taken = balance end "
-            + "if taken < 0 then taken = 0 end "
             + "local newBalance = balance "
-            + "if taken > 0 then newBalance = tonumber(redis.call('INCRBYFLOAT', KEYS[1], '-' .. taken)) end "
+            + "if requested > 0 then newBalance = tonumber(redis.call('INCRBYFLOAT', KEYS[1], '-' .. requested)) end "
+            + "local owed = 0 "
+            + "if newBalance < 0 then owed = -newBalance end "
             + "redis.call('SADD', KEYS[2], ARGV[2]) "
-            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='debit_settlement', amount=taken, "
-            + "shortfall=requested - taken, provider=ARGV[3], balance_after=newBalance, at=tonumber(ARGV[4])})) "
+            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='debit_settlement', amount=requested, "
+            + "owed=owed, provider=ARGV[3], balance_after=newBalance, at=tonumber(ARGV[4])})) "
             + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
-            + "return tostring(taken)";
+            + "return tostring(requested)";
 
     private static final String REFUND_SCRIPT =
             "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1]) "

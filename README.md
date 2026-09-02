@@ -80,7 +80,8 @@ curl proxy.aicoin.oeaio.com/v1/chat/completions \
 
 **Billing.** One coin is held before the call, so an empty wallet is refused before a provider is
 touched and one coin is always enough to make one call. When the response comes back, the rest of
-what it really cost is settled. A failed call is refunded — it cost the proxy nothing, so it costs
+what it really cost is settled — even if that takes the balance below zero, because the provider
+billed for it either way. A wallet in debt makes no further calls until it is cleared. A failed call is refunded — it cost the proxy nothing, so it costs
 the wallet nothing. Model and voice listings, token counting and account lookups are *free targets*:
 forwarded with the proxy's key, billed to nobody. Every billed response carries `X-Aicoin-Charged`.
 
