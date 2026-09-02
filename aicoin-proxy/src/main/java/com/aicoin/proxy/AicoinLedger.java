@@ -131,7 +131,7 @@ final class AicoinLedger implements AutoCloseable {
             + "if redis.call('EXISTS', KEYS[2]) == 1 then return {0, tostring(balance), 'duplicate'} end "
             + "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], '-' .. ARGV[1]) "
             + "redis.call('HSET', KEYS[2], 'amount', ARGV[1], 'issuer', ARGV[2], 'state', 'open', "
-            + "  'issued_at', ARGV[3], 'expires_at', ARGV[4]) "
+            + "  'issued_at', ARGV[3], 'expires_at', ARGV[4], 'payee', ARGV[6]) "
             + "redis.call('EXPIREAT', KEYS[2], tonumber(ARGV[5])) "
             + "redis.call('SADD', KEYS[3], ARGV[2]) "
             + "redis.call('RPUSH', KEYS[4], cjson.encode({type='note_issued', amount=amount, "
@@ -150,6 +150,13 @@ final class AicoinLedger implements AutoCloseable {
             + "if state ~= 'open' then return {0, '0', state} end "
             + "local expires = tonumber(redis.call('HGET', KEYS[1], 'expires_at')) "
             + "if expires and tonumber(ARGV[2]) > expires then return {0, '0', 'expired'} end "
+            + "local payee = redis.call('HGET', KEYS[1], 'payee') "
+            // A note made out to somebody can only be redeemed by them. This is what makes it
+            // impossible — not merely detectable — to hand the same note to two people: the second
+            // one cannot use it.
+            + "if payee ~= nil and payee ~= false and payee ~= '' and payee ~= ARGV[1] then "
+            + "  return {0, '0', 'not_payee'} "
+            + "end "
             + "local amount = tonumber(redis.call('HGET', KEYS[1], 'amount')) "
             + "redis.call('HSET', KEYS[1], 'state', 'redeemed', 'redeemed_by', ARGV[1], 'redeemed_at', ARGV[2]) "
             + "local newBalance = redis.call('INCRBYFLOAT', KEYS[2], tostring(amount)) "
@@ -405,12 +412,14 @@ final class AicoinLedger implements AutoCloseable {
     }
 
     /** Moves {@code amount} out of {@code issuer}'s balance and into a note. */
-    void issueNote(String issuer, double amount, String noteHash, long expiresAtSeconds, Consumer<NoteResult> onResult) {
+    void issueNote(String issuer, double amount, String noteHash, long expiresAtSeconds, String payee,
+                    Consumer<NoteResult> onResult) {
         long nowMillis = Instant.now().toEpochMilli();
         RedisFuture<List<Object>> future = commands.eval(ISSUE_NOTE_SCRIPT, ScriptOutputType.MULTI,
                 new String[] {balanceKey(issuer), noteKey(noteHash), KNOWN_WALLETS_KEY, txKey(issuer)},
                 String.valueOf(amount), issuer, String.valueOf(nowMillis),
-                String.valueOf(expiresAtSeconds * 1000), String.valueOf(expiresAtSeconds));
+                String.valueOf(expiresAtSeconds * 1000), String.valueOf(expiresAtSeconds),
+                payee == null ? "" : payee);
         complete(future, "note issue", onResult);
     }
 

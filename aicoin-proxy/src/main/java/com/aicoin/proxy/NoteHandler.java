@@ -79,13 +79,22 @@ final class NoteHandler {
         }
         long ttl = ttlSeconds(new String(body, CharsetUtil.UTF_8));
         long expiresAt = Instant.now().getEpochSecond() + ttl;
+        // A note made out to somebody is the one shape of this that cannot be double-spent: hand it
+        // to two people and only the named one can redeem it, so the second is holding nothing
+        // rather than holding a race. It costs foreknowledge of who is being paid.
+        String payee = field(new String(body, CharsetUtil.UTF_8), "payee");
+        if (payee != null && !payee.matches("[0-9a-fA-F]{64}")) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "payee must be a 64-character address");
+            return;
+        }
 
         NoteSigner.ensure(ledger, signer -> {
             if (!signer.isPresent()) {
                 sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "note signing is unavailable");
                 return;
             }
-            issueNext(ctx, ledger, signer.get(), issuer, amounts, expiresAt, new ArrayList<>());
+            issueNext(ctx, ledger, signer.get(), issuer, amounts, expiresAt,
+                    payee == null ? "" : payee.toLowerCase(java.util.Locale.ROOT), new ArrayList<>());
         });
     }
 
@@ -95,15 +104,16 @@ final class NoteHandler {
      * and reclaimable — rather than pretending nothing happened.
      */
     private static void issueNext(ChannelHandlerContext ctx, AicoinLedger ledger, NoteSigner signer,
-                                   String issuer, List<Double> remaining, long expiresAt, List<String> minted) {
+                                   String issuer, List<Double> remaining, long expiresAt, String payee,
+                                   List<String> minted) {
         if (remaining.isEmpty()) {
             sendIssued(ctx, minted, null);
             return;
         }
         double amount = remaining.get(0);
         List<Double> rest = remaining.subList(1, remaining.size());
-        Note note = Note.mint(amount, issuer, expiresAt);
-        ledger.issueNote(issuer, amount, note.hash(), expiresAt, result -> {
+        Note note = Note.mint(amount, issuer, expiresAt, payee);
+        ledger.issueNote(issuer, amount, note.hash(), expiresAt, payee, result -> {
             if (!result.isReachable()) {
                 sendIssued(ctx, minted, "could not reach the ledger");
                 return;
@@ -118,12 +128,13 @@ final class NoteHandler {
                         + ",\"amount\":" + Note.formatAmount(amount)
                         + ",\"fingerprint\":\"" + note.fingerprint() + "\""
                         + ",\"hash\":\"" + note.hash() + "\""
-                        + ",\"expires_at\":" + expiresAt + "}");
+                        + ",\"expires_at\":" + expiresAt
+                        + ",\"payee\":\"" + payee + "\"}");
             } catch (Exception e) {
                 sendIssued(ctx, minted, "could not sign the note");
                 return;
             }
-            issueNext(ctx, ledger, signer, issuer, rest, expiresAt, minted);
+            issueNext(ctx, ledger, signer, issuer, rest, expiresAt, payee, minted);
         });
     }
 
@@ -151,6 +162,8 @@ final class NoteHandler {
             if (!result.isOk()) {
                 // Already redeemed is the case worth being clear about: somebody was handed this
                 // note twice, and the person reading this is the one who did not get the coins.
+                // not_payee is the other: this note was made out to somebody else, and no race was
+                // ever winnable.
                 sendJson(ctx, "{\"credited\":false,\"reason\":\"" + result.getDetail() + "\"}");
                 return;
             }
@@ -203,6 +216,7 @@ final class NoteHandler {
             }
             sendJson(ctx, "{\"state\":\"" + fields.getOrDefault("state", "unknown")
                     + "\",\"amount\":" + fields.getOrDefault("amount", "0")
+                    + ",\"payee\":\"" + fields.getOrDefault("payee", "") + "\""
                     + ",\"expires_at\":" + fields.getOrDefault("expires_at", "0") + "}");
         });
     }

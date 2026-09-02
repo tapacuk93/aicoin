@@ -387,13 +387,40 @@ $ aicoin note sync                        # back online
 | `note sync` | redeem what you accepted |
 | `note reclaim` | take back notes nobody accepted |
 
+### Notes made out to somebody
+
+```
+$ aicoin note load 20 -for 5f2a91c0…            # while online
+4 note(s) worth 20 aicoin, made out to 5f2a91c0… — only they can redeem them,
+so handing one to two people leaves the second with nothing rather than a race
+
+$ aicoin note pay 5 -to 5f2a91c0…               # offline, spends the bound ones first
+```
+
+and on the other side:
+
+```
+✓ genuine · 5 aicoin · from 00c0759c5748… · 3F-A2-9C
+   made out to you — nobody else can redeem it, so it cannot have been spent elsewhere
+```
+
+This is the one shape of offline payment that **cannot be double-spent at all**. Everything else
+here detects a double-spend after the fact; a bound note prevents it, because the second person
+holding a copy simply cannot redeem it.
+
+What it costs is foreknowledge: you must know who you are paying before you go offline, and carry
+the right denominations for them. So a purse carries both — bound notes for the people you expect
+to pay, bearer notes for strangers — and `note list` shows which is which. A note made out to
+somebody else is refused at `accept` rather than kept, since it would never redeem.
+
 ### What this does and does not promise
 
 - **The coins leave your balance when you load the purse**, not when you hand a note over. That is
   what stops you spending them twice: you no longer have them.
-- **Offline, a receiver can tell genuine from forged, and read the amount off the note.** They
-  cannot tell whether it has already been given to someone else — that is a fact about the ledger,
-  and the ledger is not there.
+- **Offline, a receiver can tell genuine from forged, and read the amount off the note.** For a
+  bearer note they cannot tell whether it has already been given to someone else — that is a fact
+  about the ledger, and the ledger is not there. For a note **made out to them**, that question
+  does not arise: nobody else can redeem it.
 - **Redemption is first-come.** A note handed to two people credits exactly one; the other is told
   `already redeemed`. Every note names its issuer and every step lands in both transaction logs, so
   it is attributable afterwards — not preventable beforehand. Treat a note like cash, because that
