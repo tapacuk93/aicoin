@@ -540,6 +540,7 @@ func cmdNoteSync(args []string) error {
 		}
 		var result struct {
 			Credited    bool    `json:"credited"`
+			Compensated bool    `json:"compensated"`
 			Amount      float64 `json:"amount"`
 			Balance     float64 `json:"balance"`
 			Reason      string  `json:"reason"`
@@ -558,6 +559,17 @@ func cmdNoteSync(args []string) error {
 		}
 		if result.Credited {
 			credited += result.Amount
+			if result.Compensated {
+				// The note was already spent — and this wallet was paid anyway, out of the wallet
+				// that spent it twice. Worth distinguishing from an ordinary credit.
+				fmt.Fprintf(os.Stderr, "✓ %s · %s aicoin — that note had been spent already; you were "+
+					"compensated from the wallet that did it\n", note.Fingerprint, formatCoins(result.Amount))
+				if result.DoubleSpend != nil {
+					fmt.Fprintf(os.Stderr, "   %s… now owes it, and rates 0 until it is paid\n",
+						result.DoubleSpend.Issuer[:12])
+				}
+				continue
+			}
 			fmt.Fprintf(os.Stderr, "✓ %s · %s aicoin credited\n", note.Fingerprint, formatCoins(result.Amount))
 			continue
 		}

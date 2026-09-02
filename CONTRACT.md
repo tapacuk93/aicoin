@@ -455,11 +455,13 @@ The hash walk is verified in Java, not in the Lua script: Redis's Lua offers onl
 
 Returns `rating` (0–5) and the `reasons` behind it, alongside the facts it is made of: what the wallet owes, how many double-spends have been **proven** against it — a proven one being two claims on one note, signed by that wallet over two different payees — how many purchases it has made, how many paid calls, and how many **distinct** wallets it has dealt with.
 
-The rating measures **exposure, not honesty**: how much a wallet has to lose. A proven double-spend is 0 — not a deduction, an answer. Owing caps it at 1. Otherwise: one point for having any history at all, and one each for having made calls, having bought coins with real money, having dealt with at least three different wallets, and having been around longer than a week.
+The rating measures **exposure, not honesty**: how much a wallet has to lose. A proven double-spend is 0 — not a deduction, an answer. Owing caps it at 1. Otherwise: one point for having any history at all, and one each for having made calls, having bought coins with real money, having dealt with at least two wallets **that themselves have something to lose**, and having been around longer than a week. Counting distinct counterparties alone would hand a point to anybody who made three wallets in a minute, so what is counted is counterparties that are clean, solvent and have actually used the thing — which somebody else had to build first. At most ten are weighed, since a rating is looked up in front of somebody waiting to be paid.
 
 The distinction it exists to draw is that **no history is not a clean history**. A wallet made an hour ago to take one payment and vanish has never done anything wrong, and neither has one that has paid for a year; they score 0 and 5. Paying yourself in a circle earns nothing, because what is counted is distinct counterparties rather than volume.
 
 The reasons are published beside the number, and clients are expected to show them: a bare score reads as a verdict on somebody's character, which is not what any of this can support. Counts only — who a wallet dealt with is never exposed, just how many.
+
+**The loser is compensated out of the wallet that did it.** On a proven double-spend the second redeemer is credited what they were handed and the double-spender is debited the same, in one script — a compensation, not a clawback. Nobody else's settled payment is touched, and the double-spender's balance goes negative if it has to, which blocks them from spending until they pay it back and holds their rating at 0 meanwhile. Both halves land in both wallets' logs as `double_spend_compensation` and `double_spend_penalty`.
 
 A proven double-spend is also written into the **victim's** own transaction log as a `double_spend` entry. Being told once, in the moment a sync happened to print it, is not the same as having a record of it.
 

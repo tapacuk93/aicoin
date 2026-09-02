@@ -20,8 +20,9 @@ class ReputationTest {
     }
 
     private static Map<String, Long> log(long entries, long calls, long purchases, long ageDays, long counterparties) {
+        // Counterparties passed here are the ones in good standing: only those count.
         return Map.of("entries", entries, "calls", calls, "purchases", purchases,
-                "counterparties", counterparties,
+                "counterparties", counterparties, "solid_counterparties", counterparties,
                 "first_seen", ageDays == 0 ? 0 : NOW - ageDays * DAY);
     }
 
@@ -65,6 +66,17 @@ class ReputationTest {
         assertEquals(4, Reputation.score(5, 0, log(3, 2, 1, 0, 4), NOW));
         // ...and has been around longer than a throwaway would have planned for.
         assertEquals(5, Reputation.score(5, 0, log(3, 2, 1, 8, 4), NOW));
+    }
+
+    @Test
+    void threeThrowawaysAreNotAReputation() {
+        // Counting distinct counterparties alone would hand a point to anybody who made three
+        // wallets in a minute. What earns it is dealing with wallets that have something to lose.
+        Map<String, Long> throwaways = Map.of("entries", 9L, "calls", 2L, "purchases", 1L,
+                "counterparties", 5L, "solid_counterparties", 0L, "first_seen", NOW - 2 * DAY);
+        assertEquals(3, Reputation.score(5, 0, throwaways, NOW));
+        assertTrue(Reputation.reasons(5, 0, throwaways, NOW).stream()
+                .anyMatch(reason -> reason.contains("none of them established")));
     }
 
     @Test

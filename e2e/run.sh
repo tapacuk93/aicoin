@@ -850,6 +850,9 @@ CLAIM_BOB=$(sign_claim "$KEY_DAVE" "$DS_ID" "$ADDR_BOB" "aa11")
 CLAIM_CAROL=$(sign_claim "$KEY_DAVE" "$DS_ID" "$ADDR_CAROL" "bb22")
 live_signed_request "$KEY_BOB" "$ADDR_BOB" "POST" "/wallet/api/notes/redeem" \
   "{\"note\":\"$ds_note\",\"nonce\":\"aa11\",\"claim\":\"$CLAIM_BOB\"}" "$WORKDIR/t40-bob.json" > /dev/null
+# Sampled before carol tries: the compensation happens during her redemption.
+bal_carol_ds=$(balance_of "$ADDR_CAROL")
+bal_dave_ds=$(balance_of "$ADDR_DAVE")
 code=$(live_signed_request "$KEY_CAROL" "$ADDR_CAROL" "POST" "/wallet/api/notes/redeem" \
   "{\"note\":\"$ds_note\",\"nonce\":\"bb22\",\"claim\":\"$CLAIM_CAROL\"}" "$WORKDIR/t40-carol.json")
 claims=$(python3 -c "
@@ -858,6 +861,13 @@ d = json.load(open('$WORKDIR/t40-carol.json'))
 proof = d.get('double_spend') or {}
 print(len(proof.get('claims', [])), proof.get('issuer', '')[:8])
 ")
+compensated=$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t40-carol.json'))
+print(d.get('credited'), d.get('compensated'), d.get('amount'))
+")
+[ "$compensated" = "True True 1" ] && pass "carol was paid anyway — compensated, not merely commiserated with" \
+  || fail "expected a compensation of 1, got $compensated"
 [ "$claims" = "2 ${ADDR_DAVE:0:8}" ] && pass "carol is handed both claims: a proof signed by dave, not an accusation" \
   || fail "expected a two-claim proof naming dave, got $claims"
 
@@ -866,8 +876,23 @@ rep=$(curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/reputation/$ADDR_DAVE" | 
 [ "$rep" = "1" ] && pass "one double-spend stands against that wallet, for anyone to look up" \
   || fail "expected a count of 1, got $rep"
 seen=$(curl -s "http://127.0.0.1:$PROXY_PORT/admin/wallets/$ADDR_CAROL/transactions" -H "X-Admin-Token: $ADMIN_TOKEN" \
-  | python3 -c "import json,sys;print(any(t.get('type') == 'double_spend' for t in json.load(sys.stdin)['transactions']))")
-[ "$seen" = "True" ] && pass "and it is in the victim's own transaction history" || fail "expected a double_spend entry for carol"
+  | python3 -c "
+import json, sys
+types = [t.get('type') for t in json.load(sys.stdin)['transactions']]
+print('double_spend' in types, 'double_spend_compensation' in types)
+")
+[ "$seen" = "True True" ] && pass "both the record and the compensation are in the victim's own history" \
+  || fail "expected double_spend and double_spend_compensation entries for carol, got $seen"
+
+# The money came from the wallet that did it, not from thin air and not from anybody else.
+paid=$(python3 -c "print(round(float('$(balance_of "$ADDR_CAROL")') - float('$bal_carol_ds'), 6))")
+charged=$(python3 -c "print(round(float('$bal_dave_ds') - float('$(balance_of "$ADDR_DAVE")'), 6))")
+[ "$paid" = "1.0" ] && [ "$charged" = "1.0" ] \
+  && pass "carol is up 1 and dave is down 1: the compensation came out of the double-spender" \
+  || fail "expected +1 to carol and -1 from dave, got paid=$paid charged=$charged"
+penalty=$(curl -s "http://127.0.0.1:$PROXY_PORT/admin/wallets/$ADDR_DAVE/transactions" -H "X-Admin-Token: $ADMIN_TOKEN" \
+  | python3 -c "import json,sys;print(any(t.get('type') == 'double_spend_penalty' for t in json.load(sys.stdin)['transactions']))")
+[ "$penalty" = "True" ] && pass "and the charge is on his own record too" || fail "expected a penalty entry for dave"
 
 log "--- test 39: a metered call can leave a wallet owing, and it owes until it pays ---"
 KEY_MALLORY="$WORKDIR/mallory.pem"; gen_wallet "$KEY_MALLORY"; ADDR_MALLORY=$(wallet_address "$KEY_MALLORY")
