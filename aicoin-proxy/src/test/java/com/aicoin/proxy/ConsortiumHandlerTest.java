@@ -110,6 +110,17 @@ class ConsortiumHandlerTest {
     }
 
     @Test
+    void aPollIsNeverLedByOneModel() {
+        // A poll is every panelist answering separately, which is the opposite of one model
+        // drafting for the others. Letting the context size turn a poll into a lead would return
+        // one answer to a caller who asked for several, silently.
+        String big = "x".repeat(9000);
+        assertTrue(ConsortiumHandler.isLeadMode("auto", big, 8000));
+        assertFalse(ConsortiumHandler.isLeadMode("poll", big, 8000));
+        assertFalse(ConsortiumHandler.isLeadMode("poll", null, 8000));
+    }
+
+    @Test
     void withNoProvidersConfiguredThereIsNoPanelAndNoEditor() {
         ProxyConfig config = ProxyConfig.load(new HashMap<>());
         assertTrue(ConsortiumHandler.panel(config, null).isEmpty());

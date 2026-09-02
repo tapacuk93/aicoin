@@ -182,8 +182,10 @@ final class ConsortiumHandler {
         boolean includeTranscript = Boolean.TRUE.equals(body.get("include_transcript"));
         String mode = body.get("mode") instanceof String
                 ? ((String) body.get("mode")).trim().toLowerCase(Locale.ROOT) : "auto";
-        if (!mode.equals("auto") && !mode.equals("lead") && !mode.equals("panel")) {
-            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "mode must be auto, lead or panel");
+        if (!mode.equals("auto") && !mode.equals("lead") && !mode.equals("panel")
+                && !mode.equals("poll")) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST,
+                    "mode must be auto, lead, panel or poll");
             return;
         }
         // Background every panelist sees, on every turn, alongside the request: the caller's own
@@ -204,10 +206,20 @@ final class ConsortiumHandler {
         // the drafts converge anyway because the context, not the model, is doing the work. So a
         // context-heavy call is led by one model, and the others improve its answer round by round
         // instead of each writing their own from scratch.
-        boolean lead = isLeadMode(mode, background, config.getConsortium().getLeadContextChars());
+        // A poll is the panel without the merge or the rounds: everybody answers once,
+        // independently, and every answer is returned as it was given. It is here because
+        // merging is not always what a caller wants. Some questions are decisions - should this
+        // ship, is this correct - and for those the disagreement is the product: that three
+        // models said yes and one said no is a different fact from a paragraph that reads as
+        // though the panel agreed. Folding independent judgements into one answer destroys
+        // exactly the information such a caller came for.
+        boolean poll = mode.equals("poll");
+        boolean lead = !poll
+                && isLeadMode(mode, background, config.getConsortium().getLeadContextChars());
 
         new Session(ctx, config, clientGroup, healthTracker, ledger, walletAddress,
-                prompt, background, panel, editor, maxRounds, includeTranscript, lead).start();
+                prompt, background, panel, editor, maxRounds, includeTranscript, lead,
+                poll).start();
     }
 
     private static Map<?, ?> parseBody(byte[] bytes) {
@@ -240,6 +252,8 @@ final class ConsortiumHandler {
         private final String editor;
         private final int maxRounds;
         private final boolean includeTranscript;
+        /** Everybody answers once and nothing is merged - see the note at the call site. */
+        private final boolean poll;
         /** True when one model drafts and the rest improve it — see the note at the call site. */
         private final boolean lead;
 
@@ -276,7 +290,7 @@ final class ConsortiumHandler {
         Session(ChannelHandlerContext ctx, ProxyConfig config, EventLoopGroup group,
                  ProviderHealthTracker healthTracker, AicoinLedger ledger, String wallet, String prompt,
                  String background, List<String> panel, String editor, int maxRounds,
-                 boolean includeTranscript, boolean lead) {
+                 boolean includeTranscript, boolean lead, boolean poll) {
             this.ctx = ctx;
             this.config = config;
             this.group = group;
@@ -288,6 +302,7 @@ final class ConsortiumHandler {
             this.editor = editor;
             this.maxRounds = maxRounds;
             this.includeTranscript = includeTranscript;
+            this.poll = poll;
             this.lead = lead;
             this.context = new SharedContext(prompt, background, config.getConsortium().getMaxContextChars());
             // A consortium runs for minutes. A client that gave up in the middle is nobody to
@@ -319,8 +334,10 @@ final class ConsortiumHandler {
             synchronized (this) {
                 outstanding = drafters.size();
             }
-            String system = lead ? ConsortiumPrompts.leadDraftSystem() : ConsortiumPrompts.draftSystem();
-            String user = context.forTurn(lead ? ConsortiumPrompts.leadDraftTask() : ConsortiumPrompts.draftTask());
+            String system = poll ? ConsortiumPrompts.pollSystem()
+                    : lead ? ConsortiumPrompts.leadDraftSystem() : ConsortiumPrompts.draftSystem();
+            String user = context.forTurn(poll ? ConsortiumPrompts.pollTask()
+                    : lead ? ConsortiumPrompts.leadDraftTask() : ConsortiumPrompts.draftTask());
             for (String provider : drafters) {
                 turn(provider, system, user, "draft", (text, error) -> {
                     synchronized (this) {
@@ -352,6 +369,14 @@ final class ConsortiumHandler {
                 } else {
                     finish(HttpResponseStatus.BAD_GATEWAY, "no panelist answered");
                 }
+                return;
+            }
+            if (poll) {
+                // Every answer is the result. There is nothing to merge and nothing to review:
+                // reviewing would ask the panel to reconcile judgements the caller asked to see
+                // unreconciled, and that is the one thing a poll must not do.
+                stoppedReason("polled");
+                finishOk();
                 return;
             }
             if (!lead) {
@@ -604,6 +629,19 @@ final class ConsortiumHandler {
                 json.append("}")
                         .append(",\"reviews\":[").append(String.join(",", reviewJson)).append("]")
                         .append(",\"errors\":[").append(String.join(",", errorJson)).append("]");
+                // A poll's answers are its whole result, so they are always returned; for the
+                // other modes they are the working-out and come back only if asked for.
+                if (includeTranscript || poll) {
+                    json.append(",\"answers\":[");
+                    for (int i = 0; i < drafts.size(); i++) {
+                        json.append(i == 0 ? "" : ",")
+                                .append("{\"provider\":").append(Json.string(draftProviders.get(i)))
+                                .append(",\"model\":").append(Json.string(
+                                        config.getConsortium().modelFor(draftProviders.get(i))))
+                                .append(",\"text\":").append(Json.string(drafts.get(i))).append("}");
+                    }
+                    json.append("]");
+                }
                 if (includeTranscript) {
                     json.append(",\"drafts\":[");
                     for (int i = 0; i < drafts.size(); i++) {

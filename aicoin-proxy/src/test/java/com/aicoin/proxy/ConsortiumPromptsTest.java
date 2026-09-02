@@ -32,6 +32,23 @@ class ConsortiumPromptsTest {
     }
 
     @Test
+    void aPolledPanelistIsToldItsAnswerStandsAlone() {
+        // The whole difference between a poll and a draft is what the model thinks happens next.
+        // A drafter writes something an editor will fold into a whole and reasonably writes
+        // towards being merged; a polled model must not, because the caller is reading the
+        // answers side by side and came for the disagreement between them.
+        String poll = ConsortiumPrompts.pollSystem();
+        assertTrue(poll.contains("not merged"));
+        assertTrue(poll.contains("returned exactly as you give it"));
+        assertTrue(poll.contains("do not aim for a middle position"));
+        assertTrue(poll.contains("disagreement between the answers"));
+
+        // And a drafter is still told the opposite, since that is what happens to a draft.
+        assertTrue(ConsortiumPrompts.draftSystem().contains("merged by an editor"));
+        assertFalse(ConsortiumPrompts.draftSystem().contains("not merged"));
+    }
+
+    @Test
     void silenceIsNotAgreement() {
         // A panelist that failed contributes no review at all; an empty reply is not a clearance.
         assertFalse(ConsortiumPrompts.isClean(null));

@@ -91,6 +91,13 @@ model instead — four independent drafts over the same directory are four re-re
 four times. Every turn is an ordinary paid call, and the response says how many it made and what
 each model cost.
 
+`mode: "poll"` is the same panel without the converging. Everybody answers once, nothing is
+merged or reviewed, and every answer comes back attributed to the model that wrote it. It is for
+questions that are decisions rather than prose — should this ship, is this correct — where the
+disagreement *is* the product: three models saying yes and one saying no is a different fact from
+a paragraph that reads as though they agreed, and a caller that needs to tell "everyone refused"
+from "the panel was split" cannot get that out of a merged answer.
+
 ## Paying offline
 
 A wallet can turn balance into **bearer notes** — signed strings it preloads while it has a network,

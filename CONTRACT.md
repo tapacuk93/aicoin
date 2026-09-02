@@ -164,7 +164,7 @@ Auth is the same API token as any AI-proxy call (`X-Api-Key`, never a bare addre
   "context": "...",                     // optional background the whole panel sees, max 32,000 characters
   "providers": ["anthropic", "kimi"],   // optional; default: the whole panel
   "editor": "anthropic",                // optional; default: the first panelist (and the lead)
-  "mode": "auto",                       // optional: auto (default) | lead | panel
+  "mode": "auto",                       // optional: auto (default) | lead | panel | poll
   "max_rounds": 2,                      // optional; may only lower consortium.maxRounds, never raise it
   "include_transcript": false           // optional; true also returns every draft
 }
@@ -183,6 +183,12 @@ The record is bounded by `consortium.maxContextChars` (default 60,000), because 
 
 `mode: "auto"` (the default) picks `lead` when the caller's `context` is at least `consortium.leadContextChars` (default 8,000) and `panel` otherwise; `"lead"` and `"panel"` force one regardless. The response says which ran, in `mode`.
 
+**`poll` — the third shape, and the one that does not converge.** Every panelist answers the request once, independently; nothing is merged, nothing is reviewed, and every answer comes back attributed to the model that wrote it, in `answers`. One turn per panelist and no rounds, so a four-model poll is four calls.
+
+It exists because merging is not always what a caller wants. Some questions are *decisions* — should this ship, is this correct, which of these is right — and for those the disagreement is the product. That three models said yes and one said no is a different fact from a paragraph that reads as though the panel agreed, and folding independent judgements into one answer destroys exactly the information such a caller came for. A gate that needs to tell "everyone refused" from "the panel was split" cannot be built on a merged answer, because a merged answer has nothing to be split about.
+
+A polled panelist is told the opposite of what a drafter is told: that its answer is returned exactly as given, beside the others, unreconciled — so that it answers on the merits instead of writing towards a middle nobody asked for. `answer` is empty and `settled` is false, because a poll has no notion of settling; `stopped_reason` is `polled`. A poll is never turned into a `lead` by a large `context`, whatever `leadContextChars` says: that would silently return one answer to a caller who asked for several.
+
 **The rounds**, in order:
 1. **Draft** — every panelist answers the request independently (in `lead` mode: the editor alone does, told that it owns the answer from here on). At this point the shared record holds only the request and the caller's `context`, so no panelist sees another's answer. That independence is the point of drafting; it is also the last turn where it holds.
 2. **Merge** — the editor is given all the drafts and produces one answer. Skipped whenever there is only one draft — always in `lead` mode, and in `panel` mode when only one panelist answered: there is nothing to merge, and it would cost a call to rewrite one input.
@@ -192,6 +198,8 @@ The record is bounded by `consortium.maxContextChars` (default 60,000), because 
 It ends when a whole review round is clean (`settled: true`), or when `consortium.maxRounds` rounds have run (`settled: false`, `stopped_reason: "round_limit"`). **The cap, not agreement, is what guarantees termination**: reviewers asked to find fault can always find some, so an uncapped "until no more comments" is an unbounded spend.
 
 `spend` breaks `coins_charged` down by provider. Only this side can: each turn is settled against its own provider's reported usage, so a client adding up its own calls could not tell which model a consortium's coins went to.
+
+In `poll` mode there are no rounds and nothing to stop: every panelist answers once, `rounds` is 0 and `stopped_reason` is `polled`. A panelist that fails is still dropped and recorded in `errors`, and no panelist answering at all is still `502`.
 
 **Billing is not special: every turn is one ordinary paid call.** One aicoin held before it, the metered remainder settled from that provider's own reported usage afterwards, a refund if the provider never answered — exactly the rules in "Forwarding" above. A four-panelist consortium over two rounds is 13 calls and is billed as 13 calls. The response states `calls` and `coins_charged`, and carries the same `X-Aicoin-Charged` header a single proxied call does.
 
@@ -212,6 +220,9 @@ Response `200`:
   "spend": {"anthropic": 5, "openai": 3},   // coins per provider: which models the money went to
   "reviews": [{"round": 1, "provider": "openai", "clean": false, "comments": "..."}],
   "errors": [{"stage": "draft", "provider": "mistral", "error": "upstream timed out"}],
+  "answers": [{"provider": "anthropic", "model": "claude-sonnet-5", "text": "..."}],
+                                                         // always in poll mode; otherwise only
+                                                         // with include_transcript
   "drafts": [{"provider": "anthropic", "text": "..."}]   // only with include_transcript
 }
 ```
@@ -454,7 +465,7 @@ history, so it needs its own, separate auth.
 ### Tests to include
 - JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs), and the admin token's constant-time comparison + address-format validation — no network/Redis needed.
 - `NoteTest` — the bearer note's format: ids that do not repeat, the ledger key being the *hash* of the secret, the payload surviving the round trip it will really make, rubbish rejected rather than guessed at, and a fingerprint that comes from the hash so reading it aloud gives nothing away. The lifecycle — issue debiting immediately, first-come redemption, reclaim refused to anyone but the issuer, and verification against the published key with no ledger lookup — is covered end-to-end in `e2e/run.sh`.
-- For the consortium: each provider's chat request shape and the extraction of assistant text from each provider's response shape (including a 2xx that carries none), the strict reading of `NO COMMENTS`, and panel/editor selection from config — all pure, no network. The rounds themselves, their billing and the partial-result paths are covered end-to-end in `e2e/run.sh` against the mock provider, which plays drafter, editor and reviewer.
+- For the consortium: each provider's chat request shape and the extraction of assistant text from each provider's response shape (including a 2xx that carries none), the strict reading of `NO COMMENTS`, that a polled panelist is briefed to stand alone rather than towards a merge, that a poll is never turned into a lead by a large context, and panel/editor selection from config — all pure, no network. The rounds themselves, their billing and the partial-result paths are covered end-to-end in `e2e/run.sh` against the mock provider, which plays drafter, editor and reviewer.
 
 ## Docker / docker-compose
 - `aicoin-proxy/Dockerfile` — multi-stage: build stage on **GraalVM** (not vanilla OpenJDK), copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a matching GraalVM runtime image. Entrypoint runs the generated start script. GraalVM chosen for a smaller heap footprint on the cheap single-vCPU production host (see "Production hosting" below); full ahead-of-time `native-image` is a future option, not required now, since the app plugin's script + GraalVM JIT already meets the cost/perf bar.
