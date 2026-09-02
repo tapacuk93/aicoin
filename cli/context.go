@@ -48,7 +48,6 @@ type dirContext struct {
 	Listed    int // files named in the listing
 	Chars     int
 	Truncated bool
-	Root      string
 }
 
 // gatherDir builds the directory block: a listing of the tree, then the contents of any file
@@ -86,7 +85,7 @@ func gatherDir(root string, includes []string, budget int) (*dirContext, error) 
 	}
 	sort.Strings(paths)
 
-	result := &dirContext{Root: absolute}
+	result := &dirContext{}
 	var out strings.Builder
 	out.WriteString("Working directory: " + absolute + "\n\nFiles:\n")
 	listed := paths

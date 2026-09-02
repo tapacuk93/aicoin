@@ -47,7 +47,7 @@ func chooseSingleProvider(record *stats, enabled []string) (provider string, why
 	}
 	// Nothing measured yet — or what was measured is not available here. Any configured chat
 	// provider will do to start with, and the record will decide from the next call onwards.
-	for _, name := range ChatProviders {
+	for _, name := range chatProviders {
 		if usable[name] {
 			return name, "no history yet — measuring from here", nil
 		}
@@ -55,8 +55,20 @@ func chooseSingleProvider(record *stats, enabled []string) (provider string, why
 	return enabled[0], "no history yet — measuring from here", nil
 }
 
-// ChatProviders is the order the proxy itself puts its chat-capable providers in.
-var ChatProviders = []string{"anthropic", "openai", "google", "mistral", "kimi"}
+// chatProviders is the order the proxy itself puts its chat-capable providers in — the same list
+// and the same order as ChatAdapter.CHAT_PROVIDERS on the other side, so a panel's default order
+// and this CLI's fallback agree. Every entry needs a defaultModels entry to be usable.
+var chatProviders = []string{"anthropic", "openai", "google", "mistral", "kimi"}
+
+// pinProvider validates a model name the user asked to pin, and returns it normalised.
+func pinProvider(name string) (string, error) {
+	pinned := strings.ToLower(strings.TrimSpace(name))
+	if !contains(chatProviders, pinned) {
+		return "", fmt.Errorf("%q is not a model this proxy can chat with (%s)",
+			pinned, strings.Join(chatProviders, ", "))
+	}
+	return pinned, nil
+}
 
 // enabledProviders asks the proxy which providers actually have a key.
 func enabledProviders(client *Client) ([]string, error) {
@@ -75,7 +87,7 @@ func enabledProviders(client *Client) ([]string, error) {
 	}
 	var enabled []string
 	for _, provider := range parsed.Providers {
-		if provider.Enabled && contains(ChatProviders, provider.Name) {
+		if provider.Enabled && contains(chatProviders, provider.Name) {
 			enabled = append(enabled, provider.Name)
 		}
 	}
@@ -164,10 +176,9 @@ func cmdSingle(args []string) error {
 	record := loadStats(*walletPath)
 	record.Mode = modeSingle
 	if rest := positional(fs); len(rest) > 0 {
-		pinned := strings.ToLower(strings.TrimSpace(rest[0]))
-		if !contains(ChatProviders, pinned) {
-			return fmt.Errorf("%q is not a model this proxy can chat with (%s)",
-				pinned, strings.Join(ChatProviders, ", "))
+		pinned, err := pinProvider(rest[0])
+		if err != nil {
+			return err
 		}
 		record.SingleProvider = pinned
 	} else {

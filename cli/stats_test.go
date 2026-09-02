@@ -177,3 +177,18 @@ func TestOnlyTheProviderSFailuresCountAgainstIt(t *testing.T) {
 		}
 	}
 }
+
+func TestEveryChatProviderHasAModelToCallItWith(t *testing.T) {
+	// Single mode picks from this list and then needs a model id for whatever it picked; a name in
+	// one and not the other is a provider that can be chosen and cannot be called.
+	for _, provider := range chatProviders {
+		if defaultModels[provider] == "" {
+			t.Errorf("%s is on the panel list with no default model", provider)
+		}
+	}
+	for provider := range defaultModels {
+		if !contains(chatProviders, provider) {
+			t.Errorf("%s has a model but is not on the panel list", provider)
+		}
+	}
+}

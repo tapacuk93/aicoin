@@ -209,7 +209,7 @@ one call per question instead of one per panelist per round. `aicoin multi` to g
 
 Single mode is the same client with the panel switched off: one call, still grounded in the
 directory, still able to propose file changes. The mode sticks until you change it, and
-`/single` and `/multi` do the same thing inside a session.
+`single` and `multi` do the same thing inside a session.
 
 **Which model it picks is measured, not chosen.** Every consortium response says who was on the
 panel, who led it, who reviewed, and who failed at what — so this CLI keeps a running count in
