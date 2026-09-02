@@ -22,6 +22,13 @@ func isTTY() bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
+// stdinIsTTY reports whether there is a person at the keyboard to answer a prompt. Piped input has
+// no one to ask, and reading a confirmation from the pipe would eat the next question.
+func stdinIsTTY() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // spinner is a single rewritten line on stderr: a frame, a label, and how long this has been going.

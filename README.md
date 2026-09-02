@@ -81,6 +81,10 @@ answers, and then all of them review the result until a round comes back with no
 in the working directory are listed for them by default and `-f` includes the ones you name, so a
 question asked inside a project is answered about that project.
 
+Ask it to change something rather than explain something, and the answer comes back as file
+operations — shown as a plan, applied only when you say so, and never outside the directory you ran
+it in. The proxy has no filesystem; the acting happens on your machine.
+
 With a directory attached the call is **led** by one model rather than drafted by all of them: with
 the files in front of it, four independent drafts are four re-readings of the same material, billed
 four times, and they converge anyway — so one leads and the rest improve its answer round by round.

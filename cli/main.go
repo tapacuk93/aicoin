@@ -48,6 +48,7 @@ const usage = `aicoin — command-line wallet and AI client for an aicoin-proxy
       -dir <path>     which directory the panel sees (default: this one; -dir "" for none)
       -providers a,b  narrow the panel      -rounds N   cap the review rounds
       -v              show each round's comments        -json  the raw response
+      -y              apply proposed file changes without asking first
     aicoin ask [-ai p] [-model m] <prompt>     one model, one answer
     aicoin call -ai <p> <path> [-data <json>]  raw pass-through to a provider's own API
     aicoin session [dir]                       the same as "aicoin ."
@@ -318,8 +319,18 @@ func cmdClaim(args []string) error {
 	if err != nil {
 		return err
 	}
-	client := newClient(*url, 30*time.Second)
-	body, err := client.signed(wallet, "POST", "/wallet/api/claim", nil)
+	amount, balance, err := claimCoins(newClient(*url, 30*time.Second), wallet)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("claimed %s aicoin — balance %s\n", formatCoins(amount), formatCoins(balance))
+	return nil
+}
+
+// claimCoins takes the faucet's grant and reports what it granted and what the wallet then holds.
+// Shared with a session's /claim, which is what an empty wallet mid-session wants.
+func claimCoins(client *Client, wallet *Wallet) (amount float64, balance float64, err error) {
+	body, callErr := client.signed(wallet, "POST", "/wallet/api/claim", nil)
 	var parsed struct {
 		Granted        bool    `json:"granted"`
 		Amount         float64 `json:"amount"`
@@ -331,25 +342,23 @@ func cmdClaim(args []string) error {
 	if json.Unmarshal(body, &parsed) == nil && !parsed.Granted && parsed.Reason != "" {
 		switch parsed.Reason {
 		case "cooldown":
-			return fmt.Errorf("already claimed recently — next claim allowed at %s", parsed.NextEligibleAt)
+			return 0, 0, fmt.Errorf("already claimed recently — next claim allowed at %s", parsed.NextEligibleAt)
 		case "pool_exhausted":
-			return fmt.Errorf("the free-coin pool is empty right now")
+			return 0, 0, fmt.Errorf("the free-coin pool is empty right now")
 		default:
-			return fmt.Errorf("claim refused: %s", parsed.Reason)
+			return 0, 0, fmt.Errorf("claim refused: %s", parsed.Reason)
 		}
 	}
-	if err != nil {
-		return err
+	if callErr != nil {
+		return 0, 0, callErr
 	}
 	// The claim response says what was granted, not what the wallet now holds; the balance is one
 	// more read, and it is the number the user actually wanted.
 	balance, balanceErr := client.balance(wallet.Address)
 	if balanceErr != nil {
-		fmt.Printf("claimed %s aicoin\n", formatCoins(parsed.Amount))
-		return nil
+		return parsed.Amount, parsed.Amount, nil
 	}
-	fmt.Printf("claimed %s aicoin — balance %s\n", formatCoins(parsed.Amount), formatCoins(balance))
-	return nil
+	return parsed.Amount, balance, nil
 }
 
 func cmdSend(args []string) error {
@@ -706,6 +715,7 @@ func cmdConsortium(args []string) error {
 	fs.Var(&include, "f", "include this file's contents (glob; repeatable)")
 	budget := fs.Int("budget", 40000, "how many characters of directory context to send at most")
 	mode := fs.String("mode", "auto", "auto|lead|panel — who writes the first answer")
+	auto := fs.Bool("y", false, "apply proposed file changes without asking")
 	verbose := fs.Bool("v", false, "also print each round's comments")
 	asJSON := fs.Bool("json", false, "print the proxy's response verbatim")
 	if err := parse(fs, args); err != nil {
@@ -732,12 +742,15 @@ func cmdConsortium(args []string) error {
 	// What the panel is told about where this was run. The listing goes by default because a
 	// question asked inside a project is nearly always about that project; contents are opt-in,
 	// because every character of them is billed to every panelist on every round.
-	if *dir != "" {
-		gathered, dirErr := gatherDir(*dir, include, *budget)
+	root := *dir
+	if root != "" {
+		gathered, dirErr := gatherDir(root, include, *budget)
 		if dirErr != nil {
 			return dirErr
 		}
-		background = strings.TrimSpace(gathered.Text + "\n\n" + background)
+		// The protocol goes with the directory: a panel that can see files should be able to
+		// propose changes to them rather than describe the changes it would make.
+		background = strings.TrimSpace(gathered.Text + "\n\n" + actionProtocol + "\n\n" + background)
 		note := fmt.Sprintf("context: %d files listed", gathered.Listed)
 		if gathered.FileCount > 0 {
 			note += fmt.Sprintf(", %d included in full", gathered.FileCount)
@@ -804,8 +817,13 @@ func cmdConsortium(args []string) error {
 	}
 
 	// The answer alone on stdout, so `aicoin consortium ... > answer.md` is the answer and nothing
-	// else. Everything about how it got there goes to stderr.
-	fmt.Println(parsed.Answer)
+	// else. Everything about how it got there goes to stderr — including anything it proposes to
+	// write, which is shown and confirmed rather than printed.
+	if root == "" {
+		fmt.Println(parsed.Answer)
+	} else {
+		deliverAnswer(root, parsed.Answer, *auto, confirmOnStdin)
+	}
 
 	if *verbose {
 		for _, review := range parsed.Reviews {
@@ -816,9 +834,7 @@ func cmdConsortium(args []string) error {
 			fmt.Fprintf(os.Stderr, "\nround %d — %s:\n%s\n", review.Round, review.Provider, review.Comments)
 		}
 	}
-	for _, failure := range parsed.Errors {
-		fmt.Fprintf(os.Stderr, "! %s failed at the %s turn: %s\n", failure.Provider, failure.Stage, failure.Error)
-	}
+	reportFailures(parsed)
 	fmt.Fprintf(os.Stderr, "\n%s\n", howItWent(parsed))
 	if balanceErr == nil {
 		balanceAfter, afterErr := client.balance(wallet.Address)
@@ -829,6 +845,37 @@ func cmdConsortium(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "%s aicoin spent\n", formatCoins(float64(parsed.CoinsCharged)))
 	return nil
+}
+
+// reportFailures prints what went wrong during a call, with one exception: a wallet that ran out
+// mid-call fails every remaining turn for the same reason, and printing that reason once per turn
+// buries the one line that matters under a list of duplicates.
+func reportFailures(result *consortiumResult) {
+	brokeCount := 0
+	for _, failure := range result.Errors {
+		if strings.Contains(failure.Error, "insufficient balance") {
+			brokeCount++
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "! %s failed at the %s turn: %s\n", failure.Provider, failure.Stage, failure.Error)
+	}
+	if brokeCount > 0 {
+		fmt.Fprintf(os.Stderr, "! the wallet ran out mid-call — %d turn(s) went unmade. `aicoin claim` for the faucet.\n",
+			brokeCount)
+	}
+}
+
+// confirmOnStdin asks a yes/no question, when there is somebody to ask. Piped input is not
+// somebody: reading the answer from a pipe would consume whatever came next.
+func confirmOnStdin(prompt string) bool {
+	if !stdinIsTTY() {
+		fmt.Fprintln(os.Stderr, "(not a terminal — nothing applied; pass -y to apply without asking)")
+		return false
+	}
+	fmt.Fprint(os.Stderr, prompt)
+	var answer string
+	fmt.Scanln(&answer)
+	return strings.EqualFold(strings.TrimSpace(answer), "y")
 }
 
 func cmdCall(args []string) error {
@@ -906,6 +953,7 @@ func cmdSession(args []string) error {
 	fs.Var(&include, "f", "include this file's contents in every question (glob; repeatable)")
 	budget := fs.Int("budget", 40000, "how many characters of directory context to send at most")
 	verbose := fs.Bool("v", false, "show each round's comments")
+	auto := fs.Bool("y", false, "apply proposed file changes without asking")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
@@ -925,6 +973,7 @@ func cmdSession(args []string) error {
 		rounds:    *rounds,
 		budget:    *budget,
 		verbose:   *verbose,
+		auto:      *auto,
 	})
 }
 

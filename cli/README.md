@@ -29,6 +29,15 @@ includes the contents of the ones you name.
 `aicoin .` opens a **session** on that directory instead: the same thing per question, but each one
 carries what was already asked and answered, so follow-ups mean something. Ctrl-D leaves.
 
+Ask it to *change* something and it proposes the change rather than describing it:
+
+```
+$ aicoin "create an empty scratch.txt"
+the panel proposes 1 change(s) in .:
+  create   scratch.txt (0 bytes)
+apply? [y/N]
+```
+
 ## First run
 
 ```
@@ -99,6 +108,7 @@ this one.
 | `-dir <path>` | which directory to show. `-dir ""` sends none. |
 | `-budget N` | how many characters of directory context to send (default 40,000). |
 | `-mode` | `auto` (default), `lead` or `panel` — see below. |
+| `-y` | apply proposed file changes without asking first. |
 
 Build output, dependency trees, `.git`, dotfiles and binaries are never sent. Files over 256KB are
 skipped, and when the budget runs out the last file is dropped whole rather than cut in half — half
@@ -123,6 +133,34 @@ it. The closing line says which ran:
 ```
 settled — a whole round with no comments | 2 round(s), 7 calls | panel anthropic,openai,kimi, led by anthropic
 ```
+
+### Making changes, not describing them
+
+A panel that can see your files but cannot touch them answers "create an empty file" with
+instructions for typing `touch` yourself. So when a request asks for files to be created, changed
+or deleted, the answer comes back as a set of operations, and this CLI shows you what they would do
+before doing anything:
+
+```
+the panel proposes 2 change(s) in /Users/you/src/my-project:
+  create   cmd/serve.go (1284 bytes)
+  replace  README.md (2011 bytes, was 1840)
+apply? [y/N]
+```
+
+- **Nothing is written without a yes.** `-y` (or `/auto` in a session) skips the question for those
+  who have decided otherwise; a non-interactive run without `-y` prints the plan and stops, because
+  there is nobody to ask.
+- **Everything stays inside the directory.** Absolute paths, `..` escapes and the directory itself
+  are refused — and one bad path invalidates the whole plan rather than applying the safe half,
+  which would leave a state nobody approved.
+- **Writes are whole files.** A model asked for a patch invents one against a version it
+  half-remembers, so it sends the complete intended contents and this replaces the file. `replace`
+  says how many bytes it is losing.
+- Only `write` and `delete` exist. There is no shell, and the proxy has no filesystem at all — the
+  acting happens here, on your machine, where the directory is.
+
+A question is still answered with prose; the operations only appear when you asked for a change.
 
 ### What it costs, while it happens
 
@@ -169,6 +207,8 @@ between two questions is seen as it is now. Inside a session:
 | `/v` | show or hide each round's comments |
 | `/files` | what the panel can currently see |
 | `/balance` | what the wallet holds |
+| `/auto` | apply proposed changes without asking (off by default) |
+| `/claim` | take the faucet's grant, when the wallet runs out mid-session |
 | `/reset` | forget this session's exchanges |
 | `/exit` | leave — Ctrl-D does too |
 
