@@ -424,6 +424,26 @@ A note is `base64url(payload).base64url(signature)`, the same shape as an API to
 
 Notes expire (`EXPIREAT` on the ledger key), which bounds how long an unredeemed note can sit against the balance it took.
 
+### Chains (one secret instead of a purse of notes)
+A note costs a ledger entry, a signature and a preloaded string *per coin*. A **chain** costs one 32-byte secret for the lot.
+
+The wallet picks a seed and hashes it `n` times with SHA-256. Only the tip — the last hash — is sent to the ledger, which reserves `n × per_link` coins against it. Paying `k` coins is revealing the link `k` steps back from the current tip; anyone can check it by hashing forward `k` times and arriving at the tip they already have.
+
+- `POST /wallet/api/chains/open` — live-signed. `{"tip":"<64 hex>","links":20,"per_link":1}`, optional `"payee"` and `"ttl_seconds"`. Debits the whole reservation immediately, exactly as issuing notes does.
+- `POST /wallet/api/chains/redeem` — live-signed. `{"chain":"<opening tip>","preimage":"<64 hex>","steps":k}`. Verifies the walk, credits `k × per_link`, and **advances the stored tip to the preimage**.
+- `GET /wallet/api/chains/status/{opening tip}` — `{"state":"open","remaining":N,"per_link":N,...}`.
+
+Two properties of a hash carry the design, and neither needs anything else to be true:
+
+- **You cannot walk backwards.** A receiver paid three links holds one hash; the links still unspent behind it are preimages, and there is no reaching them. Being paid does not let you take the rest.
+- **You cannot find a second seed landing on the same tip.** That is a preimage search against SHA-256. However many chains exist, no two wallets can end up holding chains that are interchangeable — which is what makes the tip safe to use as the ledger's key for one.
+
+**Advancing the tip is what makes a chain spendable a piece at a time.** Every redemption moves it down, so a link is spendable exactly once — a replay of the same link fails as `bad_preimage`, for everybody, without any list of spent things being kept. A chain can never pay out more than it reserved, which bounds what one goes wrong can cost to the chain's own size rather than to the wallet's balance.
+
+The hash walk is verified in Java, not in the Lua script: Redis's Lua offers only `sha1hex`, and a ledger is no place to introduce a hash whose collision resistance is already gone. The script keeps the part that must be atomic — the tip is advanced only if it is still the one that was verified against, so two redemptions racing cannot both win. `steps` is bounded (10,000) because it arrives in a request, and an unbounded walk is a way to ask the server to hash for as long as somebody likes.
+
+*The CLI does not drive chains yet — `aicoin note` uses individual notes. The endpoints above are complete and covered end-to-end.*
+
 ### Additional proxy-side endpoints
 - `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"half_life_days":110}` computed directly from the ledger — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life. Always includes `Access-Control-Allow-Origin: *` — this is public, read-only data fetched cross-origin by the landing page at aicoin.oeaio.com (a separate origin from the proxy).
 - `GET /free-coins/available` → `{"available": N}` — the real, live remaining count in the shared Redis-backed pool (`AicoinLedger.getFreeCoinsRemaining`), the same counter `POST /wallet/api/claim` atomically decrements. Not a static admin-managed file — this number is authoritative and changes in real time as wallets claim. A ledger-lookup failure resolves to `{"available": 0}`.
