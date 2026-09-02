@@ -218,19 +218,30 @@ final class NoteHandler {
             // Counted against the issuer and written into this wallet's own history: being told
             // once, in the moment it happened, is not the same as having a record of it.
             ledger.recordDoubleSpend(note.getIssuer(), holder, note.getId(), note.getAmount());
-            // And the loser is made whole out of the wallet that did it — a compensation, not a
-            // clawback: nobody else's settled payment is touched, the money comes from the party
-            // who signed the same note over to two people, and their balance goes negative if it
-            // has to. Owing blocks them from spending until they pay it back.
-            ledger.compensateDoubleSpend(holder, note.getIssuer(), note.getAmount());
-            sendJson(ctx, "{\"credited\":true,\"compensated\":true"
-                    + ",\"amount\":" + Note.formatAmount(note.getAmount())
+            // And the loser is paid out of the wallet that did it, as far as that wallet can cover
+            // — a compensation, not a clawback: nobody else's settled payment is touched. What
+            // cannot be recovered is not conjured; it stays a debt on the record and a loss the
+            // price absorbs.
+
+            ledger.compensateDoubleSpend(holder, note.getIssuer(), note.getAmount(), recovered ->
+                    sendDoubleSpendOutcome(ctx, note, holder, redeemedBy, theirClaim, ourClaim, recovered));
+        });
+    }
+
+    private static void sendDoubleSpendOutcome(ChannelHandlerContext ctx, Note note, String holder,
+                                                String redeemedBy, String theirClaim, String ourClaim,
+                                                double recovered) {
+        {
+            sendJson(ctx, "{\"credited\":" + (recovered > 0)
+                    + ",\"compensated\":" + (recovered > 0)
+                    + ",\"amount\":" + Note.formatAmount(recovered)
+                    + ",\"owed_to_you\":" + Note.formatAmount(note.getAmount() - recovered)
                     + ",\"reason\":\"redeemed\""
                     + ",\"double_spend\":{\"issuer\":\"" + note.getIssuer() + "\""
                     + ",\"note_id\":\"" + note.getId() + "\""
                     + ",\"claims\":[{\"payee\":\"" + redeemedBy + "\",\"claim\":\"" + theirClaim + "\"}"
                     + ",{\"payee\":\"" + holder + "\",\"claim\":\"" + ourClaim + "\"}]}}");
-        });
+        }
     }
 
     /** {@code POST /wallet/api/notes/reclaim} — live-signed by the issuer, for a note nobody took. */

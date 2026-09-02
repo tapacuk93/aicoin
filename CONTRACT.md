@@ -461,7 +461,9 @@ The distinction it exists to draw is that **no history is not a clean history**.
 
 The reasons are published beside the number, and clients are expected to show them: a bare score reads as a verdict on somebody's character, which is not what any of this can support. Counts only — who a wallet dealt with is never exposed, just how many.
 
-**The loser is compensated out of the wallet that did it.** On a proven double-spend the second redeemer is credited what they were handed and the double-spender is debited the same, in one script — a compensation, not a clawback. Nobody else's settled payment is touched, and the double-spender's balance goes negative if it has to, which blocks them from spending until they pay it back and holds their rating at 0 meanwhile. Both halves land in both wallets' logs as `double_spend_compensation` and `double_spend_penalty`.
+**The loser is compensated out of the wallet that did it — as far as that wallet can cover.** On a proven double-spend the second redeemer is credited from the double-spender's balance, in one script. A compensation, not a clawback: nobody else's settled payment is touched.
+
+It stops at what the payer actually holds, and that limit is load-bearing. Paying a victim out of a balance that goes negative and is never repaid does not move money, it **mints** it: two wallets end up richer, one owes a debt nobody can collect, and anybody controlling all three can run that in a loop. So the response says what was recovered and what is still `owed_to_you`; the shortfall stays a debt on the payer's record and a loss the price absorbs, which is where an uncollectable cost has to sit. Both halves land in both wallets' logs as `double_spend_compensation` and `double_spend_penalty`.
 
 A proven double-spend is also written into the **victim's** own transaction log as a `double_spend` entry. Being told once, in the moment a sync happened to print it, is not the same as having a record of it.
 
