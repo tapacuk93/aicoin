@@ -149,8 +149,9 @@ REDIS_PORT=16379
 # pool and fail an unrelated test three hundred lines away.
 #   3 claims before the exhaustion test (carol, alice, dave)
 # + one funder claim per provider swept below
-# + 3 consortium wallets (grace, heidi, ivan): a consortium is several paid
-#   calls, so each needs a claim of its own
+# + 4 consortium wallets (grace, heidi, ivan, and one more that claims only
+#   to fund grace): a consortium is several paid calls, and grace runs three
+#   of them
 CLAIM_AMOUNT=10
 # (the size itself is computed below, once PROVIDERS is known)
 
@@ -158,7 +159,7 @@ PROVIDERS=(openai anthropic google mistral cohere elevenlabs stability kimi)
 AUTH_HEADERS=(Authorization x-api-key "" Authorization Authorization xi-api-key Authorization Authorization)
 AUTH_PREFIXES=("Bearer " "" "" "Bearer " "Bearer " "" "Bearer " "Bearer ")
 TEST_KEYS=(openai-test-key anthropic-test-key google-test-key mistral-test-key cohere-test-key elevenlabs-test-key stability-test-key kimi-test-key)
-FREE_COINS_POOL_SIZE=$(( CLAIM_AMOUNT * (3 + ${#PROVIDERS[@]} + 3) ))
+FREE_COINS_POOL_SIZE=$(( CLAIM_AMOUNT * (3 + ${#PROVIDERS[@]} + 4) ))
 
 PROXY_BIN="$REPO_ROOT/aicoin-proxy/build/install/aicoin-proxy/bin/aicoin-proxy"
 # Reuse the existing build only when nothing has been edited since it was made. Reusing it
@@ -333,11 +334,17 @@ log "--- funding: three wallets claim for the consortium tests (a consortium is 
 KEY_GRACE="$WORKDIR/grace.pem"; gen_wallet "$KEY_GRACE"; ADDR_GRACE=$(wallet_address "$KEY_GRACE")
 KEY_HEIDI="$WORKDIR/heidi.pem"; gen_wallet "$KEY_HEIDI"; ADDR_HEIDI=$(wallet_address "$KEY_HEIDI")
 KEY_IVAN="$WORKDIR/ivan.pem"; gen_wallet "$KEY_IVAN"; ADDR_IVAN=$(wallet_address "$KEY_IVAN")
-for pair in "$KEY_GRACE:$ADDR_GRACE" "$KEY_HEIDI:$ADDR_HEIDI" "$KEY_IVAN:$ADDR_IVAN"; do
+KEY_JACK="$WORKDIR/jack.pem"; gen_wallet "$KEY_JACK"; ADDR_JACK=$(wallet_address "$KEY_JACK")
+for pair in "$KEY_GRACE:$ADDR_GRACE" "$KEY_HEIDI:$ADDR_HEIDI" "$KEY_IVAN:$ADDR_IVAN" "$KEY_JACK:$ADDR_JACK"; do
   ckey="${pair%%:*}"; caddr="${pair##*:}"
   code=$(live_signed_request "$ckey" "$caddr" "POST" "/wallet/api/claim" "" "$WORKDIR/consortium-claim.json")
   [ "$code" = "200" ] || fail "expected a consortium wallet's claim to succeed, got $code"
 done
+# Grace runs three consortium calls below (one panel-shaped, two mode tests), which is more than
+# one claim covers.
+code=$(live_signed_request "$KEY_JACK" "$ADDR_JACK" "POST" "/wallet/api/transfer" \
+  "{\"to_user_id\":\"$ADDR_GRACE\",\"amount\":$CLAIM_AMOUNT}" "$WORKDIR/jack-transfer.json")
+[ "$code" = "200" ] || fail "expected jack's transfer to grace to succeed, got $code"
 
 log "--- test 11: the shared free-coins pool is now exhausted for a brand-new wallet ---"
 code=$(live_signed_request "$KEY_ERIN" "$ADDR_ERIN" "POST" "/wallet/api/claim" "" "$WORKDIR/t11.json")
@@ -639,6 +646,54 @@ fi
 bal_ivan_after=$(balance_of "$ADDR_IVAN")
 python3 -c "import sys; sys.exit(0 if float('$bal_ivan_after') >= 0 else 1)" \
   && pass "balance never went negative ($bal_ivan_after)" || fail "balance went negative: $bal_ivan_after"
+
+log "--- test 29: a context-heavy call is led by one model instead of drafted by all of them ---"
+NOW=$(epoch_seconds)
+GRACE_TOKEN2=$(build_token "$KEY_GRACE" "$ADDR_GRACE" "$NOW" "$((NOW + 86400))")
+BIG_CONTEXT=$(python3 -c "print('x' * 9000)")
+python3 -c "
+import json
+print(json.dumps({'prompt': 'what is an aicoin?', 'context': '$BIG_CONTEXT',
+                  'providers': ['openai', 'anthropic'], 'max_rounds': 1}))
+" > "$WORKDIR/t29-req.json"
+code=$(curl -s -o "$WORKDIR/t29.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $GRACE_TOKEN2" -H "Content-Type: application/json" --data-binary "@$WORKDIR/t29-req.json")
+if [ "$code" = "200" ]; then
+  read -r mode calls editor <<<"$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t29.json'))
+print(d['mode'], d['calls'], d['editor'])
+")"
+  # One draft from the lead, then one review per panelist — not one draft each plus a merge.
+  [ "$mode" = "lead" ] && [ "$calls" = "3" ] \
+    && pass "led by $editor: 1 draft + 2 reviews, where the panel shape would have cost 5" \
+    || fail "expected mode=lead and 3 calls, got mode=$mode calls=$calls"
+else
+  fail "expected 200, got $code: $(cat "$WORKDIR/t29.json")"
+fi
+
+log "--- test 30: the caller can insist on the panel shape whatever the context size ---"
+python3 -c "
+import json
+print(json.dumps({'prompt': 'what is an aicoin?', 'context': '$BIG_CONTEXT', 'mode': 'panel',
+                  'providers': ['openai', 'anthropic'], 'max_rounds': 1}))
+" > "$WORKDIR/t30-req.json"
+code=$(curl -s -o "$WORKDIR/t30.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $GRACE_TOKEN2" -H "Content-Type: application/json" --data-binary "@$WORKDIR/t30-req.json")
+if [ "$code" = "200" ]; then
+  read -r mode calls <<<"$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t30.json'))
+print(d['mode'], d['calls'])
+")"
+  [ "$mode" = "panel" ] && [ "$calls" = "5" ] && pass "mode=panel forced: 2 drafts + merge + 2 reviews" \
+    || fail "expected mode=panel and 5 calls, got mode=$mode calls=$calls"
+else
+  fail "expected 200, got $code: $(cat "$WORKDIR/t30.json")"
+fi
+code=$(curl -s -o "$WORKDIR/t30b.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $GRACE_TOKEN2" -H "Content-Type: application/json" -d '{"prompt":"hi","mode":"sideways"}')
+[ "$code" = "400" ] && pass "400 on an unknown mode" || fail "expected 400 for a bad mode, got $code"
 
 log "--- test 28: /consortium is a paid endpoint and validates its body ---"
 code=$(curl -s -o "$WORKDIR/t28a.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" -d '{"prompt":"hi"}')

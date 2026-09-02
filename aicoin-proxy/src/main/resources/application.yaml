@@ -162,6 +162,13 @@ consortium:
   # billed as input. Past it the oldest rounds are dropped; the request, the caller's background and
   # the current answer never are. Env: AICOIN_PROXY_CONSORTIUM_MAX_CONTEXT_CHARS.
   maxContextChars: 60000
+  # Above this much caller-supplied context, `mode: auto` stops drafting in parallel and runs the
+  # call led by one model, with the rest improving its answer round by round. Several models
+  # answering the same short question independently disagree in useful ways and the merge is where
+  # that pays off; once a directory or a document comes with the request, every draft is mostly a
+  # re-reading of the same material, billed once per panelist, and they converge anyway because the
+  # context is doing the work. Env: AICOIN_PROXY_CONSORTIUM_LEAD_CONTEXT_CHARS.
+  leadContextChars: 8000
   # Who merges the drafts and applies the comments. Empty means the first panelist.
   # Env: AICOIN_PROXY_CONSORTIUM_EDITOR.
   editor: ""

@@ -28,6 +28,8 @@ const usage = `aicoin — command-line wallet and AI client for an aicoin-proxy
   aicoin "<question>"              ask the whole panel: every model answers, then they
                                    review the answer until nobody objects. Files in the
                                    current directory are listed for them; -f adds contents.
+  aicoin .                         open a session on this directory: ask, follow up, and
+                                   the panel remembers the exchange. /help once inside.
 
   Wallet
     aicoin new [-force]              create a wallet (refuses to overwrite without -force)
@@ -48,6 +50,7 @@ const usage = `aicoin — command-line wallet and AI client for an aicoin-proxy
       -v              show each round's comments        -json  the raw response
     aicoin ask [-ai p] [-model m] <prompt>     one model, one answer
     aicoin call -ai <p> <path> [-data <json>]  raw pass-through to a provider's own API
+    aicoin session [dir]                       the same as "aicoin ."
 
   Proxy
     aicoin price                     what one aicoin currently costs
@@ -98,7 +101,15 @@ func main() {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return
+	case "session":
+		err = cmdSession(args)
 	default:
+		if looksLikeDir(command) {
+			// `aicoin .` — open a session on that directory rather than asking a question whose
+			// text happens to be a path.
+			err = cmdSession(os.Args[1:])
+			break
+		}
 		// No command word: the whole line is a question for the panel. `aicoin "why does this
 		// build fail?"` is the thing this CLI is for, and making people type `consortium` first
 		// only buys them a longer way to say it.
@@ -628,6 +639,61 @@ func reportCharge(client *Client, wallet *Wallet, charged string) {
 	fmt.Fprintf(os.Stderr, "%s aicoin\n", charged)
 }
 
+// consortiumResult is the proxy's /consortium response. Shared with the interactive session,
+// which shows the same numbers turn by turn.
+type consortiumResult struct {
+	Answer        string   `json:"answer"`
+	Settled       bool     `json:"settled"`
+	StoppedReason string   `json:"stopped_reason"`
+	Rounds        int      `json:"rounds"`
+	Panel         []string `json:"panel"`
+	Editor        string   `json:"editor"`
+	Mode          string   `json:"mode"`
+	Calls         int      `json:"calls"`
+	CoinsCharged  int64    `json:"coins_charged"`
+	Reviews       []struct {
+		Round    int    `json:"round"`
+		Provider string `json:"provider"`
+		Clean    bool   `json:"clean"`
+		Comments string `json:"comments"`
+	} `json:"reviews"`
+	Errors []struct {
+		Stage    string `json:"stage"`
+		Provider string `json:"provider"`
+		Error    string `json:"error"`
+	} `json:"errors"`
+}
+
+func parseConsortium(body []byte) (*consortiumResult, error) {
+	var result consortiumResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func jsonBytes(value any) ([]byte, error) {
+	return json.Marshal(value)
+}
+
+// howItWent is the one-line summary printed after a consortium call: whether it settled, how many
+// rounds and calls it took, and which shape it ran in.
+func howItWent(result *consortiumResult) string {
+	outcome := "stopped: " + result.StoppedReason
+	if result.Settled {
+		outcome = "settled — a whole round with no comments"
+	}
+	shape := "editor " + result.Editor
+	switch result.Mode {
+	case "lead":
+		shape = "led by " + result.Editor
+	case "panel":
+		shape = "drafted by the panel, merged by " + result.Editor
+	}
+	return fmt.Sprintf("%s | %d round(s), %d calls | panel %s, %s",
+		outcome, result.Rounds, result.Calls, strings.Join(result.Panel, ","), shape)
+}
+
 func cmdConsortium(args []string) error {
 	fs := flag.NewFlagSet("consortium", flag.ExitOnError)
 	url, walletPath := common(fs)
@@ -639,6 +705,7 @@ func cmdConsortium(args []string) error {
 	var include stringList
 	fs.Var(&include, "f", "include this file's contents (glob; repeatable)")
 	budget := fs.Int("budget", 40000, "how many characters of directory context to send at most")
+	mode := fs.String("mode", "auto", "auto|lead|panel — who writes the first answer")
 	verbose := fs.Bool("v", false, "also print each round's comments")
 	asJSON := fs.Bool("json", false, "print the proxy's response verbatim")
 	if err := parse(fs, args); err != nil {
@@ -700,6 +767,9 @@ func cmdConsortium(args []string) error {
 	if *rounds > 0 {
 		request["max_rounds"] = *rounds
 	}
+	if *mode != "" && *mode != "auto" {
+		request["mode"] = *mode
+	}
 	body, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -727,28 +797,8 @@ func cmdConsortium(args []string) error {
 		fmt.Println(strings.TrimSpace(string(responseBody)))
 		return nil
 	}
-	var parsed struct {
-		Answer        string   `json:"answer"`
-		Settled       bool     `json:"settled"`
-		StoppedReason string   `json:"stopped_reason"`
-		Rounds        int      `json:"rounds"`
-		Panel         []string `json:"panel"`
-		Editor        string   `json:"editor"`
-		Calls         int      `json:"calls"`
-		CoinsCharged  int64    `json:"coins_charged"`
-		Reviews       []struct {
-			Round    int    `json:"round"`
-			Provider string `json:"provider"`
-			Clean    bool   `json:"clean"`
-			Comments string `json:"comments"`
-		} `json:"reviews"`
-		Errors []struct {
-			Stage    string `json:"stage"`
-			Provider string `json:"provider"`
-			Error    string `json:"error"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(responseBody, &parsed); err != nil {
+	parsed, err := parseConsortium(responseBody)
+	if err != nil {
 		fmt.Println(strings.TrimSpace(string(responseBody)))
 		return nil
 	}
@@ -769,12 +819,7 @@ func cmdConsortium(args []string) error {
 	for _, failure := range parsed.Errors {
 		fmt.Fprintf(os.Stderr, "! %s failed at the %s turn: %s\n", failure.Provider, failure.Stage, failure.Error)
 	}
-	outcome := "stopped: " + parsed.StoppedReason
-	if parsed.Settled {
-		outcome = "settled — a whole round with no comments"
-	}
-	fmt.Fprintf(os.Stderr, "\n%s | %d round(s), %d calls | panel %s, editor %s\n",
-		outcome, parsed.Rounds, parsed.Calls, strings.Join(parsed.Panel, ","), parsed.Editor)
+	fmt.Fprintf(os.Stderr, "\n%s\n", howItWent(parsed))
 	if balanceErr == nil {
 		balanceAfter, afterErr := client.balance(wallet.Address)
 		if afterErr == nil {
@@ -826,6 +871,61 @@ func cmdCall(args []string) error {
 		fmt.Fprintf(os.Stderr, "%s aicoin\n", charged)
 	}
 	return nil
+}
+
+// looksLikeDir reports whether an argument is meant as a directory rather than as a question.
+//
+// Deliberately narrow. "." and ".." obviously are; so is anything with a separator or a leading ~.
+// A bare existing name is not — `aicoin cli` in a repo that happens to contain a cli/ directory is
+// far more likely to be a (very short) question than a request to open a session, and guessing
+// wrong there would silently swallow the question.
+func looksLikeDir(arg string) bool {
+	if arg == "." || arg == ".." {
+		return true
+	}
+	if !strings.ContainsRune(arg, os.PathSeparator) && !strings.HasPrefix(arg, "~") {
+		return false
+	}
+	expanded := arg
+	if strings.HasPrefix(arg, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			expanded = filepath.Join(home, strings.TrimPrefix(arg, "~"))
+		}
+	}
+	info, err := os.Stat(expanded)
+	return err == nil && info.IsDir()
+}
+
+func cmdSession(args []string) error {
+	fs := flag.NewFlagSet("session", flag.ExitOnError)
+	url, walletPath := common(fs)
+	providers := fs.String("providers", "", "comma-separated panel (default: every configured model)")
+	editor := fs.String("editor", "", "which model leads (default: the first panelist)")
+	rounds := fs.Int("rounds", 0, "cap the review rounds")
+	var include stringList
+	fs.Var(&include, "f", "include this file's contents in every question (glob; repeatable)")
+	budget := fs.Int("budget", 40000, "how many characters of directory context to send at most")
+	verbose := fs.Bool("v", false, "show each round's comments")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	dir := "."
+	if rest := positional(fs); len(rest) > 0 {
+		dir = rest[0]
+	}
+	if strings.HasPrefix(dir, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, strings.TrimPrefix(dir, "~"))
+		}
+	}
+	return runSession(dir, *url, *walletPath, &sessionState{
+		includes:  include,
+		providers: *providers,
+		editor:    *editor,
+		rounds:    *rounds,
+		budget:    *budget,
+		verbose:   *verbose,
+	})
 }
 
 // maybeFile resolves an @path argument to that file's contents, leaving anything else alone.

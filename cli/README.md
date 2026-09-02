@@ -15,12 +15,19 @@ Go 1.24+, no dependencies outside the standard library.
 ```
 $ cd ~/src/my-project
 $ aicoin "why does the build fail on a clean checkout?" -f "*.go"
+
+$ aicoin .          # or: open a session here and keep asking
+aicoin ▸ what does the retry logic in the client do?
+aicoin ▸ and is the backoff bounded?
 ```
 
 With no command word, the whole line is a question for the panel: every configured model answers
 it, an editor merges the answers, and then all of them review the result until a round comes back
 with no comments. The files in the working directory are listed for them by default, and `-f`
 includes the contents of the ones you name.
+
+`aicoin .` opens a **session** on that directory instead: the same thing per question, but each one
+carries what was already asked and answered, so follow-ups mean something. Ctrl-D leaves.
 
 ## First run
 
@@ -38,6 +45,7 @@ recovery phrase. Back it up (`aicoin export`) or lose the coins.
 | | |
 |---|---|
 | `aicoin "<question>"` | ask the panel — the same as `aicoin consortium` |
+| `aicoin .` | open a session on this directory (`aicoin session [dir]`) |
 | `aicoin new [-force]` | create a wallet; refuses to overwrite one without `-force` |
 | `aicoin show` | address and balance |
 | `aicoin import -key <hex>` | adopt an existing key (a seed, or an expanded private key) |
@@ -90,6 +98,7 @@ this one.
 | `-f <glob>` | include a file's contents. Repeatable, and comma-separated works too. A bare pattern (`"*.go"`, `main.go`) matches anywhere in the tree; one with a slash (`cli/*.go`) matches the path; a directory (`cli/`) means everything under it. |
 | `-dir <path>` | which directory to show. `-dir ""` sends none. |
 | `-budget N` | how many characters of directory context to send (default 40,000). |
+| `-mode` | `auto` (default), `lead` or `panel` — see below. |
 
 Build output, dependency trees, `.git`, dotfiles and binaries are never sent. Files over 256KB are
 skipped, and when the budget runs out the last file is dropped whole rather than cut in half — half
@@ -97,6 +106,23 @@ a source file invites confident answers about code the panel cannot see the end 
 
 Everything here is billed: the record goes to every panelist on every round, so `-f "**"` on a big
 repo is a real amount of money.
+
+### Who writes the answer
+
+With a bare question, every model drafts one independently and an editor merges them: their
+disagreements are the point, and the merge is where that pays off.
+
+With a directory attached, that stops being worth it — each draft is mostly a re-reading of the
+same files, billed once per model, and they converge anyway because the context is doing the work.
+So a context-heavy call is **led** by one model: it drafts with everything in front of it, and the
+rest of the panel improves its answer round after round. One draft instead of four, and no merge.
+
+The proxy picks between them by how much context you sent; `-mode lead` or `-mode panel` overrides
+it. The closing line says which ran:
+
+```
+settled — a whole round with no comments | 2 round(s), 7 calls | panel anthropic,openai,kimi, led by anthropic
+```
 
 ### What it costs, while it happens
 
@@ -119,6 +145,34 @@ call** — a four-model panel over two rounds is 13 calls and is billed as 13.
 The answer goes to **stdout** and all of the above to stderr, so `aicoin "..." > answer.md` gives
 you the answer and nothing else. `-v` prints each round's comments; `-json` prints the proxy's whole
 response.
+
+## Sessions
+
+```
+$ cd ~/src/my-project && aicoin .
+aicoin — every question goes to the whole panel, which then reviews its own answer.
+directory /Users/you/src/my-project
+wallet 00c0759c5748… · 42 aicoin
+
+aicoin ▸ what does the retry logic do?
+```
+
+Each question is a full consortium call that can see the directory, and carries the session's
+earlier exchanges so follow-ups work. The directory is re-read every turn, so a file you edit
+between two questions is seen as it is now. Inside a session:
+
+| | |
+|---|---|
+| `/f <glob>` | include these files' contents from now on (blank clears) |
+| `/panel <a,b>` | which models sit on the panel (blank for all) |
+| `/rounds <n>` | cap the review rounds |
+| `/v` | show or hide each round's comments |
+| `/files` | what the panel can currently see |
+| `/balance` | what the wallet holds |
+| `/reset` | forget this session's exchanges |
+| `/exit` | leave — Ctrl-D does too |
+
+Every question is paid for separately, and the session prints its running total when you leave.
 
 ## Tokens
 

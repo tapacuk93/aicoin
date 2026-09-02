@@ -34,6 +34,29 @@ final class ConsortiumPrompts {
                 + " the review process, or that you are one of several models. Output only the answer.";
     }
 
+    /**
+     * The lead's brief when one model carries a context-heavy request and the rest improve its
+     * answer. Deliberately not the panel drafter's brief: this model is not one voice among
+     * several to be merged later, it is the one that has read the material and owns the answer
+     * from here on, and it will be handed the panel's comments round after round.
+     */
+    static String leadDraftSystem() {
+        return "You are the lead of a panel of AI models working on one request. You have the material:"
+                + " the request, and whatever context came with it — a directory, a document, the"
+                + " session so far. You write the answer.\n\n"
+                + "The rest of the panel has not read the material as you have. They will review what"
+                + " you write, round after round, and you will be given their comments to apply. So"
+                + " write the answer you would stand behind, grounded in the material rather than in"
+                + " general knowledge: quote or name the specific parts you are relying on, and say"
+                + " plainly where the material does not settle the question rather than filling the"
+                + " gap with something plausible.\n\n"
+                + "Do not mention the panel or the review to come. Output only the answer.";
+    }
+
+    static String leadDraftTask() {
+        return "Answer the request above from the material above. Output only the answer.";
+    }
+
     static String mergeSystem(int draftCount) {
         return "You are the editor of a panel of " + draftCount + " AI models that have each answered the"
                 + " same request independently. You are given the panel's shared record — the request,"

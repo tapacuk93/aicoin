@@ -18,15 +18,17 @@ final class ConsortiumConfig {
     private final int maxRounds;
     private final int maxOutputTokens;
     private final int maxContextChars;
+    private final int leadContextChars;
     private final String editor;
     private final Map<String, String> models;
 
     ConsortiumConfig(boolean enabled, int maxRounds, int maxOutputTokens, int maxContextChars,
-                      String editor, Map<String, String> models) {
+                      int leadContextChars, String editor, Map<String, String> models) {
         this.enabled = enabled;
         this.maxRounds = maxRounds;
         this.maxOutputTokens = maxOutputTokens;
         this.maxContextChars = maxContextChars;
+        this.leadContextChars = leadContextChars;
         this.editor = editor == null ? "" : editor;
         this.models = models == null ? Map.of() : new LinkedHashMap<>(models);
     }
@@ -57,6 +59,15 @@ final class ConsortiumConfig {
      */
     int getMaxContextChars() {
         return maxContextChars;
+    }
+
+    /**
+     * How much context makes a call context-heavy enough to be led by one model rather than
+     * drafted by all of them ({@code mode: "auto"}). Above this, N independent drafts are mostly N
+     * re-readings of the same material, billed N times, so the lead writes and the panel improves.
+     */
+    int getLeadContextChars() {
+        return leadContextChars;
     }
 
     /**

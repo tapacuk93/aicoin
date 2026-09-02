@@ -270,6 +270,7 @@ class ProxyConfigTest {
         assertEquals(3, consortium.getMaxRounds());
         assertEquals(4000, consortium.getMaxOutputTokens());
         assertEquals(60000, consortium.getMaxContextChars());
+        assertEquals(8000, consortium.getLeadContextChars());
         assertEquals("", consortium.getEditor(), "empty means the first panelist");
         for (String provider : ChatAdapter.CHAT_PROVIDERS) {
             assertNotNull(consortium.modelFor(provider), provider + " needs a model to be on a panel");
@@ -285,12 +286,14 @@ class ProxyConfigTest {
         Map<String, String> env = new HashMap<>();
         env.put("AICOIN_PROXY_CONSORTIUM_MAX_ROUNDS", "1");
         env.put("AICOIN_PROXY_CONSORTIUM_KIMI_MODEL", "kimi-k2.7-code");
+        env.put("AICOIN_PROXY_CONSORTIUM_LEAD_CONTEXT_CHARS", "500");
         env.put("AICOIN_PROXY_CONSORTIUM_ENABLED", "false");
 
         ConsortiumConfig consortium = ProxyConfig.load(env).getConsortium();
 
         assertEquals(1, consortium.getMaxRounds());
         assertEquals("kimi-k2.7-code", consortium.modelFor("kimi"));
+        assertEquals(500, consortium.getLeadContextChars());
         assertFalse(consortium.isEnabled());
         assertEquals("claude-sonnet-5", consortium.modelFor("anthropic"), "unrelated models stay put");
     }

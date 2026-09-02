@@ -163,7 +163,8 @@ Auth is the same API token as any AI-proxy call (`X-Api-Key`, never a bare addre
   "prompt": "...",                      // required, max 32,000 characters
   "context": "...",                     // optional background the whole panel sees, max 32,000 characters
   "providers": ["anthropic", "kimi"],   // optional; default: the whole panel
-  "editor": "anthropic",                // optional; default: the first panelist
+  "editor": "anthropic",                // optional; default: the first panelist (and the lead)
+  "mode": "auto",                       // optional: auto (default) | lead | panel
   "max_rounds": 2,                      // optional; may only lower consortium.maxRounds, never raise it
   "include_transcript": false           // optional; true also returns every draft
 }
@@ -175,9 +176,16 @@ Auth is the same API token as any AI-proxy call (`X-Api-Key`, never a bare addre
 
 The record is bounded by `consortium.maxContextChars` (default 60,000), because it goes to every panelist on every round and every character of it is billed as input. Past the limit the oldest **rounds** are dropped, oldest first, and the text says so; the request, the caller's `context` and the answer currently under discussion are never dropped, since a turn without those cannot be answered at all. If those alone exceed the limit, the record is truncated rather than sent to fail upstream on a context-length error.
 
+**Two shapes, chosen by how much context came with the request.** Drafting in parallel buys useful disagreement when the request *is* the whole input: several models answer the same short question independently and the merge is where their differences pay off. Once a large context arrives with it — a directory, a document, a session's history — that stops being true: each draft is then mostly a re-reading of the same material, billed once per panelist, and the drafts converge anyway because the context, not the model, is doing the work.
+
+- **`panel`** — every panelist drafts, the editor merges, the panel reviews. The default for a bare question.
+- **`lead`** — the editor alone drafts, with the whole context in front of it, and the rest of the panel improves that answer round by round. One draft instead of N, and no merge turn.
+
+`mode: "auto"` (the default) picks `lead` when the caller's `context` is at least `consortium.leadContextChars` (default 8,000) and `panel` otherwise; `"lead"` and `"panel"` force one regardless. The response says which ran, in `mode`.
+
 **The rounds**, in order:
-1. **Draft** — every panelist answers the request independently: at this point the shared record holds only the request and the caller's `context`, so no panelist sees another's answer. That independence is the point of drafting; it is also the last turn where it holds.
-2. **Merge** — the editor is given all the drafts and produces one answer. With a single draft this step is skipped: there is nothing to merge, and it would cost a call to rewrite one input.
+1. **Draft** — every panelist answers the request independently (in `lead` mode: the editor alone does, told that it owns the answer from here on). At this point the shared record holds only the request and the caller's `context`, so no panelist sees another's answer. That independence is the point of drafting; it is also the last turn where it holds.
+2. **Merge** — the editor is given all the drafts and produces one answer. Skipped whenever there is only one draft — always in `lead` mode, and in `panel` mode when only one panelist answered: there is nothing to merge, and it would cost a call to rewrite one input.
 3. **Review** — every panelist, editor included, is given the request and the current answer and must reply either with exactly `NO COMMENTS` or with a list of substantive problems. The clean reply is read strictly: the entire reply, ignoring case, surrounding whitespace and markdown emphasis, must be that phrase. "No comments, but X is wrong" counts as comments, because reading it the other way ships an answer a reviewer just objected to.
 4. **Revise** — if any reviewer had comments, the editor is given the request, the answer and every comment, and rewrites the answer; then step 3 runs again on the result.
 
@@ -196,6 +204,7 @@ Response `200`:
   "rounds": 2,
   "panel": ["anthropic", "openai"],
   "editor": "anthropic",
+  "mode": "lead",                   // or "panel" — which shape actually ran
   "calls": 8,
   "coins_charged": 8,
   "reviews": [{"round": 1, "provider": "openai", "clean": false, "comments": "..."}],
@@ -211,6 +220,7 @@ consortium:
   maxRounds: 3
   maxOutputTokens: 4000  # per turn; generous because thinking models spend part of it before writing
   maxContextChars: 60000 # of the shared record per turn; past it the oldest rounds are dropped
+  leadContextChars: 8000 # context at or above this makes `mode: auto` mean lead
   editor: ""             # empty: the first panelist
   models:
     anthropic: claude-sonnet-5

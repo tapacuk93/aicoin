@@ -111,6 +111,24 @@ final class ConsortiumHandler {
      *                    token check went asynchronous — by the time this runs Netty has recycled
      *                    the request object, so there is nothing left to read it from.
      */
+    /**
+     * Whether this call is led by one model ({@code lead}) or drafted by the whole panel
+     * ({@code panel}). {@code auto} decides on the size of the context that came with the request.
+     *
+     * @param mode           the caller's choice: {@code auto}, {@code lead} or {@code panel}
+     * @param background     the context the caller supplied, or null
+     * @param leadFromChars  the size at or above which {@code auto} means lead
+     */
+    static boolean isLeadMode(String mode, String background, int leadFromChars) {
+        if (mode.equals("lead")) {
+            return true;
+        }
+        if (!mode.equals("auto")) {
+            return false;
+        }
+        return background != null && background.length() >= leadFromChars;
+    }
+
     static void serve(ChannelHandlerContext ctx, byte[] requestBody, ProxyConfig config,
                        EventLoopGroup clientGroup, ProviderHealthTracker healthTracker,
                        AicoinLedger ledger, String walletAddress) {
@@ -162,6 +180,12 @@ final class ConsortiumHandler {
             maxRounds = Math.max(1, Math.min(maxRounds, asked));
         }
         boolean includeTranscript = Boolean.TRUE.equals(body.get("include_transcript"));
+        String mode = body.get("mode") instanceof String
+                ? ((String) body.get("mode")).trim().toLowerCase(Locale.ROOT) : "auto";
+        if (!mode.equals("auto") && !mode.equals("lead") && !mode.equals("panel")) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "mode must be auto, lead or panel");
+            return;
+        }
         // Background every panelist sees, on every turn, alongside the request: the caller's own
         // context for the question. Part of the shared record rather than glued onto the prompt,
         // so the editor and the reviewers weigh it too, not only the drafters.
@@ -172,8 +196,18 @@ final class ConsortiumHandler {
             return;
         }
 
+        // Which way to spend the call. Drafting in parallel is worth it when the request is the
+        // whole input: several models answering the same short question independently disagree in
+        // useful ways, and the merge is where that pays off. Once a large context comes with the
+        // request — a directory, a document, a session's history — that stops being true: every
+        // draft is then mostly a re-reading of the same material, billed once per panelist, and
+        // the drafts converge anyway because the context, not the model, is doing the work. So a
+        // context-heavy call is led by one model, and the others improve its answer round by round
+        // instead of each writing their own from scratch.
+        boolean lead = isLeadMode(mode, background, config.getConsortium().getLeadContextChars());
+
         new Session(ctx, config, clientGroup, healthTracker, ledger, walletAddress,
-                prompt, background, panel, editor, maxRounds, includeTranscript).start();
+                prompt, background, panel, editor, maxRounds, includeTranscript, lead).start();
     }
 
     private static Map<?, ?> parseBody(byte[] bytes) {
@@ -206,6 +240,8 @@ final class ConsortiumHandler {
         private final String editor;
         private final int maxRounds;
         private final boolean includeTranscript;
+        /** True when one model drafts and the rest improve it — see the note at the call site. */
+        private final boolean lead;
 
         private final SharedContext context;
 
@@ -233,7 +269,8 @@ final class ConsortiumHandler {
 
         Session(ChannelHandlerContext ctx, ProxyConfig config, EventLoopGroup group,
                  ProviderHealthTracker healthTracker, AicoinLedger ledger, String wallet, String prompt,
-                 String background, List<String> panel, String editor, int maxRounds, boolean includeTranscript) {
+                 String background, List<String> panel, String editor, int maxRounds,
+                 boolean includeTranscript, boolean lead) {
             this.ctx = ctx;
             this.config = config;
             this.group = group;
@@ -245,6 +282,7 @@ final class ConsortiumHandler {
             this.editor = editor;
             this.maxRounds = maxRounds;
             this.includeTranscript = includeTranscript;
+            this.lead = lead;
             this.context = new SharedContext(prompt, background, config.getConsortium().getMaxContextChars());
             // A consortium runs for minutes. A client that gave up in the middle is nobody to
             // spend the next round's coins for, so the rounds stop at the next boundary — the
@@ -265,13 +303,19 @@ final class ConsortiumHandler {
             return aborted;
         }
 
+        /** Who writes the first answer: the whole panel, or — in lead mode — the editor alone. */
+        private List<String> draftPanel() {
+            return lead ? List.of(editor) : panel;
+        }
+
         private void beginDrafts() {
+            List<String> drafters = draftPanel();
             synchronized (this) {
-                outstanding = panel.size();
+                outstanding = drafters.size();
             }
-            String system = ConsortiumPrompts.draftSystem();
-            String user = context.forTurn(ConsortiumPrompts.draftTask());
-            for (String provider : panel) {
+            String system = lead ? ConsortiumPrompts.leadDraftSystem() : ConsortiumPrompts.draftSystem();
+            String user = context.forTurn(lead ? ConsortiumPrompts.leadDraftTask() : ConsortiumPrompts.draftTask());
+            for (String provider : drafters) {
                 turn(provider, system, user, "draft", (text, error) -> {
                     synchronized (this) {
                         if (text != null) {
@@ -304,7 +348,9 @@ final class ConsortiumHandler {
                 }
                 return;
             }
-            context.addDrafts(providersSnapshot, draftsSnapshot);
+            if (!lead) {
+                context.addDrafts(providersSnapshot, draftsSnapshot);
+            }
             if (draftsSnapshot.size() == 1) {
                 // One draft is already the merged answer; a merge turn here would only cost a call
                 // to rewrite a single input.
@@ -538,6 +584,7 @@ final class ConsortiumHandler {
                     json.append(i == 0 ? "" : ",").append(Json.string(panel.get(i)));
                 }
                 json.append("],\"editor\":").append(Json.string(editor))
+                        .append(",\"mode\":").append(Json.string(lead ? "lead" : "panel"))
                         .append(",\"calls\":").append(calls)
                         .append(",\"coins_charged\":").append(coinsCharged)
                         .append(",\"reviews\":[").append(String.join(",", reviewJson)).append("]")

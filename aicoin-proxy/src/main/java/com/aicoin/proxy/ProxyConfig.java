@@ -401,6 +401,7 @@ public final class ProxyConfig {
      *   maxRounds: 3
      *   maxOutputTokens: 4000
      *   maxContextChars: 60000
+     *   leadContextChars: 8000
      *   editor: ""            # empty: the first panelist
      *   models:
      *     anthropic: claude-sonnet-5
@@ -411,6 +412,7 @@ public final class ProxyConfig {
         int maxRounds = getInt(yaml, "consortium.maxRounds", 3);
         int maxOutputTokens = getInt(yaml, "consortium.maxOutputTokens", 4000);
         int maxContextChars = getInt(yaml, "consortium.maxContextChars", 60000);
+        int leadContextChars = getInt(yaml, "consortium.leadContextChars", 8000);
         String editor = getString(yaml, "consortium.editor", "");
 
         Map<String, String> defaults = new LinkedHashMap<>();
@@ -432,6 +434,7 @@ public final class ProxyConfig {
         maxRounds = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_ROUNDS", maxRounds);
         maxOutputTokens = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS", maxOutputTokens);
         maxContextChars = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_CONTEXT_CHARS", maxContextChars);
+        leadContextChars = envInt(env, "AICOIN_PROXY_CONSORTIUM_LEAD_CONTEXT_CHARS", leadContextChars);
         editor = envStr(env, "AICOIN_PROXY_CONSORTIUM_EDITOR", editor);
 
         // A round cap of zero would mean "draft, merge, and ship unreviewed", which is not a
@@ -439,7 +442,8 @@ public final class ProxyConfig {
         if (maxRounds < 1) {
             maxRounds = 1;
         }
-        return new ConsortiumConfig(enabled, maxRounds, maxOutputTokens, maxContextChars, editor, models);
+        return new ConsortiumConfig(enabled, maxRounds, maxOutputTokens, maxContextChars,
+                leadContextChars, editor, models);
     }
 
     /**

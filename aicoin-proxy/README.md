@@ -125,6 +125,7 @@ consortium:                        # POST /consortium — see its own section be
   maxRounds: 3                     # AICOIN_PROXY_CONSORTIUM_MAX_ROUNDS
   maxOutputTokens: 4000            # AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS
   maxContextChars: 60000           # AICOIN_PROXY_CONSORTIUM_MAX_CONTEXT_CHARS (the shared record)
+  leadContextChars: 8000           # AICOIN_PROXY_CONSORTIUM_LEAD_CONTEXT_CHARS (auto -> lead above this)
   editor: ""                       # AICOIN_PROXY_CONSORTIUM_EDITOR (empty: the first panelist)
   models:                          # AICOIN_PROXY_CONSORTIUM_<PROVIDER>_MODEL
     anthropic: claude-sonnet-5
@@ -556,8 +557,22 @@ curl -X POST http://localhost:8080/consortium \
 ```
 
 Body fields, all but `prompt` optional: `context` (background the whole panel
-sees), `providers` (narrow the panel), `editor`, `max_rounds` (may only lower
-`consortium.maxRounds`), `include_transcript` (also return every draft).
+sees), `providers` (narrow the panel), `editor`, `mode`, `max_rounds` (may only
+lower `consortium.maxRounds`), `include_transcript` (also return every draft).
+
+**Two shapes.** Drafting in parallel buys useful disagreement when the request
+*is* the whole input. Once a large context comes with it — a directory, a
+document, a session's history — each draft is mostly a re-reading of the same
+material, billed once per panelist, and they converge anyway because the
+context is doing the work. So:
+
+- `panel` — everyone drafts, the editor merges, the panel reviews.
+- `lead` — the editor drafts alone with the whole context, and the rest improve
+  that answer round by round. One draft instead of N, and no merge turn.
+
+`mode: auto` (the default) means lead when `context` reaches
+`consortium.leadContextChars` (8,000), panel otherwise. The response says which
+one ran.
 
 **Every turn sees the same shared record**: the request, the caller's
 `context`, the drafts attributed to the model that wrote each, every answer
