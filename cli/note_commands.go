@@ -21,6 +21,7 @@ const noteUsage = `aicoin note — coins that change hands offline
   aicoin note sync              redeem what you accepted, and see what became of what you paid
   aicoin note reclaim           take back notes nobody accepted
   aicoin note verify <note>     check a note without keeping it
+  aicoin note replay <ref>      hand over a note you already paid — a double-spend, on purpose
 `
 
 func cmdNote(args []string) error {
@@ -43,6 +44,8 @@ func cmdNote(args []string) error {
 		return cmdNoteAccept(rest, false)
 	case "sync":
 		return cmdNoteSync(rest)
+	case "replay":
+		return cmdNoteReplay(rest)
 	case "reclaim":
 		return cmdNoteReclaim(rest)
 	case "help", "-h", "--help":
@@ -111,13 +114,8 @@ func cmdNoteLoad(args []string) error {
 	p.Mine = append(p.Mine, issued.Notes...)
 	// Cache the ledger's key while there is a network: without it, a note handed to this wallet
 	// later can only be taken on trust.
-	if keyBody, keyErr := client.get("/wallet/api/notes/key"); keyErr == nil {
-		var key struct {
-			PublicKey string `json:"public_key"`
-		}
-		if json.Unmarshal(keyBody, &key) == nil && key.PublicKey != "" {
-			p.LedgerKey = key.PublicKey
-		}
+	if fetched := fetchLedgerKey(client); fetched != "" {
+		p.LedgerKey = fetched
 	}
 	if err := p.save(); err != nil {
 		return err
@@ -136,6 +134,22 @@ func cmdNoteLoad(args []string) error {
 		fmt.Fprintln(os.Stderr, "warning: could not cache the ledger's key, so notes you are given cannot be checked offline")
 	}
 	return nil
+}
+
+// fetchLedgerKey asks the proxy for the key notes are verified against, returning "" if it cannot
+// be reached. Cached in the purse, because verification has to work when it cannot be.
+func fetchLedgerKey(client *Client) string {
+	body, err := client.get("/wallet/api/notes/key")
+	if err != nil {
+		return ""
+	}
+	var key struct {
+		PublicKey string `json:"public_key"`
+	}
+	if json.Unmarshal(body, &key) != nil {
+		return ""
+	}
+	return key.PublicKey
 }
 
 func cmdNoteList(args []string) error {
@@ -157,6 +171,17 @@ func cmdNoteList(args []string) error {
 		for _, note := range p.Mine {
 			fmt.Printf("  %-6s %s  expires %s\n", formatCoins(note.Amount), note.Fingerprint,
 				time.Unix(note.ExpiresAt, 0).Format("2 Jan"))
+		}
+	}
+	if len(p.Spent) > 0 {
+		var paid float64
+		for _, note := range p.Spent {
+			paid += note.Amount
+		}
+		fmt.Printf("\nhanded over: %s aicoin in %d note(s)\n", formatCoins(paid), len(p.Spent))
+		for _, note := range p.Spent {
+			fmt.Printf("  %-6s %s  on %s\n", formatCoins(note.Amount), note.Fingerprint,
+				time.Unix(note.HandedAt, 0).Format("2 Jan 15:04"))
 		}
 	}
 	if len(p.Received) > 0 {
@@ -195,7 +220,7 @@ func cmdNotePay(args []string) error {
 		return fmt.Errorf("the purse cannot make exactly %s from what it is carrying (%s aicoin) — "+
 			"`aicoin note load` for smaller notes", formatCoins(amount), formatCoins(p.total()))
 	}
-	p.removeMine(chosen)
+	p.handOver(chosen)
 	if err := p.save(); err != nil {
 		return err
 	}
@@ -218,7 +243,7 @@ func cmdNoteAccept(args []string, keep bool) error {
 		name = "note accept"
 	}
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
-	_, walletPath := common(fs)
+	url, walletPath := common(fs)
 	if err := parse(fs, args); err != nil {
 		return err
 	}
@@ -233,6 +258,16 @@ func cmdNoteAccept(args []string, keep bool) error {
 	}
 
 	p := loadPurse(*walletPath)
+	// A wallet's very first act can be accepting a note, and without the ledger's key it can only
+	// take one on trust. Fetch it if there is a network — being offline is the case this whole
+	// feature is for, so failing to reach the proxy is not an error, it just leaves the check
+	// unmade and says so.
+	if p.LedgerKey == "" {
+		if fetched := fetchLedgerKey(newClient(*url, 10*time.Second)); fetched != "" {
+			p.LedgerKey = fetched
+			_ = p.save()
+		}
+	}
 	accepted := 0
 	for _, line := range strings.Fields(encoded) {
 		payload, err := verifyNote(line, p.LedgerKey)
@@ -267,6 +302,47 @@ func cmdNoteAccept(args []string, keep bool) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "kept %d note(s) — `aicoin note sync` when you have a network to make them yours\n", accepted)
+	return nil
+}
+
+// cmdNoteReplay hands over a note this wallet already paid — a deliberate double-spend.
+//
+// It exists because the defence needs an attacker to test it. A bearer note is a string, and `note
+// pay` prints it to a terminal: anyone can scroll back and give the same one to a second person.
+// This adds no capability that was not already there; it makes the one that is there explicit,
+// repeatable, and available to the end-to-end tests, so "the second person is told it was already
+// redeemed" is something this project demonstrates rather than asserts.
+//
+// It requires -yes, prints what it is doing, and says who it defrauds. Nothing here is a mode a
+// wallet drifts into by accident.
+func cmdNoteReplay(args []string) error {
+	fs := flag.NewFlagSet("note replay", flag.ExitOnError)
+	_, walletPath := common(fs)
+	yes := fs.Bool("yes", false, "confirm that this is a deliberate double-spend")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	positionals := positional(fs)
+	if len(positionals) != 1 {
+		return fmt.Errorf("usage: aicoin note replay <fingerprint> -yes")
+	}
+	p := loadPurse(*walletPath)
+	note, found := p.findSpent(positionals[0])
+	if !found {
+		return fmt.Errorf("no note you have handed over matches %q — `aicoin note list` shows the receipts",
+			positionals[0])
+	}
+	if !*yes {
+		fmt.Fprintf(os.Stderr, "%s (%s aicoin) was handed over on %s.\n", note.Fingerprint,
+			formatCoins(note.Amount), time.Unix(note.HandedAt, 0).Format("2 Jan 15:04"))
+		fmt.Fprintln(os.Stderr, "Handing it to somebody else is a double-spend: whoever redeems second gets nothing,")
+		fmt.Fprintln(os.Stderr, "and both attempts are recorded against this wallet. Pass -yes if that is what you want.")
+		return fmt.Errorf("not replayed")
+	}
+	fmt.Println(note.Note)
+	fmt.Fprintf(os.Stderr, "\n%s · %s aicoin · replayed — this note was already handed over on %s\n",
+		note.Fingerprint, formatCoins(note.Amount), time.Unix(note.HandedAt, 0).Format("2 Jan 15:04"))
+	fmt.Fprintln(os.Stderr, "Whoever redeems it second will be told it was already redeemed, and will have nothing.")
 	return nil
 }
 
@@ -346,6 +422,7 @@ func cmdNoteSync(args []string) error {
 func cmdNoteReclaim(args []string) error {
 	fs := flag.NewFlagSet("note reclaim", flag.ExitOnError)
 	url, walletPath := common(fs)
+	includeSpent := fs.Bool("include-spent", false, "also try notes handed over that nobody redeemed")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
@@ -354,14 +431,20 @@ func cmdNoteReclaim(args []string) error {
 		return err
 	}
 	p := loadPurse(*walletPath)
-	if len(p.Mine) == 0 {
+	candidates := p.Mine
+	if *includeSpent {
+		// A note handed to somebody who never came back online is still the issuer's money, and
+		// reclaiming it fails harmlessly ("redeemed") if they did.
+		candidates = append(append([]heldNote(nil), p.Mine...), p.Spent...)
+	}
+	if len(candidates) == 0 {
 		fmt.Fprintln(os.Stderr, "the purse is carrying nothing to reclaim")
 		return nil
 	}
 	client := newClient(*url, 2*time.Minute)
 	var kept []heldNote
 	var back float64
-	for _, note := range p.Mine {
+	for _, note := range candidates {
 		body, _ := json.Marshal(map[string]string{"note": note.Note})
 		response, callErr := client.signed(wallet, "POST", "/wallet/api/notes/reclaim", body)
 		if callErr != nil {
@@ -380,7 +463,13 @@ func cmdNoteReclaim(args []string) error {
 		}
 		back += result.Amount
 	}
-	p.Mine = kept
+	var keptMine []heldNote
+	for _, note := range kept {
+		if note.HandedAt == 0 {
+			keptMine = append(keptMine, note)
+		}
+	}
+	p.Mine = keptMine
 	if err := p.save(); err != nil {
 		return err
 	}

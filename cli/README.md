@@ -402,8 +402,32 @@ $ aicoin note sync                        # back online
   cannot be broken in half offline and handing over a 5 would pay more than was owed.
 - **A lost note is not lost money**: `note reclaim` returns anything nobody accepted, and notes
   expire (30 days by default) rather than sitting against your balance forever.
-- The purse is `~/.aicoin/purse.json`, mode 0600. Every note in it is spendable by whoever can read
-  the file.
+- The purse is `~/.aicoin/wallet.purse.json`, mode 0600 — named after its wallet, so two wallets in
+  one directory do not share one. Every note in it is spendable by whoever can read the file.
+- **What you hand over is kept as a receipt**, not deleted: the issuer needs the string to
+  `note reclaim -include-spent` coins a receiver never came back online to redeem.
+
+### Double-spending on purpose
+
+```
+$ aicoin note replay FF-05-37 -yes
+FF-05-37 · 1 aicoin · replayed — this note was already handed over on 2 Sep 08:41
+Whoever redeems it second will be told it was already redeemed, and will have nothing.
+```
+
+This exists because the defence needs an attacker to test it. It adds no capability: `note pay`
+prints the note to the terminal, so the same string can always be handed to a second person by
+scrolling back. What it adds is a repeatable way to *demonstrate* what the system does about it —
+
+```
+bob accepts   ✓ genuine · 1 aicoin · FF-05-37        (offline; he cannot tell)
+carol accepts ✓ genuine · 1 aicoin · FF-05-37        (offline; nor can she)
+bob syncs     ✓ FF-05-37 · 1 aicoin credited
+carol syncs   ✗ FF-05-37 · already redeemed by someone else
+```
+
+— which is the honest shape of an offline bearer instrument: nobody can tell at hand-off, exactly
+one person ends up with the coins, and the loser is told plainly rather than left wondering.
 
 ## Tokens
 

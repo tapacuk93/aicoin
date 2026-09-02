@@ -224,6 +224,13 @@ func cmdNew(args []string) error {
 	if err := wallet.save(*walletPath); err != nil {
 		return err
 	}
+	// Cache the ledger's note key now, while there is probably a network: a new wallet's first act
+	// can be accepting a note from somebody, and that has to work offline.
+	if fetched := fetchLedgerKey(newClient(*url, 10*time.Second)); fetched != "" {
+		p := loadPurse(*walletPath)
+		p.LedgerKey = fetched
+		_ = p.save()
+	}
 	fmt.Println(wallet.Address)
 	fmt.Fprintf(os.Stderr, "wallet written to %s (keep it: it is the only copy of the key)\n", *walletPath)
 	fmt.Fprintf(os.Stderr, "claim your first coins with: aicoin claim -url %s\n", *url)

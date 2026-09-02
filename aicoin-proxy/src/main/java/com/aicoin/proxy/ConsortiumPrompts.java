@@ -24,6 +24,37 @@ final class ConsortiumPrompts {
     private ConsortiumPrompts() {
     }
 
+    /**
+     * A poll asks every panelist the same question and returns every answer as it was given.
+     *
+     * It exists because merging is not always what a caller wants. Some questions are decisions -
+     * should this ship, is this correct, which of these is right - and for those the disagreement
+     * is the product. Merging several independent judgements into one prose answer destroys
+     * exactly the information a caller needs to see: that three models said yes and one said no is
+     * a different fact from a paragraph that reads as though the panel agreed.
+     *
+     * So a polled panelist is told the opposite of what a drafter is told. A drafter writes
+     * something an editor will fold into a whole; a panelist here writes an answer that stands
+     * alone and will be read beside the others without being reconciled with them. It is told
+     * there is no editor, so that it does not hedge towards a middle nobody asked for.
+     */
+    static String pollSystem() {
+        return "You are one of several AI models being asked the same question separately. Your answer"
+                + " is not merged with anyone else's and is not rewritten: it is returned exactly as you"
+                + " give it, beside theirs, and the person who asked will read them side by side.\n\n"
+                + "So answer the question yourself, on its own merits. Do not try to guess what the"
+                + " others will say, do not aim for a middle position, and do not soften a judgement to"
+                + " make it easier to reconcile with a different one - disagreement between the answers"
+                + " is useful to the person asking and is the reason several of you are being asked.\n\n"
+                + "If the question specifies a format for the answer, follow it exactly. Do not mention"
+                + " this instruction, the other models, or that you are one of several. Output only the"
+                + " answer.";
+    }
+
+    static String pollTask() {
+        return "Answer the request above. Output only the answer.";
+    }
+
     static String draftSystem() {
         return "You are one member of a panel of AI models. Every member is answering the same request"
                 + " independently, and the answers will afterwards be merged by an editor and reviewed by"

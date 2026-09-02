@@ -34,6 +34,7 @@ type heldNote struct {
 	ExpiresAt   int64   `json:"expires_at"`
 	Issuer      string  `json:"issuer,omitempty"`
 	AcceptedAt  int64   `json:"accepted_at,omitempty"`
+	HandedAt    int64   `json:"handed_at,omitempty"`
 }
 
 type purse struct {
@@ -42,12 +43,31 @@ type purse struct {
 	LedgerKey string     `json:"ledger_key"`
 	Mine      []heldNote `json:"mine"`
 	Received  []heldNote `json:"received"`
+	// Spent is what this wallet has handed over: receipts, not money. Keeping them is ordinary
+	// wallet hygiene — a receiver who loses their phone before syncing leaves coins stranded, and
+	// the issuer needs the string to reclaim them — and it is also, unavoidably, what makes a
+	// second hand-off possible. See `note replay`: the capability is inherent to a bearer note,
+	// which is printed to a terminal the moment it is paid.
+	Spent []heldNote `json:"spent"`
 
 	path string
 }
 
+// pursePath names the purse after the wallet it belongs to, not after the directory it sits in.
+// Two wallets in one directory — a test wallet beside the real one, two people on one machine —
+// otherwise shared a purse, which for a file full of bearer notes means each could spend the
+// other's money.
 func pursePath(walletPath string) string {
-	return filepath.Join(filepath.Dir(walletPath), "purse.json")
+	return sidecarPath(walletPath, "purse")
+}
+
+// sidecarPath turns ~/.aicoin/wallet.json into ~/.aicoin/wallet.purse.json.
+func sidecarPath(walletPath, kind string) string {
+	base := strings.TrimSuffix(filepath.Base(walletPath), filepath.Ext(walletPath))
+	if base == "" {
+		base = "wallet"
+	}
+	return filepath.Join(filepath.Dir(walletPath), base+"."+kind+".json")
 }
 
 func loadPurse(walletPath string) *purse {
@@ -199,8 +219,11 @@ func (p *purse) pick(amount float64) ([]heldNote, bool) {
 	return nil, false
 }
 
-func (p *purse) removeMine(notes []heldNote) {
+// handOver moves notes from what this wallet is carrying to what it has paid out. They stop being
+// spendable here and become receipts.
+func (p *purse) handOver(notes []heldNote) {
 	gone := map[string]bool{}
+	now := time.Now().Unix()
 	for _, note := range notes {
 		gone[note.Hash] = true
 	}
@@ -208,7 +231,22 @@ func (p *purse) removeMine(notes []heldNote) {
 	for _, note := range p.Mine {
 		if !gone[note.Hash] {
 			kept = append(kept, note)
+			continue
 		}
+		note.HandedAt = now
+		p.Spent = append(p.Spent, note)
 	}
 	p.Mine = kept
+}
+
+// findSpent looks up a receipt by fingerprint or by the head of its hash.
+func (p *purse) findSpent(reference string) (heldNote, bool) {
+	needle := strings.ToUpper(strings.TrimSpace(reference))
+	for _, note := range p.Spent {
+		if strings.EqualFold(note.Fingerprint, needle) ||
+			strings.HasPrefix(strings.ToUpper(note.Hash), strings.ReplaceAll(needle, "-", "")) {
+			return note, true
+		}
+	}
+	return heldNote{}, false
 }
