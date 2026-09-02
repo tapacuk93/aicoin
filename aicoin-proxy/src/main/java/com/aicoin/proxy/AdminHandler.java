@@ -15,6 +15,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Serves the operator-only wallet/transaction admin surface, per CONTRACT.md's
@@ -136,6 +138,88 @@ final class AdminHandler {
             sb.append("]}");
             sendJson(ctx, sb.toString());
         });
+    }
+
+    /**
+     * Ceiling on one credit. Not a policy about how many coins may exist — the operator can call
+     * this again — but a guard against a fat-fingered zero turning a top-up into a number nobody
+     * meant to type.
+     */
+    static final double MAX_CREDIT_AICOIN = 1_000_000;
+
+    /**
+     * {@code POST /admin/credit} — the operator's own way to put coins in a wallet, per
+     * CONTRACT.md's "Admin credit". Body {@code {"address":"<64 hex>","amount":1000}}, optionally
+     * with {@code "reason"} (recorded in the wallet's transaction log) and {@code "reference"} (a
+     * key that makes the credit idempotent — the same reference credits once, however many times
+     * it is sent).
+     *
+     * <p>Nothing backs these coins. They are the operator saying "I will pay for the calls these
+     * buy", which is why this is admin-token-only and why each one is written into the wallet's
+     * transaction log as an {@code admin_credit} rather than quietly adjusting a number.
+     */
+    static void serveCredit(ChannelHandlerContext ctx, FullHttpRequest request, AicoinLedger ledger,
+                             ProxyConfig config) {
+        if (!isAuthorized(request, config, ctx)) {
+            return;
+        }
+        String body = new String(ByteBufUtil.getBytes(request.content()), CharsetUtil.UTF_8);
+        String address = stringField(body, "address");
+        if (address == null || !isValidAddress(address)) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "address must be 64 hex characters");
+            return;
+        }
+        Matcher amountMatcher = Pattern.compile("\"amount\"\\s*:\\s*(-?[0-9.]+)").matcher(body);
+        if (!amountMatcher.find()) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "body must carry an amount");
+            return;
+        }
+        double amount;
+        try {
+            amount = Double.parseDouble(amountMatcher.group(1));
+        } catch (NumberFormatException e) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "amount must be a number");
+            return;
+        }
+        if (!(amount > 0)) {
+            // Taking coins away is not this endpoint's job: a negative credit would be a debit with
+            // no call behind it, and no way for a wallet holder to see what it paid for.
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "amount must be positive");
+            return;
+        }
+        if (amount > MAX_CREDIT_AICOIN) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST,
+                    "amount must be at most " + (long) MAX_CREDIT_AICOIN + " in one credit");
+            return;
+        }
+        String reason = stringField(body, "reason");
+        if (reason == null) {
+            reason = "admin credit";
+        }
+        String reference = stringField(body, "reference");
+        if (reference == null) {
+            // No reference means "credit now", and a retry of that is another credit — the same as
+            // running the command twice. A caller that cannot tolerate that sends one.
+            reference = java.util.UUID.randomUUID().toString();
+        }
+
+        String finalReason = reason;
+        ledger.creditWallet(address, amount, reason, reference, result -> {
+            if (!result.isReachable()) {
+                sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not credit the wallet");
+                return;
+            }
+            sendJson(ctx, "{\"address\":\"" + address + "\",\"amount\":" + amount
+                    + ",\"credited\":" + result.isCredited()
+                    + ",\"balance\":" + result.getBalance()
+                    + ",\"reason\":\"" + finalReason.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}");
+        });
+    }
+
+    /** Pulls a JSON string field out of a small admin body, in the same regex idiom as the rest of these handlers. */
+    static String stringField(String body, String name) {
+        Matcher matcher = Pattern.compile("\"" + name + "\"\\s*:\\s*\"([^\"]*)\"").matcher(body);
+        return matcher.find() ? matcher.group(1) : null;
     }
 
     /** @return true if authorized; on false, has already written the appropriate 401/503 response. */

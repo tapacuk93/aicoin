@@ -704,6 +704,51 @@ code=$(curl -s -o "$WORKDIR/t30b.json" -w "%{http_code}" -X POST "http://127.0.0
   -H "X-Api-Key: $GRACE_TOKEN2" -H "Content-Type: application/json" -d '{"prompt":"hi","mode":"sideways"}')
 [ "$code" = "400" ] && pass "400 on an unknown mode" || fail "expected 400 for a bad mode, got $code"
 
+log "--- test 31: POST /admin/credit puts coins in a wallet, once per reference ---"
+bal_bob_before=$(balance_of "$ADDR_BOB")
+code=$(curl -s -o "$WORKDIR/t31.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" \
+  -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"address\":\"$ADDR_BOB\",\"amount\":250,\"reason\":\"e2e top-up\",\"reference\":\"e2e-credit-1\"}")
+bal_bob_after=$(balance_of "$ADDR_BOB")
+gained=$(python3 -c "print(round(float('$bal_bob_after') - float('$bal_bob_before'), 6))")
+if [ "$code" = "200" ] && [ "$gained" = "250.0" ]; then
+  pass "credited 250 aicoin (bob $bal_bob_before -> $bal_bob_after)"
+else
+  fail "expected 200 and +250, got code=$code gained=$gained: $(cat "$WORKDIR/t31.json")"
+fi
+
+# The same reference again must not credit again: a retried request is the one way an admin
+# endpoint quietly doubles somebody's money.
+code=$(curl -s -o "$WORKDIR/t31b.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" \
+  -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"address\":\"$ADDR_BOB\",\"amount\":250,\"reason\":\"e2e top-up\",\"reference\":\"e2e-credit-1\"}")
+bal_bob_replay=$(balance_of "$ADDR_BOB")
+credited=$(python3 -c "import json;print(json.load(open('$WORKDIR/t31b.json')).get('credited'))")
+[ "$code" = "200" ] && [ "$credited" = "False" ] && [ "$bal_bob_replay" = "$bal_bob_after" ] \
+  && pass "the same reference credits once (replay is a no-op, not an error)" \
+  || fail "expected a no-op replay, got code=$code credited=$credited balance=$bal_bob_replay"
+
+# It lands in the wallet's own transaction log, so the balance is always explained.
+code=$(curl -s -o "$WORKDIR/t31c.json" -w "%{http_code}" "http://127.0.0.1:$PROXY_PORT/admin/wallets/$ADDR_BOB/transactions" \
+  -H "X-Admin-Token: $ADMIN_TOKEN")
+has_entry=$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t31c.json'))
+print(any(t.get('type') == 'admin_credit' and t.get('amount') == 250 for t in d['transactions']))
+")
+[ "$has_entry" = "True" ] && pass "the credit is in the transaction log as admin_credit" \
+  || fail "expected an admin_credit entry: $(cat "$WORKDIR/t31c.json")"
+
+log "--- test 32: /admin/credit refuses what it should ---"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" \
+  -H "Content-Type: application/json" -d "{\"address\":\"$ADDR_BOB\",\"amount\":1}")
+[ "$code" = "401" ] && pass "401 without the admin token" || fail "expected 401, got $code"
+for body in "{\"address\":\"nothex\",\"amount\":1}" "{\"address\":\"$ADDR_BOB\",\"amount\":-5}" "{\"address\":\"$ADDR_BOB\",\"amount\":0}" "{\"address\":\"$ADDR_BOB\"}"; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" \
+    -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" -d "$body")
+  [ "$code" = "400" ] && pass "400 for $body" || fail "expected 400 for $body, got $code"
+done
+
 log "--- test 28: /consortium is a paid endpoint and validates its body ---"
 code=$(curl -s -o "$WORKDIR/t28a.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" -d '{"prompt":"hi"}')
 [ "$code" = "401" ] && pass "401 without an API token" || fail "expected 401, got $code: $(cat "$WORKDIR/t28a.json")"

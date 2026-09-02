@@ -383,6 +383,15 @@ happens to be empty.
 ### Peer transfer (buy/sell)
 `POST /wallet/api/transfer` — live-signed, body `{"to_user_id":"<address>","amount":N}` (`from` is always the verified signer). Runs the transfer script above. Validates `amount > 0` and current balance of the signer `>= amount`; if not, `400 {"error":"insufficient balance"}`. This is the *entire* buy/sell mechanism — no real money, no external payment rail: "buying" is just receiving a transfer, "selling" is sending one.
 
+### Admin credit
+`POST /admin/credit` — the operator putting coins into a wallet. Admin-token-gated (`X-Admin-Token`, same as the other `/admin` writes), body `{"address":"<64 hex>","amount":1000}`, optionally `"reason"` (recorded) and `"reference"` (an idempotency key: the same reference credits once, however many times it is sent — without one, each request is a fresh credit). Refuses a malformed address, an absent/non-numeric/zero/negative amount, and anything over 1,000,000 in a single call — a cap against a mistyped zero, not a policy about how many coins may exist.
+
+Response `{"address":..,"amount":1000,"credited":true,"balance":1004,"reason":".."}`; `credited:false` means that reference had already been applied and nothing changed. A ledger failure is `503`.
+
+**Nothing backs these coins.** The faucet is bounded by a shared pool and an IAP credit is bounded by a real payment; this is the operator saying "I will pay for the calls these buy". That is why it is admin-only, why the amount is capped per call, and why the credit is written into the wallet's transaction log as an `admin_credit` — with its `reason` — in the same atomic script as the balance change, rather than adjusting a number and leaving a balance the log cannot explain. Negative amounts are refused outright: taking coins back would be a debit with no call behind it, invisible to the wallet holder.
+
+Before this existed, the only ways coins entered the ledger were the faucet, a redeemed purchase, and a transfer from a wallet that already had some — so an operator topping up their own wallet had to write to Redis by hand.
+
 ### Additional proxy-side endpoints
 - `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"half_life_days":110}` computed directly from the ledger — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life. Always includes `Access-Control-Allow-Origin: *` — this is public, read-only data fetched cross-origin by the landing page at aicoin.oeaio.com (a separate origin from the proxy).
 - `GET /free-coins/available` → `{"available": N}` — the real, live remaining count in the shared Redis-backed pool (`AicoinLedger.getFreeCoinsRemaining`), the same counter `POST /wallet/api/claim` atomically decrements. Not a static admin-managed file — this number is authoritative and changes in real time as wallets claim. A ledger-lookup failure resolves to `{"available": 0}`.

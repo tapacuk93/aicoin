@@ -147,6 +147,27 @@ final class AicoinLedger implements AutoCloseable {
             + "return {1, tostring(newBalance)}";
 
     /**
+     * The operator's own credit, per CONTRACT.md's "Admin credit". Same shape as every other way
+     * coins enter the ledger — balance and transaction-log entry in one atomic script, so the log
+     * always explains the balance — with the IAP path's idempotency marker, because a credit that
+     * a retried request silently doubles is a footgun with money in it.
+     *
+     * <p>Returns {@code {0, currentBalance}} when the reference has already been credited (a no-op
+     * replay, not an error) and {@code {1, newBalance}} on a fresh credit.
+     */
+    private static final String ADMIN_CREDIT_SCRIPT =
+            "local already = redis.call('SETNX', KEYS[1], '1') "
+            + "if already == 0 then "
+            + "  local balance = tonumber(redis.call('GET', KEYS[2]) or '0') "
+            + "  return {0, tostring(balance)} "
+            + "end "
+            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[2], ARGV[1]) "
+            + "redis.call('SADD', KEYS[3], ARGV[2]) "
+            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='admin_credit', amount=tonumber(ARGV[1]), reason=ARGV[3], balance_after=tonumber(newBalance), at=tonumber(ARGV[4])})) "
+            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
+            + "return {1, tostring(newBalance)}";
+
+    /**
      * Takes the balance of a metered call once its real cost is known — the amount over the one
      * coin already held at the gate.
      *
@@ -274,6 +295,63 @@ final class AicoinLedger implements AutoCloseable {
             }
             onResult.accept(TransferResult.decided(result != null && result == 1L));
         });
+    }
+
+    /**
+     * Credits {@code amount} aicoin to {@code address} on the operator's say-so, once per
+     * {@code reference}. Nothing backs these coins but the operator's willingness to pay for the
+     * calls they buy, which is why the endpoint behind this is admin-token-only and why every one
+     * of them lands in the wallet's transaction log as an {@code admin_credit}.
+     */
+    void creditWallet(String address, double amount, String reason, String reference, Consumer<CreditResult> onResult) {
+        long nowMillis = Instant.now().toEpochMilli();
+        RedisFuture<List<Object>> future = commands.eval(ADMIN_CREDIT_SCRIPT, ScriptOutputType.MULTI,
+                new String[] {adminCreditKey(reference), balanceKey(address), KNOWN_WALLETS_KEY, txKey(address)},
+                String.valueOf(amount), address, reason, String.valueOf(nowMillis));
+        future.whenComplete((raw, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger credit failed for " + address, err);
+                onResult.accept(CreditResult.unreachable());
+                return;
+            }
+            boolean credited = ((Number) raw.get(0)).longValue() == 1L;
+            double balance = Double.parseDouble(String.valueOf(raw.get(1)));
+            onResult.accept(CreditResult.of(credited, balance));
+        });
+    }
+
+    /** Outcome of {@link #creditWallet}: unreachable, a fresh credit, or a replay of one already made. */
+    static final class CreditResult {
+        private final boolean reachable;
+        private final boolean credited;
+        private final double balance;
+
+        private CreditResult(boolean reachable, boolean credited, double balance) {
+            this.reachable = reachable;
+            this.credited = credited;
+            this.balance = balance;
+        }
+
+        static CreditResult unreachable() {
+            return new CreditResult(false, false, 0);
+        }
+
+        static CreditResult of(boolean credited, double balance) {
+            return new CreditResult(true, credited, balance);
+        }
+
+        boolean isReachable() {
+            return reachable;
+        }
+
+        /** False when this reference had already been credited — a replay, and a no-op. */
+        boolean isCredited() {
+            return credited;
+        }
+
+        double getBalance() {
+            return balance;
+        }
     }
 
     /**
@@ -908,6 +986,10 @@ final class AicoinLedger implements AutoCloseable {
 
     private static String txKey(String address) {
         return "aicoin:" + TAG + ":tx:" + address;
+    }
+
+    private static String adminCreditKey(String reference) {
+        return "aicoin:" + TAG + ":admin-credit:" + reference;
     }
 
     private static String iapRedeemedKey(String transactionId) {
