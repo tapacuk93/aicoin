@@ -125,7 +125,7 @@ func TestApplyWritesCreatesDirectoriesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := applyActions(planned); err != nil {
+	if err := applyActions(root, planned); err != nil {
 		t.Fatal(err)
 	}
 	body, err := os.ReadFile(filepath.Join(root, "nested/deep/file.txt"))
@@ -229,15 +229,126 @@ func TestAnthropicRequestsCarryTheVersionHeader(t *testing.T) {
 func TestTheCoinMeterShowsTheWalletAndWhatHasGone(t *testing.T) {
 	// While a call runs, the wallet is what there is to watch: the number itself, and — once it
 	// moves — how much of it the call has taken.
-	if got := coinMeterText(1000, 1000); got != "1000 aicoin" {
+	if got := coinMeterText(1000, 1000, 0); got != "1000 aicoin" {
 		t.Errorf("before anything is spent, just the balance: %q", got)
 	}
-	if got := coinMeterText(987, 1000); !strings.Contains(got, "987 aicoin") || !strings.Contains(got, "13") {
+	if got := coinMeterText(987, 1000, 0); !strings.Contains(got, "987 aicoin") || !strings.Contains(got, "13") {
 		t.Errorf("once it moves, the balance and what went: %q", got)
 	}
 	// A balance read that failed leaves the previous figure standing rather than showing a zero,
 	// so a rising number is never invented either.
-	if got := coinMeterText(1000, 990); strings.Contains(got, "−") {
+	if got := coinMeterText(1000, 990, 0); strings.Contains(got, "−") {
 		t.Errorf("a balance above the start is not a negative spend: %q", got)
+	}
+}
+
+func TestRunActionsAreParsedAndDescribedVerbatim(t *testing.T) {
+	answer := "```aicoin-actions\n[{\"op\":\"run\",\"command\":\"go test ./...\",\"why\":\"check it passes\"}]\n```"
+	actions, ok := parseActions(answer)
+	if !ok || len(actions) != 1 || actions[0].Command != "go test ./..." {
+		t.Fatalf("expected one run action, got %+v (ok=%v)", actions, ok)
+	}
+	planned, err := planActions(t.TempDir(), actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := describe(planned)
+	// The command is what is being consented to, so it is shown exactly, not summarised.
+	if !strings.Contains(text, "go test ./...") || !strings.Contains(text, "check it passes") {
+		t.Fatalf("the plan should show the command and its reason: %s", text)
+	}
+}
+
+func TestARunActionWithNoCommandIsRefused(t *testing.T) {
+	if _, err := planActions(t.TempDir(), []action{{Op: "run", Command: "   "}}); err == nil {
+		t.Fatal("a run action needs something to run")
+	}
+}
+
+func TestFilesAreWrittenBeforeCommandsRun(t *testing.T) {
+	// The point of the ordering: one block can create a file and then compile it.
+	root := t.TempDir()
+	planned, err := planActions(root, []action{
+		{Op: "run", Command: "cat hello.txt > copied.txt"},
+		{Op: "write", Path: "hello.txt", Content: "written first"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyActions(root, planned); err != nil {
+		t.Fatalf("the command should have found the file: %v", err)
+	}
+	copied, err := os.ReadFile(filepath.Join(root, "copied.txt"))
+	if err != nil || string(copied) != "written first" {
+		t.Fatalf("expected the command to have run after the write, got %q / %v", copied, err)
+	}
+}
+
+func TestAFailingCommandStopsTheOnesAfterIt(t *testing.T) {
+	// They were written expecting it to have worked; running them anyway turns one failure into
+	// several, in a directory the user is about to look at.
+	root := t.TempDir()
+	planned, err := planActions(root, []action{
+		{Op: "run", Command: "exit 3"},
+		{Op: "run", Command: "touch should-not-exist.txt"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = applyActions(root, planned)
+	if err == nil || !strings.Contains(err.Error(), "exited 3") {
+		t.Fatalf("expected the exit code to be reported, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "should-not-exist.txt")); !os.IsNotExist(statErr) {
+		t.Fatal("the command after the failure should not have run")
+	}
+}
+
+func TestNothingRunsWithoutApproval(t *testing.T) {
+	root := t.TempDir()
+	answer := "```aicoin-actions\n[{\"op\":\"run\",\"command\":\"touch ran.txt\"}]\n```"
+	var asked string
+	deliverAnswer(root, answer, false, func(prompt string) bool { asked = prompt; return false })
+
+	if _, err := os.Stat(filepath.Join(root, "ran.txt")); !os.IsNotExist(err) {
+		t.Fatal("a declined plan must not run anything")
+	}
+	// Agreeing to a file being written and agreeing to a shell command running are not the same
+	// decision, and the prompt says which one is being asked.
+	if !strings.Contains(asked, "run") {
+		t.Fatalf("the prompt should name the commands: %q", asked)
+	}
+}
+
+func TestDollarsAreShownAtTheCurrentPrice(t *testing.T) {
+	const price = 0.0055
+	if got := usd(1000, price); got != "$5.50" {
+		t.Errorf("1000 coins at %v should be $5.50, got %s", price, got)
+	}
+	if got := usd(9, price); got != "$0.05" {
+		t.Errorf("9 coins should round to cents, got %s", got)
+	}
+	// Below a cent, cents are useless: a call that cost a coin should not read as $0.00. (Which
+	// side of the half-cent it lands on is float rounding, and either is fine.)
+	if got := usd(1, price); got != "$0.005" && got != "$0.006" {
+		t.Errorf("a single coin should keep its precision, got %s", got)
+	}
+	if got := usd(0.01, price); got != "<$0.001" {
+		t.Errorf("too small to write is said as such, got %s", got)
+	}
+	// With no price there is nothing to convert at, and "$0.00" would read as free.
+	if got := usd(1000, 0); got != "" {
+		t.Errorf("no price means no dollar figure, got %s", got)
+	}
+}
+
+func TestTheMeterAndBarCarryDollarsWhenAPriceIsKnown(t *testing.T) {
+	meter := coinMeterText(927, 936, 0.0055)
+	if !strings.Contains(meter, "927 aicoin") || !strings.Contains(meter, "$5.10") {
+		t.Errorf("the meter should show both the coins and the money: %q", meter)
+	}
+	bar := coinBar(936, 927, 9, 0.0055)
+	if !strings.Contains(bar, "9 aicoin spent ($0.05)") || !strings.Contains(bar, "927 left ($5.10)") {
+		t.Errorf("the bar should price both figures: %q", bar)
 	}
 }

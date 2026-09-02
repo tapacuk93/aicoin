@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Acting on the working directory.
@@ -31,13 +35,21 @@ reply with exactly one fenced block, and nothing outside it:
 ` + "```aicoin-actions" + `
 [
   {"op": "write",  "path": "relative/path.txt", "content": "the file's entire new contents"},
-  {"op": "delete", "path": "relative/path.txt"}
+  {"op": "delete", "path": "relative/path.txt"},
+  {"op": "run",    "command": "go test ./...", "why": "check it compiles and passes"}
 ]
 ` + "```" + `
 
 Paths are relative to the working directory above; anything outside it is refused. "write" creates
 the file or replaces it whole, so give the complete intended contents rather than a patch or an
 excerpt. List only what the request actually asked to change.
+
+"run" executes a shell command in the working directory and shows its output — use it when the
+request asks for something to be run, built or tested, rather than explaining which command the
+person should type. Give one command per action, in the order they should happen; writes are
+applied before any of them run, so a file can be created and then compiled in a single block. Say
+in "why" what the command is for, in a few words. Keep to what was asked: do not add commands that
+install things, reach the network, or change anything outside the working directory.
 
 If a detail is left open — a filename, which directory it belongs in, what to put in it — choose a
 sensible one and go ahead, then say in one short line what you chose and why. Do not ask for
@@ -52,6 +64,8 @@ type action struct {
 	Op      string `json:"op"`
 	Path    string `json:"path"`
 	Content string `json:"content"`
+	Command string `json:"command"`
+	Why     string `json:"why"`
 }
 
 var actionBlock = regexp.MustCompile("(?s)```aicoin-actions\\s*(.*?)```")
@@ -112,6 +126,13 @@ type plannedAction struct {
 func planActions(root string, actions []action) ([]plannedAction, error) {
 	var planned []plannedAction
 	for _, a := range actions {
+		if a.Op == "run" {
+			if strings.TrimSpace(a.Command) == "" {
+				return nil, fmt.Errorf("a run action with no command")
+			}
+			planned = append(planned, plannedAction{action: a})
+			continue
+		}
 		if a.Op != "write" && a.Op != "delete" {
 			return nil, fmt.Errorf("unknown operation %q", a.Op)
 		}
@@ -141,6 +162,14 @@ func describe(planned []plannedAction) string {
 	var out strings.Builder
 	for _, entry := range planned {
 		switch {
+		case entry.Op == "run":
+			// The command verbatim, on its own line: this is the thing being consented to, and a
+			// summary of it would be the wrong thing to show.
+			out.WriteString("  run      " + entry.Command)
+			if entry.Why != "" {
+				out.WriteString("\n           (" + entry.Why + ")")
+			}
+			out.WriteString("\n")
 		case entry.Op == "delete":
 			out.WriteString(fmt.Sprintf("  delete   %s (%d bytes)\n", entry.Path, entry.OldSize))
 		case entry.Existing:
@@ -174,33 +203,91 @@ func deliverAnswer(root, answer string, auto bool, confirm func(string) bool) {
 		fmt.Fprintf(os.Stderr, "aicoin: nothing applied — %v\n", err)
 		return
 	}
+	runs := 0
+	for _, entry := range planned {
+		if entry.Op == "run" {
+			runs++
+		}
+	}
 	fmt.Fprintf(os.Stderr, "the panel proposes %d change(s) in %s:\n%s", len(planned), root, describe(planned))
-	if !auto && !confirm("apply? [y/N] ") {
+	prompt := "apply? [y/N] "
+	if runs > 0 {
+		// Naming it: agreeing to a file being written and agreeing to a shell command running are
+		// not the same decision, and one prompt should not quietly cover both.
+		prompt = fmt.Sprintf("apply, and run %d command(s)? [y/N] ", runs)
+	}
+	if !auto && !confirm(prompt) {
 		fmt.Fprintln(os.Stderr, "nothing was written")
 		return
 	}
-	if err := applyActions(planned); err != nil {
+	if err := applyActions(root, planned); err != nil {
 		fmt.Fprintf(os.Stderr, "aicoin: %v\n", err)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "applied %d change(s)\n", len(planned))
 }
 
-// applyActions carries out an approved plan.
-func applyActions(planned []plannedAction) error {
+// runTimeout bounds a single command. Long enough for a build or a test run, short enough that a
+// command waiting on input nobody is going to type does not hold the session open forever.
+const runTimeout = 5 * time.Minute
+
+// applyActions carries out an approved plan: every file change first, then the commands, in the
+// order they were given. That order is what lets one block write a file and then compile it.
+func applyActions(root string, planned []plannedAction) error {
 	for _, entry := range planned {
-		if entry.Op == "delete" {
+		switch entry.Op {
+		case "run":
+			continue
+		case "delete":
 			if err := os.Remove(entry.Full); err != nil {
 				return err
 			}
+		default:
+			if err := os.MkdirAll(filepath.Dir(entry.Full), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(entry.Full, []byte(entry.Content), 0o644); err != nil {
+				return err
+			}
+		}
+	}
+	for _, entry := range planned {
+		if entry.Op != "run" {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(entry.Full), 0o755); err != nil {
+		if err := runCommand(root, entry.Command); err != nil {
+			// A command that fails stops the rest: the ones after it were written expecting it to
+			// have worked, and running them anyway compounds one failure into several.
 			return err
 		}
-		if err := os.WriteFile(entry.Full, []byte(entry.Content), 0o644); err != nil {
-			return err
+	}
+	return nil
+}
+
+// runCommand executes one shell command in the working directory, streaming its output to the
+// terminal as it goes — a build's progress is worth watching, and so is the point where it stops.
+func runCommand(root, command string) error {
+	fmt.Fprintf(os.Stderr, "\n$ %s\n", command)
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	defer cancel()
+	// Through a shell, because that is what the command was written for: pipes, &&, redirection and
+	// globs all mean what they look like they mean.
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Dir = root
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// Nothing is going to type at it: a command that waits for input should fail rather than hang.
+	cmd.Stdin = nil
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("`%s` was still running after %s and was stopped", command, runTimeout)
+	}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("`%s` exited %d", command, exitErr.ExitCode())
 		}
+		return fmt.Errorf("`%s`: %w", command, err)
 	}
 	return nil
 }

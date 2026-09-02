@@ -240,7 +240,8 @@ func cmdShow(args []string) error {
 		fmt.Printf("balance  unknown (%v)\n", err)
 		return nil
 	}
-	fmt.Printf("balance  %s aicoin\n", formatCoins(balance))
+	price, _ := newClient(*url, 30*time.Second).priceUSD()
+	fmt.Printf("balance  %s aicoin%s\n", formatCoins(balance), bracketed(usd(balance, price)))
 	return nil
 }
 
@@ -679,11 +680,15 @@ func reportCharge(client *Client, wallet *Wallet, charged string) {
 	if charged == "" {
 		return
 	}
-	if balance, err := client.balance(wallet.Address); err == nil {
-		fmt.Fprintf(os.Stderr, "%s aicoin · %s left\n", charged, formatCoins(balance))
+	price, _ := client.priceUSD()
+	coins, _ := strconv.ParseFloat(charged, 64)
+	balance, err := client.balance(wallet.Address)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s aicoin%s\n", charged, bracketed(usd(coins, price)))
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s aicoin\n", charged)
+	fmt.Fprintf(os.Stderr, "%s aicoin%s · %s left%s\n",
+		charged, bracketed(usd(coins, price)), formatCoins(balance), bracketed(usd(balance, price)))
 }
 
 // consortiumResult is the proxy's /consortium response. Shared with the interactive session,
@@ -858,10 +863,13 @@ func cmdConsortium(args []string) error {
 	// The balance before, so the cost of this call can be stated afterwards rather than left for
 	// the user to work out from two `aicoin show`s.
 	balanceBefore, balanceErr := client.balance(wallet.Address)
+	// What a coin is worth, so every figure below can also be said in money. Fetched once: the
+	// price is a long-run average and does not move inside one call.
+	price, _ := client.priceUSD()
 
 	// Nothing comes back until every round is done, so the wallet is what there is to watch: it
 	// drops as each turn settles, which shows both that the call is moving and what it is costing.
-	meter := startCoinMeter(client, wallet.Address, balanceBefore)
+	meter := startCoinMeter(client, wallet.Address, balanceBefore, price)
 	// Long, because it is: a full consortium is one call per panelist per round, run to
 	// completion before anything comes back.
 	responseBody, _, err := client.withToken(wallet, "POST", "/consortium", body, nil)
@@ -904,7 +912,7 @@ func cmdConsortium(args []string) error {
 	if balanceErr == nil {
 		balanceAfter, afterErr := client.balance(wallet.Address)
 		if afterErr == nil {
-			fmt.Fprintln(os.Stderr, coinBar(balanceBefore, balanceAfter, parsed.CoinsCharged))
+			fmt.Fprintln(os.Stderr, coinBar(balanceBefore, balanceAfter, parsed.CoinsCharged, price))
 			return nil
 		}
 	}
