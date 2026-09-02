@@ -82,8 +82,9 @@ in the working directory are listed for them by default and `-f` includes the on
 question asked inside a project is answered about that project.
 
 Ask it to change something rather than explain something, and the answer comes back as file
-operations — shown as a plan, applied only when you say so, and never outside the directory you ran
-it in. The proxy has no filesystem; the acting happens on your machine.
+operations and shell commands — shown as a plan, applied only when you say so, and never outside the
+directory you ran it in. The proxy has no filesystem and no shell; the acting happens on your
+machine.
 
 With a directory attached the call is **led** by one model rather than drafted by all of them: with
 the files in front of it, four independent drafts are four re-readings of the same material, billed
@@ -100,8 +101,11 @@ itself — polled live, dropping as each turn settles — and when it lands it s
 out of the balance:
 
 ```
-◆◆◆◆◇◇◇◇◇◇  15 aicoin spent · 27 left
+◆◆◆◆◇◇◇◇◇◇  15 aicoin spent ($0.08) · 27 left ($0.15)
 ```
+
+Every coin figure is also given in dollars, at whatever `GET /price` currently says a coin has been
+worth.
 
 The answer goes to stdout and all of that to stderr, so it pipes. Full reference:
 [`cli/README.md`](./cli/README.md).

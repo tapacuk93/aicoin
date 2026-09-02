@@ -136,7 +136,7 @@ func TestReadTextFileRefusesBinaryAndOversized(t *testing.T) {
 }
 
 func TestCoinBarShowsTheShareOfTheWalletThatWent(t *testing.T) {
-	bar := coinBar(20, 5, 15)
+	bar := coinBar(20, 5, 15, 0)
 	if !strings.Contains(bar, "15 aicoin spent") || !strings.Contains(bar, "5 left") {
 		t.Fatalf("got %q", bar)
 	}
@@ -144,7 +144,7 @@ func TestCoinBarShowsTheShareOfTheWalletThatWent(t *testing.T) {
 		t.Fatalf("three quarters of the wallet should be a partly filled bar, got %q", bar)
 	}
 	// Nothing spent and nothing known: still a readable line, not a bar of zero width.
-	if plain := coinBar(0, 0, 0); strings.Contains(plain, "◆") {
+	if plain := coinBar(0, 0, 0, 0); strings.Contains(plain, "◆") {
 		t.Fatalf("got %q", plain)
 	}
 }

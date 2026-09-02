@@ -205,7 +205,8 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 	}
 
 	balanceBefore, balanceErr := client.balance(wallet.Address)
-	meter := startCoinMeter(client, wallet.Address, balanceBefore)
+	price, _ := client.priceUSD()
+	meter := startCoinMeter(client, wallet.Address, balanceBefore, price)
 	responseBody, _, err := client.withToken(wallet, "POST", "/consortium", body, nil)
 	meter.finish()
 	if err != nil {
@@ -247,7 +248,7 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 	fmt.Fprintln(os.Stderr)
 	if balanceErr == nil {
 		if balanceAfter, afterErr := client.balance(wallet.Address); afterErr == nil {
-			fmt.Fprintln(os.Stderr, coinBar(balanceBefore, balanceAfter, parsed.CoinsCharged))
+			fmt.Fprintln(os.Stderr, coinBar(balanceBefore, balanceAfter, parsed.CoinsCharged, price))
 			return nil
 		}
 	}
@@ -402,7 +403,8 @@ func (s *sessionState) command(line string, client *Client, wallet *Wallet) (boo
 		}
 		fmt.Fprintln(os.Stderr, "consortium mode on — the whole panel, then rounds of review")
 	case "ais", "stats":
-		fmt.Fprint(os.Stderr, s.record.render())
+		price, _ := client.priceUSD()
+		fmt.Fprint(os.Stderr, s.record.render(price))
 	case "auto":
 		s.auto = !s.auto
 		if s.auto {

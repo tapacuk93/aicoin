@@ -82,10 +82,16 @@ func (l *liveLine) finish() {
 
 // coinMeterText renders the wallet as it stands: the balance, and what has gone since the call
 // started once anything has.
-func coinMeterText(current, start float64) string {
+func coinMeterText(current, start, price float64) string {
 	line := formatCoins(current) + " aicoin"
+	if dollars := usd(current, price); dollars != "" {
+		line += " · " + dollars
+	}
 	if spent := start - current; spent > 0 {
 		line += "  −" + formatCoins(spent)
+		if dollars := usd(spent, price); dollars != "" {
+			line += " (" + dollars + ")"
+		}
 	}
 	return line
 }
@@ -95,8 +101,8 @@ func coinMeterText(current, start float64) string {
 // The poll is a plain unauthenticated balance read — free, and the same one `aicoin balance` makes.
 // Every few seconds is enough: a consortium settles a turn at a time, and a number that flickers
 // faster than the eye is not more informative.
-func startCoinMeter(client *Client, address string, start float64) *liveLine {
-	line := startLine(coinMeterText(start, start))
+func startCoinMeter(client *Client, address string, start, price float64) *liveLine {
+	line := startLine(coinMeterText(start, start, price))
 	if !isTTY() {
 		return line
 	}
@@ -111,12 +117,19 @@ func startCoinMeter(client *Client, address string, start float64) *liveLine {
 				// A failed read leaves the last figure standing: a blank line, or a zero, would
 				// say something untrue about the wallet.
 				if balance, err := client.balance(address); err == nil {
-					line.set(coinMeterText(balance, start))
+					line.set(coinMeterText(balance, start, price))
 				}
 			}
 		}
 	}()
 	return line
+}
+
+func bracketed(text string) string {
+	if text == "" {
+		return ""
+	}
+	return " (" + text + ")"
 }
 
 // coinBar renders what a call cost against what the wallet had, e.g.
@@ -126,12 +139,14 @@ func startCoinMeter(client *Client, address string, start float64) *liveLine {
 // The bar is the spent share of what was there when the call started, which is the thing worth
 // seeing at a glance: a call that took a third of the wallet looks like a call that took a third of
 // the wallet.
-func coinBar(before, after float64, charged int64) string {
+func coinBar(before, after float64, charged int64, price float64) string {
 	spent := float64(charged)
 	if spent <= 0 {
 		spent = before - after
 	}
-	line := fmt.Sprintf("%s aicoin spent · %s left", formatCoins(spent), formatCoins(after))
+	line := fmt.Sprintf("%s aicoin spent%s · %s left%s",
+		formatCoins(spent), bracketed(usd(spent, price)),
+		formatCoins(after), bracketed(usd(after, price)))
 	if before <= 0 || spent <= 0 {
 		return line
 	}

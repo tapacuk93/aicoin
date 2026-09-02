@@ -120,6 +120,43 @@ func (c *Client) balance(address string) (float64, error) {
 	return parsed.Balance, nil
 }
 
+// priceUSD is what one aicoin is currently worth, by the proxy's own reckoning: a recency-weighted
+// average of what the calls it has recorded actually cost. It is what a coin has been worth here,
+// not a market rate — there is no market.
+func (c *Client) priceUSD() (float64, error) {
+	body, err := c.get("/price")
+	if err != nil {
+		return 0, err
+	}
+	var parsed struct {
+		PriceUSD float64 `json:"price_usd"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return 0, err
+	}
+	return parsed.PriceUSD, nil
+}
+
+// usd renders a coin amount in dollars at the given price, or "" when there is no price to convert
+// at — a zero-dollar figure would read as free, which is the opposite of true.
+func usd(coins, price float64) string {
+	if price <= 0 || coins < 0 {
+		return ""
+	}
+	value := coins * price
+	switch {
+	case value >= 0.01:
+		return fmt.Sprintf("$%.2f", value)
+	case value > 0:
+		if value < 0.001 {
+			return "<$0.001"
+		}
+		return fmt.Sprintf("$%.3f", value)
+	default:
+		return "$0.00"
+	}
+}
+
 // formatCoins prints a balance the way a wallet reads it: whole coins when it is whole, and at most
 // two decimals otherwise. Metered billing charges whole coins, so most balances are integers.
 func formatCoins(value float64) string {
