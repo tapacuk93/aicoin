@@ -226,6 +226,9 @@ single mode would use anthropic — carried 37 turns here, 97% of them without f
 The coins are exact, not apportioned: the proxy settles each turn against that provider's own
 reported usage and returns the breakdown, so this is where the money actually went.
 
+The mode and the record live together in `~/.aicoin/stats.json`, so deleting that file resets both
+— you are back in panel mode with nothing measured.
+
 `aicoin single kimi` pins one instead; `aicoin single` with no name goes back to whichever is
 carrying the work. What the table does *not* claim is that the top model gives better answers —
 whether an answer was good is not in what the proxy reports, so it is not measured here.
