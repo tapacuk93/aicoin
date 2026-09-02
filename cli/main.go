@@ -826,10 +826,7 @@ func cmdConsortium(args []string) error {
 		if model == "" {
 			return fmt.Errorf("no default model for %q", provider)
 		}
-		if balance, balErr := client.balance(wallet.Address); balErr == nil {
-			fmt.Fprintf(os.Stderr, "wallet %s… · %s aicoin · single mode: %s (%s)\n",
-				wallet.Address[:12], formatCoins(balance), provider, why)
-		}
+		fmt.Fprintf(os.Stderr, "single mode · %s (%s)\n", provider, why)
 		_, err = askOne(client, wallet, record, provider, model, background, prompt, root, *auto, confirmOnStdin)
 		return err
 	}
@@ -865,17 +862,14 @@ func cmdConsortium(args []string) error {
 	// The balance before, so the cost of this call can be stated afterwards rather than left for
 	// the user to work out from two `aicoin show`s.
 	balanceBefore, balanceErr := client.balance(wallet.Address)
-	if balanceErr == nil {
-		fmt.Fprintf(os.Stderr, "wallet %s… · %s aicoin\n", wallet.Address[:12], formatCoins(balanceBefore))
-	}
 
-	// Nothing comes back until every round is done, so this is the only thing between the user and
-	// a call that legitimately runs for minutes — and the only way to tell it apart from a hang.
-	spin := startSpinner("asking the panel · every turn is a paid call")
+	// Nothing comes back until every round is done, so the wallet is what there is to watch: it
+	// drops as each turn settles, which shows both that the call is moving and what it is costing.
+	meter := startCoinMeter(client, wallet.Address, balanceBefore)
 	// Long, because it is: a full consortium is one call per panelist per round, run to
 	// completion before anything comes back.
 	responseBody, _, err := client.withToken(wallet, "POST", "/consortium", body, nil)
-	spin.finish()
+	meter.finish()
 	if err != nil {
 		return err
 	}

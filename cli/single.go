@@ -104,9 +104,10 @@ func askOne(client *Client, wallet *Wallet, record *stats, provider, model, back
 	}
 	requestHeaders := chatHeaders(provider)
 	requestHeaders["X-AI"] = provider
-	spin := startSpinner("asking " + provider + " · one paid call")
+	startBalance, _ := client.balance(wallet.Address)
+	meter := startCoinMeter(client, wallet.Address, startBalance)
 	responseBody, headers, err := client.withToken(wallet, "POST", path, body, requestHeaders)
-	spin.finish()
+	meter.finish()
 	if err != nil {
 		// Only count this against the model if the model is what failed. A refused wallet, an
 		// expired token or a request this CLI got wrong never reached it, and marking those as its

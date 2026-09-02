@@ -8,12 +8,12 @@ import (
 	"time"
 )
 
-// What a call is costing, shown while it happens and after it finishes.
+// What is on screen while a call runs.
 //
-// A consortium call runs for minutes and spends real coins the whole time. Without a running
-// indicator there is nothing on screen between "asking" and the answer, and no way to tell a slow
-// panel from a hung one; without the balance either side of it, the price of what just happened is
-// invisible until the next `aicoin show`.
+// A consortium takes minutes and spends coins the whole time, so the useful thing to watch is not
+// that something is happening — it plainly is — but what it is costing. The line shows the wallet,
+// live: the balance is polled while the call runs and drops as each turn settles, which is both the
+// progress indicator and the price tag.
 
 // isTTY reports whether stderr is a terminal. Everything here is decoration: piped or redirected,
 // it must not appear, or it ends up in whatever file the caller was collecting.
@@ -29,71 +29,94 @@ func stdinIsTTY() bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-// spinner is a single rewritten line on stderr: a frame, a label, and how long this has been going.
-type spinner struct {
+// liveLine is a single line on stderr that is rewritten in place until it is finished.
+type liveLine struct {
 	stop chan struct{}
 	done chan struct{}
 	mu   sync.Mutex
 	text string
 }
 
-// startSpinner begins animating, or returns a no-op spinner when stderr is not a terminal.
-func startSpinner(label string) *spinner {
-	s := &spinner{stop: make(chan struct{}), done: make(chan struct{}), text: label}
+func startLine(initial string) *liveLine {
+	line := &liveLine{stop: make(chan struct{}), done: make(chan struct{}), text: initial}
 	if !isTTY() {
-		close(s.done)
-		return s
+		close(line.done)
+		return line
 	}
 	go func() {
-		defer close(s.done)
-		started := time.Now()
-		ticker := time.NewTicker(100 * time.Millisecond)
+		defer close(line.done)
+		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
-		frame := 0
 		for {
 			select {
-			case <-s.stop:
+			case <-line.stop:
 				fmt.Fprint(os.Stderr, "\r\033[K")
 				return
 			case <-ticker.C:
-				s.mu.Lock()
-				text := s.text
-				s.mu.Unlock()
-				fmt.Fprintf(os.Stderr, "\r\033[K%s %s  %s",
-					spinnerFrames[frame%len(spinnerFrames)], text, elapsed(time.Since(started)))
-				frame++
+				line.mu.Lock()
+				text := line.text
+				line.mu.Unlock()
+				fmt.Fprintf(os.Stderr, "\r\033[K%s", text)
 			}
 		}
 	}()
-	return s
+	return line
 }
 
-// update changes the label without restarting the clock.
-func (s *spinner) update(text string) {
-	s.mu.Lock()
-	s.text = text
-	s.mu.Unlock()
+func (l *liveLine) set(text string) {
+	l.mu.Lock()
+	l.text = text
+	l.mu.Unlock()
 }
 
 // finish clears the line. Safe to call more than once.
-func (s *spinner) finish() {
+func (l *liveLine) finish() {
 	select {
-	case <-s.done:
+	case <-l.done:
 		return
 	default:
 	}
-	close(s.stop)
-	<-s.done
+	close(l.stop)
+	<-l.done
 }
 
-func elapsed(d time.Duration) string {
-	seconds := int(d.Seconds())
-	if seconds < 60 {
-		return fmt.Sprintf("%ds", seconds)
+// coinMeterText renders the wallet as it stands: the balance, and what has gone since the call
+// started once anything has.
+func coinMeterText(current, start float64) string {
+	line := formatCoins(current) + " aicoin"
+	if spent := start - current; spent > 0 {
+		line += "  −" + formatCoins(spent)
 	}
-	return fmt.Sprintf("%dm%02ds", seconds/60, seconds%60)
+	return line
+}
+
+// startCoinMeter shows the wallet's balance while a call runs, polling it as the call spends.
+//
+// The poll is a plain unauthenticated balance read — free, and the same one `aicoin balance` makes.
+// Every few seconds is enough: a consortium settles a turn at a time, and a number that flickers
+// faster than the eye is not more informative.
+func startCoinMeter(client *Client, address string, start float64) *liveLine {
+	line := startLine(coinMeterText(start, start))
+	if !isTTY() {
+		return line
+	}
+	go func() {
+		ticker := time.NewTicker(2500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-line.stop:
+				return
+			case <-ticker.C:
+				// A failed read leaves the last figure standing: a blank line, or a zero, would
+				// say something untrue about the wallet.
+				if balance, err := client.balance(address); err == nil {
+					line.set(coinMeterText(balance, start))
+				}
+			}
+		}
+	}()
+	return line
 }
 
 // coinBar renders what a call cost against what the wallet had, e.g.

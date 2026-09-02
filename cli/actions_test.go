@@ -225,3 +225,19 @@ func TestAnthropicRequestsCarryTheVersionHeader(t *testing.T) {
 		t.Fatal("the OpenAI-compatible providers need nothing extra")
 	}
 }
+
+func TestTheCoinMeterShowsTheWalletAndWhatHasGone(t *testing.T) {
+	// While a call runs, the wallet is what there is to watch: the number itself, and — once it
+	// moves — how much of it the call has taken.
+	if got := coinMeterText(1000, 1000); got != "1000 aicoin" {
+		t.Errorf("before anything is spent, just the balance: %q", got)
+	}
+	if got := coinMeterText(987, 1000); !strings.Contains(got, "987 aicoin") || !strings.Contains(got, "13") {
+		t.Errorf("once it moves, the balance and what went: %q", got)
+	}
+	// A balance read that failed leaves the previous figure standing rather than showing a zero,
+	// so a rising number is never invented either.
+	if got := coinMeterText(1000, 990); strings.Contains(got, "−") {
+		t.Errorf("a balance above the start is not a negative spend: %q", got)
+	}
+}
