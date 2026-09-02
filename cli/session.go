@@ -26,7 +26,7 @@ const (
 	// exchanges are the ones a follow-up question is about.
 	sessionHistoryBudget = 12000
 	sessionBanner        = "aicoin — every question goes to the whole panel, which then reviews its own answer.\n" +
-		"Type a question, or `help` for the subcommands. Ctrl-D to leave."
+		"Type a question, or help for the subcommands. Ctrl-D to leave."
 )
 
 // exchange is one question and the answer the panel settled on.
@@ -122,19 +122,19 @@ func runSession(dir string, url string, walletPath string, state *sessionState) 
 		if question == "" {
 			continue
 		}
-		// Backticks mark a subcommand, so a question that happens to start with a command word is
-		// still a question: `single` switches mode, single does not.
-		if inner, isCommand := backtickCommand(question); isCommand {
-			question = "/" + strings.TrimPrefix(inner, "/")
-		}
-		if strings.HasPrefix(question, "/") {
-			stop, err := state.command(question, client, wallet)
+		text, isCommand := classifyLine(question)
+		if isCommand {
+			stop, err := state.command(text, client, wallet)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "aicoin: "+err.Error())
 			}
 			if stop {
 				break
 			}
+			continue
+		}
+		question = text
+		if question == "" {
 			continue
 		}
 		if err := state.askPanel(question, client, wallet); err != nil {
@@ -298,35 +298,41 @@ func (s *sessionState) confirm(prompt string) bool {
 	return strings.EqualFold(strings.TrimSpace(line), "y")
 }
 
-const sessionHelp = "Subcommands go in backticks, so anything else is a question for the panel:\n" + `
-  ` + "`f <glob>`" + `        include these files' contents in every question (blank to clear)
-  ` + "`panel <a,b>`" + `     which models sit on the panel (blank for all of them)
-  ` + "`rounds <n>`" + `      cap the review rounds
-  ` + "`v`" + `               show or hide each round's comments
-  ` + "`files`" + `           what the panel can currently see
-  ` + "`balance`" + `         what the wallet holds
-  ` + "`single [model]`" + `  one model per question instead of the panel (cheaper by the panel size)
-  ` + "`multi`" + `           back to the panel
-  ` + "`ais`" + `             which models have been used, what they cost, what they failed
-  ` + "`auto`" + `            apply proposed file changes without asking (currently off)
-  ` + "`claim`" + `           take the free-coin faucet's grant
-  ` + "`reset`" + `           forget this session's exchanges
-  ` + "`help`" + `            this
-  ` + "`exit`" + `            leave (Ctrl-D does too)
+const sessionHelp = "Type a question. A line that is exactly one of these is a subcommand instead:\n" + `
+  f <glob>        include these files' contents in every question (blank to clear)
+  panel <a,b>     which models sit on the panel (blank for all of them)
+  rounds <n>      cap the review rounds
+  v               show or hide each round's comments
+  files           what the panel can currently see
+  balance         what the wallet holds
+  single [model]  one model per question instead of the panel (cheaper by the panel size)
+  multi           back to the panel
+  ais             which models have been used, what they cost, what they failed
+  auto            apply proposed file changes without asking (currently off)
+  claim           take the free-coin faucet's grant
+  reset           forget this session's exchanges
+  help            this
+  exit            leave (Ctrl-D does too)
 
-(A leading / works too: /help, /exit.)`
+Anything that does not fit one of those is a question: "single" switches mode, "single out the
+slowest handler" asks the panel. To settle it either way, \\ makes it a question (\\single) and
+backticks or a leading / make it a command (` + "`single`" + `, /single).`
 
-// command handles a /line. It returns true when the session should end.
+// command handles a subcommand line (already stripped of its marker, if it had one).
+// It returns true when the session should end.
 func (s *sessionState) command(line string, client *Client, wallet *Wallet) (bool, error) {
 	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false, nil
+	}
 	rest := strings.TrimSpace(strings.TrimPrefix(line, fields[0]))
-	switch fields[0] {
-	case "/exit", "/quit", "/q":
+	switch strings.ToLower(fields[0]) {
+	case "exit", "quit", "q":
 		return true, nil
-	case "/help", "/?":
+	case "help", "?":
 		fmt.Fprintln(os.Stderr, sessionHelp)
-	case "/f", "/files":
-		if fields[0] == "/f" {
+	case "f", "files":
+		if strings.ToLower(fields[0]) == "f" {
 			if rest == "" {
 				s.includes = nil
 				fmt.Fprintln(os.Stderr, "including no file contents now — just the listing")
@@ -350,14 +356,14 @@ func (s *sessionState) command(line string, client *Client, wallet *Wallet) (boo
 			fmt.Fprint(os.Stderr, " (trimmed to fit)")
 		}
 		fmt.Fprintln(os.Stderr)
-	case "/panel":
+	case "panel":
 		s.providers = rest
 		if rest == "" {
 			fmt.Fprintln(os.Stderr, "panel: every configured model")
 		} else {
 			fmt.Fprintf(os.Stderr, "panel: %s\n", rest)
 		}
-	case "/rounds":
+	case "rounds":
 		if rest == "" {
 			return false, fmt.Errorf("usage: /rounds <n>")
 		}
@@ -367,10 +373,10 @@ func (s *sessionState) command(line string, client *Client, wallet *Wallet) (boo
 		}
 		s.rounds = n
 		fmt.Fprintf(os.Stderr, "at most %d review round(s)\n", n)
-	case "/v":
+	case "v":
 		s.verbose = !s.verbose
 		fmt.Fprintf(os.Stderr, "round comments: %v\n", s.verbose)
-	case "/single":
+	case "single":
 		s.record.Mode = modeSingle
 		if rest != "" {
 			pinned := strings.ToLower(rest)
@@ -391,38 +397,38 @@ func (s *sessionState) command(line string, client *Client, wallet *Wallet) (boo
 			return false, nil
 		}
 		fmt.Fprintf(os.Stderr, "single mode on — %s (%s)\n", provider, why)
-	case "/multi":
+	case "multi":
 		s.record.Mode = modeMulti
 		if err := s.record.save(); err != nil {
 			return false, err
 		}
 		fmt.Fprintln(os.Stderr, "consortium mode on — the whole panel, then rounds of review")
-	case "/ais", "/stats":
+	case "ais", "stats":
 		fmt.Fprint(os.Stderr, s.record.render())
-	case "/auto":
+	case "auto":
 		s.auto = !s.auto
 		if s.auto {
 			fmt.Fprintln(os.Stderr, "file changes will be applied without asking")
 		} else {
 			fmt.Fprintln(os.Stderr, "file changes will be confirmed first")
 		}
-	case "/claim":
+	case "claim":
 		amount, balance, err := claimCoins(client, wallet)
 		if err != nil {
 			return false, err
 		}
 		fmt.Fprintf(os.Stderr, "claimed %s aicoin — %s in the wallet\n", formatCoins(amount), formatCoins(balance))
-	case "/reset":
+	case "reset":
 		s.history = nil
 		fmt.Fprintln(os.Stderr, "this session's exchanges are forgotten")
-	case "/balance":
+	case "balance":
 		balance, err := client.balance(wallet.Address)
 		if err != nil {
 			return false, err
 		}
 		fmt.Fprintf(os.Stderr, "%s aicoin\n", formatCoins(balance))
 	default:
-		return false, fmt.Errorf("no such command %q — /help lists them", fields[0])
+		return false, fmt.Errorf("no such command %q — help lists them", fields[0])
 	}
 	return false, nil
 }
