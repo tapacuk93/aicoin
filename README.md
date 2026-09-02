@@ -72,6 +72,7 @@ aicoin new && aicoin claim
 
 cd ~/src/my-project
 aicoin "why does the build fail on a clean checkout?" -f "*.go"
+aicoin .    # or open a session here, where follow-up questions remember the last ones
 ```
 
 A single Go binary, no dependencies outside the standard library. With no command word the whole
@@ -79,6 +80,10 @@ line is a question for the **panel**: every configured model answers it, an edit
 answers, and then all of them review the result until a round comes back with no comments. The files
 in the working directory are listed for them by default and `-f` includes the ones you name, so a
 question asked inside a project is answered about that project.
+
+With a directory attached the call is **led** by one model rather than drafted by all of them: with
+the files in front of it, four independent drafts are four re-readings of the same material, billed
+four times, and they converge anyway — so one leads and the rest improve its answer round by round.
 
 It also does everything the wallet page does — create a wallet, check a balance, claim, transfer,
 issue and revoke tokens — plus `ask` for a single model. While a call runs it shows the wallet and a

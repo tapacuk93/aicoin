@@ -92,6 +92,24 @@ class ConsortiumHandlerTest {
     }
 
     @Test
+    void aContextHeavyCallIsLedByOneModelUnlessTheCallerSaysOtherwise() {
+        // The trade-off this encodes: parallel drafting buys useful disagreement when the request
+        // is the whole input, and buys N re-readings of the same material — billed N times — once
+        // a directory or a document comes with it.
+        String big = "x".repeat(9000);
+        String small = "x".repeat(100);
+
+        assertTrue(ConsortiumHandler.isLeadMode("auto", big, 8000));
+        assertFalse(ConsortiumHandler.isLeadMode("auto", small, 8000));
+        assertFalse(ConsortiumHandler.isLeadMode("auto", null, 8000));
+
+        // An explicit choice always wins: a caller who wants four independent answers over a large
+        // context can have them, and one who wants a lead over a one-line question can have that.
+        assertTrue(ConsortiumHandler.isLeadMode("lead", null, 8000));
+        assertFalse(ConsortiumHandler.isLeadMode("panel", big, 8000));
+    }
+
+    @Test
     void withNoProvidersConfiguredThereIsNoPanelAndNoEditor() {
         ProxyConfig config = ProxyConfig.load(new HashMap<>());
         assertTrue(ConsortiumHandler.panel(config, null).isEmpty());
