@@ -33,8 +33,11 @@ type heldNote struct {
 	Hash        string  `json:"hash"`
 	ExpiresAt   int64   `json:"expires_at"`
 	Issuer      string  `json:"issuer,omitempty"`
-	AcceptedAt  int64   `json:"accepted_at,omitempty"`
-	HandedAt    int64   `json:"handed_at,omitempty"`
+	// Payee is the one wallet that can redeem this note, or empty for a bearer note anyone can.
+	// A bound note cannot be double-spent: hand it to two people and only the named one can use it.
+	Payee      string `json:"payee,omitempty"`
+	AcceptedAt int64  `json:"accepted_at,omitempty"`
+	HandedAt   int64  `json:"handed_at,omitempty"`
 }
 
 type purse struct {
@@ -110,6 +113,7 @@ type notePayload struct {
 	Amount  float64 `json:"amt"`
 	Issuer  string  `json:"iss"`
 	Expires int64   `json:"exp"`
+	Payee   string  `json:"pay"`
 }
 
 // verifyNote checks a note against the ledger's public key — the whole offline half of this
@@ -198,6 +202,29 @@ func denominations(total float64) []float64 {
 		remaining--
 	}
 	return notes
+}
+
+// pickFor chooses notes adding up to exactly the amount, preferring ones already made out to this
+// payee — those are the ones that cannot be double-spent, so they are the ones to spend when the
+// payee is known. Bearer notes are used only to make up a difference the bound ones cannot.
+func (p *purse) pickFor(amount float64, payee string) ([]heldNote, bool) {
+	if payee == "" {
+		return p.pick(amount)
+	}
+	var bound, bearer []heldNote
+	for _, note := range p.Mine {
+		switch note.Payee {
+		case payee:
+			bound = append(bound, note)
+		case "":
+			bearer = append(bearer, note)
+		}
+		// Notes made out to somebody else are no use here and are left where they are.
+	}
+	if chosen, ok := (&purse{Mine: bound}).pick(amount); ok {
+		return chosen, true
+	}
+	return (&purse{Mine: append(bound, bearer...)}).pick(amount)
 }
 
 // pick chooses notes adding up to exactly the amount, largest first. Exactly, because a note cannot

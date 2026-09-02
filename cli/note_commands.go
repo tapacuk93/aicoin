@@ -60,6 +60,7 @@ func cmdNoteLoad(args []string) error {
 	fs := flag.NewFlagSet("note load", flag.ExitOnError)
 	url, walletPath := common(fs)
 	denoms := fs.String("d", "", "denominations to mint, comma-separated (default: a spread of 50/25/10/5/1)")
+	payee := fs.String("for", "", "make these notes out to one wallet — only they can redeem them")
 	days := fs.Int("days", 30, "how long the notes stay redeemable")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -94,7 +95,14 @@ func cmdNoteLoad(args []string) error {
 		return err
 	}
 	client := newClient(*url, 2*time.Minute)
-	body, err := json.Marshal(map[string]any{"amounts": amounts, "ttl_seconds": *days * 86400})
+	request := map[string]any{"amounts": amounts, "ttl_seconds": *days * 86400}
+	if *payee != "" {
+		if len(*payee) != 64 {
+			return fmt.Errorf("a payee is a 64-character wallet address")
+		}
+		request["payee"] = strings.ToLower(*payee)
+	}
+	body, err := json.Marshal(request)
 	if err != nil {
 		return err
 	}
@@ -125,8 +133,14 @@ func cmdNoteLoad(args []string) error {
 	for _, note := range issued.Notes {
 		minted += note.Amount
 	}
-	fmt.Fprintf(os.Stderr, "%d note(s) worth %s aicoin are in the purse — they can be paid with no network\n",
-		len(issued.Notes), formatCoins(minted))
+	if *payee != "" {
+		fmt.Fprintf(os.Stderr, "%d note(s) worth %s aicoin, made out to %s… — only they can redeem them,\n"+
+			"so handing one to two people leaves the second with nothing rather than a race\n",
+			len(issued.Notes), formatCoins(minted), (*payee)[:12])
+	} else {
+		fmt.Fprintf(os.Stderr, "%d bearer note(s) worth %s aicoin are in the purse — anyone holding one can "+
+			"redeem it\n", len(issued.Notes), formatCoins(minted))
+	}
 	if issued.Error != "" {
 		fmt.Fprintf(os.Stderr, "stopped early: %s\n", issued.Error)
 	}
@@ -169,8 +183,12 @@ func cmdNoteList(args []string) error {
 		fmt.Printf("carrying %s aicoin%s in %d note(s):\n",
 			formatCoins(p.total()), bracketed(usd(p.total(), price)), len(p.Mine))
 		for _, note := range p.Mine {
-			fmt.Printf("  %-6s %s  expires %s\n", formatCoins(note.Amount), note.Fingerprint,
-				time.Unix(note.ExpiresAt, 0).Format("2 Jan"))
+			bound := "bearer"
+			if note.Payee != "" {
+				bound = "to " + note.Payee[:12] + "…"
+			}
+			fmt.Printf("  %-6s %s  %-18s expires %s\n", formatCoins(note.Amount), note.Fingerprint,
+				bound, time.Unix(note.ExpiresAt, 0).Format("2 Jan"))
 		}
 	}
 	if len(p.Spent) > 0 {
@@ -201,6 +219,7 @@ func cmdNoteList(args []string) error {
 func cmdNotePay(args []string) error {
 	fs := flag.NewFlagSet("note pay", flag.ExitOnError)
 	_, walletPath := common(fs)
+	to := fs.String("to", "", "who is being paid — spends notes made out to them where possible")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
@@ -213,7 +232,7 @@ func cmdNotePay(args []string) error {
 		return fmt.Errorf("amount must be a positive number")
 	}
 	p := loadPurse(*walletPath)
-	chosen, ok := p.pick(amount)
+	chosen, ok := p.pickFor(amount, strings.ToLower(*to))
 	if !ok {
 		// Exact change or nothing: a note cannot be broken in half without a network, and handing
 		// over a larger one would pay more than was owed.
@@ -232,6 +251,12 @@ func cmdNotePay(args []string) error {
 		fmt.Fprintf(os.Stderr, " %s", note.Fingerprint)
 	}
 	fmt.Fprintln(os.Stderr, "\nThe other side should see the same fingerprint(s). These are out of your purse now.")
+	for _, note := range chosen {
+		if note.Payee == "" {
+			fmt.Fprintln(os.Stderr, "Some of these are bearer notes: whoever holds one can redeem it.")
+			break
+		}
+	}
 	return nil
 }
 
@@ -257,6 +282,12 @@ func cmdNoteAccept(args []string, keep bool) error {
 		return fmt.Errorf("usage: aicoin %s <note>", name)
 	}
 
+	// Who this wallet is, so a note made out to somebody else can be refused rather than kept: it
+	// would never redeem, and storing it would only postpone the disappointment.
+	me := ""
+	if wallet, walletErr := loadWallet(*walletPath); walletErr == nil {
+		me = wallet.Address
+	}
 	p := loadPurse(*walletPath)
 	// A wallet's very first act can be accepting a note, and without the ledger's key it can only
 	// take one on trust. Fetch it if there is a network — being offline is the case this whole
@@ -276,8 +307,18 @@ func cmdNoteAccept(args []string, keep bool) error {
 			continue
 		}
 		fingerprint := fingerprintOf(payload.ID)
-		fmt.Fprintf(os.Stderr, "✓ genuine · %s aicoin · from %s… · %s\n",
-			formatCoins(payload.Amount), payload.Issuer[:12], fingerprint)
+		if payload.Payee != "" && me != "" && !strings.EqualFold(payload.Payee, me) {
+			// Genuine, and no use to this wallet: only the named payee can redeem it.
+			fmt.Fprintf(os.Stderr, "✗ %s · genuine, but made out to %s… — not you\n",
+				fingerprint, payload.Payee[:12])
+			continue
+		}
+		binding := "bearer — whoever holds it can redeem it, including whoever else was handed a copy"
+		if payload.Payee != "" {
+			binding = "made out to you — nobody else can redeem it, so it cannot have been spent elsewhere"
+		}
+		fmt.Fprintf(os.Stderr, "✓ genuine · %s aicoin · from %s… · %s\n   %s\n",
+			formatCoins(payload.Amount), payload.Issuer[:12], fingerprint, binding)
 		if !keep {
 			continue
 		}
@@ -288,7 +329,7 @@ func cmdNoteAccept(args []string, keep bool) error {
 		p.Received = append(p.Received, heldNote{
 			Note: strings.TrimSpace(line), Amount: payload.Amount, Fingerprint: fingerprint,
 			Hash: hashOfNoteID(payload.ID), ExpiresAt: payload.Expires, Issuer: payload.Issuer,
-			AcceptedAt: time.Now().Unix(),
+			Payee: payload.Payee, AcceptedAt: time.Now().Unix(),
 		})
 		accepted++
 	}

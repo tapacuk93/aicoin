@@ -820,6 +820,35 @@ reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t34-c.json'));print(
 [ "$reason" = "False not_issuer" ] && pass "a holder cannot reclaim somebody else's note (only redeem it)" \
   || fail "expected not_issuer, got $reason"
 
+log "--- test 36: a note made out to one wallet cannot be redeemed by another ---"
+code=$(live_signed_request "$KEY_ALICE" "$ADDR_ALICE" "POST" "/wallet/api/notes/issue" \
+  "{\"amounts\":[1],\"payee\":\"$ADDR_BOB\"}" "$WORKDIR/t36-issue.json")
+bound_note=$(python3 -c "import json;print(json.load(open('$WORKDIR/t36-issue.json'))['notes'][0]['note'])")
+# Carol was handed it — genuinely, and it is genuinely worthless to her.
+code=$(live_signed_request "$KEY_CAROL" "$ADDR_CAROL" "POST" "/wallet/api/notes/redeem" \
+  "{\"note\":\"$bound_note\"}" "$WORKDIR/t36-carol.json")
+reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t36-carol.json'));print(d.get('credited'), d.get('reason'))")
+[ "$reason" = "False not_payee" ] && pass "anyone but the payee is refused — this note cannot be double-spent, only wasted" \
+  || fail "expected not_payee, got $reason"
+
+bal_bob_before=$(balance_of "$ADDR_BOB")
+code=$(live_signed_request "$KEY_BOB" "$ADDR_BOB" "POST" "/wallet/api/notes/redeem" \
+  "{\"note\":\"$bound_note\"}" "$WORKDIR/t36-bob.json")
+bal_bob_after=$(balance_of "$ADDR_BOB")
+gained=$(python3 -c "print(round(float('$bal_bob_after') - float('$bal_bob_before'), 6))")
+[ "$code" = "200" ] && [ "$gained" = "1.0" ] && pass "the named payee redeems it normally" \
+  || fail "expected bob to gain 1, got code=$code gained=$gained"
+
+# And the binding is on the note itself, so a receiver can see it before going anywhere near a network.
+payee_on_note=$(python3 -c "
+import base64, json
+note = open('$WORKDIR/t36-issue.json'); d = json.load(note)['notes'][0]['note']
+p = d.split('.')[0]
+print(json.loads(base64.urlsafe_b64decode(p + '=' * (-len(p) % 4)))['pay'])
+")
+[ "$payee_on_note" = "$ADDR_BOB" ] && pass "the binding travels on the note, checkable offline" \
+  || fail "expected the payee in the note payload, got $payee_on_note"
+
 log "--- test 35: the ledger publishes the key a receiver verifies notes with offline ---"
 key=$(curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/notes/key" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['public_key'], d['algorithm'])")
 python3 - "$key" "$third_note" <<'PYCHECK'

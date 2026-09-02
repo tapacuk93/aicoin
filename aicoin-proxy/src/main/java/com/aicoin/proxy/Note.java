@@ -41,19 +41,22 @@ final class Note {
     private final double amount;
     private final String issuer;
     private final long expiresAtSeconds;
+    /** The only wallet that may redeem this note, or empty for a bearer note anyone can. */
+    private final String payee;
 
-    Note(String id, double amount, String issuer, long expiresAtSeconds) {
+    Note(String id, double amount, String issuer, long expiresAtSeconds, String payee) {
         this.id = id;
         this.amount = amount;
         this.issuer = issuer;
         this.expiresAtSeconds = expiresAtSeconds;
+        this.payee = payee == null ? "" : payee;
     }
 
     /** A fresh note id: {@value #ID_BYTES} bytes from {@link SecureRandom}, hex-encoded. */
-    static Note mint(double amount, String issuer, long expiresAtSeconds) {
+    static Note mint(double amount, String issuer, long expiresAtSeconds, String payee) {
         byte[] raw = new byte[ID_BYTES];
         RANDOM.nextBytes(raw);
-        return new Note(hex(raw), amount, issuer, expiresAtSeconds);
+        return new Note(hex(raw), amount, issuer, expiresAtSeconds, payee);
     }
 
     String getId() {
@@ -70,6 +73,11 @@ final class Note {
 
     long getExpiresAtSeconds() {
         return expiresAtSeconds;
+    }
+
+    /** Empty for a bearer note; otherwise the one wallet that can redeem this. */
+    String getPayee() {
+        return payee;
     }
 
     /** What the ledger is keyed by: the hash of the secret, never the secret. */
@@ -99,7 +107,8 @@ final class Note {
 
     String payloadJson() {
         return "{\"v\":1,\"id\":\"" + id + "\",\"amt\":" + formatAmount(amount)
-                + ",\"iss\":\"" + issuer + "\",\"exp\":" + expiresAtSeconds + "}";
+                + ",\"iss\":\"" + issuer + "\",\"exp\":" + expiresAtSeconds
+                + ",\"pay\":\"" + payee + "\"}";
     }
 
     String encodedPayload() {
@@ -140,8 +149,10 @@ final class Note {
                     || !(expiry instanceof Number)) {
                 return Optional.empty();
             }
+            Object payee = fields.get("pay");
             return Optional.of(new Note((String) id, ((Number) amount).doubleValue(),
-                    (String) issuer, ((Number) expiry).longValue()));
+                    (String) issuer, ((Number) expiry).longValue(),
+                    payee instanceof String ? (String) payee : ""));
         } catch (Exception e) {
             return Optional.empty();
         }

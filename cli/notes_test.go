@@ -182,3 +182,36 @@ func TestEachWalletGetsItsOwnPurse(t *testing.T) {
 		t.Fatal("two wallets must not share a record either")
 	}
 }
+
+func TestANoteMadeOutToSomebodyCannotBeSpentElsewhere(t *testing.T) {
+	// The purse spends bound notes first when it knows the payee: those are the ones that cannot be
+	// handed to two people, so they are the right ones to use when the payee is known.
+	bob := strings.Repeat("b", 64)
+	carol := strings.Repeat("c", 64)
+	p := &purse{Mine: []heldNote{
+		{Amount: 5, Hash: "bearer", Payee: ""},
+		{Amount: 5, Hash: "forbob", Payee: bob},
+		{Amount: 5, Hash: "forcarol", Payee: carol},
+	}}
+
+	chosen, ok := p.pickFor(5, bob)
+	if !ok || len(chosen) != 1 || chosen[0].Hash != "forbob" {
+		t.Fatalf("paying bob should reach for bob's note first: %+v", chosen)
+	}
+
+	// Carol's note is no use paying bob, so a 10 for bob comes from bob's note plus a bearer one.
+	chosen, ok = p.pickFor(10, bob)
+	if !ok {
+		t.Fatal("5 bound + 5 bearer makes 10")
+	}
+	for _, note := range chosen {
+		if note.Hash == "forcarol" {
+			t.Fatal("a note made out to carol must never be spent on bob")
+		}
+	}
+
+	// And there is not 15 available for bob, however much the purse holds in total.
+	if _, ok := p.pickFor(15, bob); ok {
+		t.Fatal("carol's note is not spendable here")
+	}
+}

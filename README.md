@@ -110,10 +110,11 @@ aicoin note accept ...  # offline: "✓ genuine · 10 aicoin · from 00c0759c…
 aicoin note sync        # online again: credited
 ```
 
-The coins leave the issuer's balance at load time, so they cannot be spent twice. What offline
-hand-off cannot establish is whether a note has already been given to someone else — redemption is
-therefore first-come, and the second person to try is told so plainly. It is a bearer instrument
-with the properties of one; every note names its issuer, and every step is in both transaction logs.
+The coins leave the issuer's balance at load time, so they cannot be spent twice. A **bearer** note
+carries the property its name implies: nobody can tell at hand-off whether it was also given to
+somebody else, so redemption is first-come and the loser is told plainly. A note **made out to one
+wallet** (`note load -for <address>`) has no such gap — only the named payee can redeem it, so a
+second copy is worthless rather than a race. Foreknowledge of the payee is what that costs.
 
 ## Where coins come from
 
