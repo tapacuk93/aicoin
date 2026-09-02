@@ -270,13 +270,29 @@ final class NoteHandler {
                 sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not reach the ledger");
                 return;
             }
-            ledger.doubleSpendCount(wallet, doubleSpends -> {
+            ledger.doubleSpendCount(wallet, doubleSpends -> ledger.walletSummary(wallet, summary -> {
                 double held = balance.get();
+                java.util.Map<String, Long> counts = summary.orElse(java.util.Map.of());
+                long now = System.currentTimeMillis();
+                int rating = Reputation.score(held, doubleSpends, counts, now);
+                StringBuilder reasons = new StringBuilder("[");
+                boolean first = true;
+                for (String reason : Reputation.reasons(held, doubleSpends, counts, now)) {
+                    reasons.append(first ? "" : ",").append(Json.string(reason));
+                    first = false;
+                }
+                reasons.append("]");
                 sendJson(ctx, "{\"address\":\"" + wallet + "\""
                         + ",\"balance\":" + held
                         + ",\"owed\":" + (held < 0 ? -held : 0)
-                        + ",\"double_spends\":" + doubleSpends + "}");
-            });
+                        + ",\"double_spends\":" + doubleSpends
+                        + ",\"rating\":" + rating
+                        + ",\"purchases\":" + counts.getOrDefault("purchases", 0L)
+                        + ",\"calls\":" + counts.getOrDefault("calls", 0L)
+                        + ",\"counterparties\":" + counts.getOrDefault("counterparties", 0L)
+                        + ",\"first_seen\":" + counts.getOrDefault("first_seen", 0L)
+                        + ",\"reasons\":" + reasons + "}");
+            }));
         });
     }
 
