@@ -1058,6 +1058,38 @@ except ImportError:
 PYCHECK
 if [ $? -eq 0 ]; then pass "a note verifies against the published key with no ledger lookup"; else fail "offline verification failed"; fi
 
+log "--- test 41: the signed ratings snapshot, checkable with no network ---"
+curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/ratings" > "$WORKDIR/t41.json"
+key=$(curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/notes/key" | python3 -c "import json,sys;print(json.load(sys.stdin)['public_key'])")
+python3 - "$WORKDIR/t41.json" "$key" "$ADDR_DAVE" <<'PYSNAP'
+import json, sys
+snapshot = json.load(open(sys.argv[1]))
+key_hex, dave = sys.argv[2], sys.argv[3]
+assert snapshot["count"] >= 1, snapshot
+assert dave in snapshot["ratings"], "every known wallet should be in it"
+# The signature covers the ratings and the time they were taken, so a stale copy cannot be passed
+# off as a current one and a rating cannot be edited on the way.
+canonical = "aicoin-ratings" + chr(10) + str(snapshot["issued_at"]) + chr(10)
+for address in sorted(snapshot["ratings"]):
+    canonical += address + ":" + str(snapshot["ratings"][address]) + chr(10)
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    Ed25519PublicKey.from_public_bytes(bytes.fromhex(key_hex)).verify(
+        bytes.fromhex(snapshot["signature"]), canonical.encode())
+    print("verified")
+except ImportError:
+    print("skipped (no cryptography module)")
+PYSNAP
+if [ $? -eq 0 ]; then pass "the snapshot verifies against the published key, with every known wallet in it"; else fail "snapshot verification failed"; fi
+
+# Dave has a proven double-spend from the test above, so the snapshot must say 0 for him.
+dave_rating=$(python3 -c "
+import json
+print(json.load(open('$WORKDIR/t41.json'))['ratings']['$ADDR_DAVE'])
+")
+[ "$dave_rating" = "0" ] && pass "the wallet with a proven double-spend rates 0 in the snapshot" \
+  || fail "expected dave to rate 0, got $dave_rating"
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "=== ALL E2E CHECKS PASSED ==="
