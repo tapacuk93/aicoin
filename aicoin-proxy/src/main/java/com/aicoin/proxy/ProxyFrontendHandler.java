@@ -166,6 +166,29 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             requireLiveSignature(ctx, request, body, address -> handleRevokeTokens(ctx, address));
             return;
         }
+        if (request.method() == HttpMethod.GET && "/wallet/api/notes/key".equals(path)) {
+            NoteHandler.serveKey(ctx, ledger);
+            return;
+        }
+        if (request.method() == HttpMethod.GET && path.startsWith("/wallet/api/notes/status/")) {
+            NoteHandler.serveStatus(ctx, ledger, path.substring("/wallet/api/notes/status/".length()));
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/wallet/api/notes/issue".equals(path)) {
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> NoteHandler.serveIssue(ctx, body, ledger, address));
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/wallet/api/notes/redeem".equals(path)) {
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> NoteHandler.serveRedeem(ctx, body, ledger, address));
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/wallet/api/notes/reclaim".equals(path)) {
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> NoteHandler.serveReclaim(ctx, body, ledger, address));
+            return;
+        }
         if (request.method() == HttpMethod.POST && "/wallet/api/redeem-iap".equals(path)) {
             handleRedeemIap(ctx, ByteBufUtil.getBytes(request.content()));
             return;

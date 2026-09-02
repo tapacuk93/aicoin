@@ -392,6 +392,25 @@ Response `{"address":..,"amount":1000,"credited":true,"balance":1004,"reason":".
 
 Before this existed, the only ways coins entered the ledger were the faucet, a redeemed purchase, and a transfer from a wallet that already had some — so an operator topping up their own wallet had to write to Redis by hand.
 
+### Offline notes (bearer instruments)
+A wallet can turn balance into **notes**: signed strings that change hands with no network on either side. The wallet preloads them while it has one; the payment itself is one person showing a string and the other reading it.
+
+A note is `base64url(payload).base64url(signature)`, the same shape as an API token. Payload: `{"v":1,"id":"<64 hex>","amt":N,"iss":"<issuer address>","exp":<epochSeconds>}`. The `id` is 32 bytes from a CSPRNG and **is** the secret — whoever has the string can redeem it. The signature is the ledger's own Ed25519 key over the encoded payload, so a receiver holding that public key can verify the note offline.
+
+**The ledger stores only `sha256(id)`.** A dump of the database redeems nothing, and a holder can ask after a note's state by hash without handing the secret to anybody, including this server.
+
+- `GET /wallet/api/notes/key` → `{"public_key":"<64 hex>","algorithm":"ed25519"}`. Generated once and kept in the ledger (SETNX, so two proxies starting together agree). Rotating it invalidates *offline verification* of outstanding notes; they still redeem, because redemption asks the ledger what it issued rather than trusting the note.
+- `POST /wallet/api/notes/issue` — live-signed. Body `{"amounts":[25,10,10,5]}` (or `{"amount":25}`), optional `"ttl_seconds"` (default 30 days, max a year, min a minute). Mints up to 50 notes, **debiting each amount as it goes**, and returns each note's string, amount, fingerprint and hash — once. The server cannot return them again. A failure part-way through returns what was minted plus an `error`: those notes are real and reclaimable, and pretending otherwise would lose them.
+- `POST /wallet/api/notes/redeem` — live-signed. Body `{"note":"<string>"}`. Credits the note's amount to the signer. `{"credited":true,"amount":N,"balance":N}`, or `{"credited":false,"reason":"redeemed|expired|unknown|reclaimed"}`.
+- `POST /wallet/api/notes/reclaim` — live-signed **by the issuer**, for a note nobody took. Without it a lost note burns coins the issuer paid for. Refused with `not_issuer` for anyone else: a holder can redeem a note, never reclaim one.
+- `GET /wallet/api/notes/status/{sha256(id)}` → `{"state":"open|redeemed|reclaimed|unknown","amount":N,"expires_at":N}`.
+
+**The coins leave the issuer at issue, not at hand-off.** That ordering is the design: the issuer cannot spend them again while the note is in someone's pocket, because they no longer have them.
+
+**What offline hand-off cannot establish is that a note is unspent.** That is a fact about the ledger and the ledger is not there. Redemption is therefore first-come and atomic — the state flips inside the same script that credits the balance — so a note handed to two people credits exactly one of them, and the other is told `already redeemed` rather than left to wonder. This is a bearer instrument with the properties of one: possession is the claim, and a holder who passes the same note twice has defrauded somebody. Each note names its issuer, and every step is in both wallets' transaction logs (`note_issued`, `note_redeemed`, `note_reclaimed`), so it is attributable after the fact — not preventable before it.
+
+Notes expire (`EXPIREAT` on the ledger key), which bounds how long an unredeemed note can sit against the balance it took.
+
 ### Additional proxy-side endpoints
 - `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"half_life_days":110}` computed directly from the ledger — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life. Always includes `Access-Control-Allow-Origin: *` — this is public, read-only data fetched cross-origin by the landing page at aicoin.oeaio.com (a separate origin from the proxy).
 - `GET /free-coins/available` → `{"available": N}` — the real, live remaining count in the shared Redis-backed pool (`AicoinLedger.getFreeCoinsRemaining`), the same counter `POST /wallet/api/claim` atomically decrements. Not a static admin-managed file — this number is authoritative and changes in real time as wallets claim. A ledger-lookup failure resolves to `{"available": 0}`.
@@ -434,6 +453,7 @@ history, so it needs its own, separate auth.
 
 ### Tests to include
 - JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs), and the admin token's constant-time comparison + address-format validation — no network/Redis needed.
+- `NoteTest` — the bearer note's format: ids that do not repeat, the ledger key being the *hash* of the secret, the payload surviving the round trip it will really make, rubbish rejected rather than guessed at, and a fingerprint that comes from the hash so reading it aloud gives nothing away. The lifecycle — issue debiting immediately, first-come redemption, reclaim refused to anyone but the issuer, and verification against the published key with no ledger lookup — is covered end-to-end in `e2e/run.sh`.
 - For the consortium: each provider's chat request shape and the extraction of assistant text from each provider's response shape (including a 2xx that carries none), the strict reading of `NO COMMENTS`, and panel/editor selection from config — all pure, no network. The rounds themselves, their billing and the partial-result paths are covered end-to-end in `e2e/run.sh` against the mock provider, which plays drafter, editor and reviewer.
 
 ## Docker / docker-compose

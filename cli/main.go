@@ -59,6 +59,10 @@ const usage = `aicoin — command-line wallet and AI client for an aicoin-proxy
     aicoin multi                     back to the panel
     aicoin ais                       which models have been used, what they cost, what they failed
 
+  Offline
+    aicoin note load <amount>        turn balance into notes you can hand over with no network
+    aicoin note pay <amount>         hand some over · note accept <note> · note sync
+
   Proxy
     aicoin price                     what one aicoin currently costs
     aicoin health                    which providers are configured and healthy
@@ -116,6 +120,8 @@ func main() {
 		err = cmdMulti(args)
 	case "ais", "stats":
 		err = cmdAis(args)
+	case "note", "notes":
+		err = cmdNote(args)
 	default:
 		if looksLikeDir(command) {
 			// `aicoin .` — open a session on that directory rather than asking a question whose

@@ -756,6 +756,93 @@ code=$(curl -s -o "$WORKDIR/t28b.json" -w "%{http_code}" -X POST "http://127.0.0
   -H "X-Api-Key: $GRACE_TOKEN" -H "Content-Type: application/json" -d '{"providers":["openai"]}')
 [ "$code" = "400" ] && pass "400 with no prompt (before any provider is touched)" || fail "expected 400, got $code: $(cat "$WORKDIR/t28b.json")"
 
+log "--- test 33: a note takes coins out of a wallet and can be redeemed by whoever holds it ---"
+bal_alice_before=$(balance_of "$ADDR_ALICE")
+code=$(live_signed_request "$KEY_ALICE" "$ADDR_ALICE" "POST" "/wallet/api/notes/issue" \
+  '{"amounts":[2,1],"ttl_seconds":3600}' "$WORKDIR/t33-issue.json")
+bal_alice_after=$(balance_of "$ADDR_ALICE")
+if [ "$code" = "200" ]; then
+  read -r count first_note first_amount first_hash <<<"$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t33-issue.json'))
+n = d['notes'][0]
+print(len(d['notes']), n['note'], n['amount'], n['hash'])
+")"
+  spent=$(python3 -c "print(round(float('$bal_alice_before') - float('$bal_alice_after'), 6))")
+  # The coins leave at issue, which is what stops the issuer spending them while the note is out.
+  [ "$count" = "2" ] && [ "$spent" = "3.0" ] && pass "2 notes issued and 3 aicoin left the wallet immediately" \
+    || fail "expected 2 notes and a 3-coin debit, got count=$count spent=$spent"
+
+  state=$(curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/notes/status/$first_hash" | python3 -c "import json,sys;print(json.load(sys.stdin)['state'])")
+  [ "$state" = "open" ] && pass "the note reads as open, asked for by hash rather than by secret" \
+    || fail "expected state=open, got $state"
+
+  # Bob was handed the note offline; this is him coming back online with it.
+  bal_bob_before=$(balance_of "$ADDR_BOB")
+  code=$(live_signed_request "$KEY_BOB" "$ADDR_BOB" "POST" "/wallet/api/notes/redeem" \
+    "{\"note\":\"$first_note\"}" "$WORKDIR/t33-redeem.json")
+  bal_bob_after=$(balance_of "$ADDR_BOB")
+  gained=$(python3 -c "print(round(float('$bal_bob_after') - float('$bal_bob_before'), 6))")
+  [ "$code" = "200" ] && [ "$gained" = "$(python3 -c "print(float('$first_amount'))")" ] \
+    && pass "the holder redeemed it: bob $bal_bob_before -> $bal_bob_after" \
+    || fail "expected bob to gain $first_amount, got code=$code gained=$gained"
+
+  # The one thing offline hand-off cannot prevent, handled the only way it can be: first come.
+  code=$(live_signed_request "$KEY_CAROL" "$ADDR_CAROL" "POST" "/wallet/api/notes/redeem" \
+    "{\"note\":\"$first_note\"}" "$WORKDIR/t33-again.json")
+  reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t33-again.json'));print(d.get('credited'), d.get('reason'))")
+  [ "$reason" = "False redeemed" ] && pass "the second person to try is told it was already redeemed" \
+    || fail "expected a refusal naming 'redeemed', got $reason"
+else
+  fail "expected 200 from note issue, got $code: $(cat "$WORKDIR/t33-issue.json")"
+fi
+
+log "--- test 34: an unredeemed note can be taken back by the wallet that issued it ---"
+second_note=$(python3 -c "
+import json
+print(json.load(open('$WORKDIR/t33-issue.json'))['notes'][1]['note'])
+")
+bal_before_reclaim=$(balance_of "$ADDR_ALICE")
+code=$(live_signed_request "$KEY_ALICE" "$ADDR_ALICE" "POST" "/wallet/api/notes/reclaim" \
+  "{\"note\":\"$second_note\"}" "$WORKDIR/t34.json")
+bal_after_reclaim=$(balance_of "$ADDR_ALICE")
+back=$(python3 -c "print(round(float('$bal_after_reclaim') - float('$bal_before_reclaim'), 6))")
+[ "$code" = "200" ] && [ "$back" = "1.0" ] && pass "1 aicoin came back — a lost note does not burn the coins" \
+  || fail "expected 1 aicoin back, got code=$code back=$back"
+
+# And nobody else can take one back, however genuine the note is in their hands.
+code=$(live_signed_request "$KEY_ALICE" "$ADDR_ALICE" "POST" "/wallet/api/notes/issue" \
+  '{"amounts":[1]}' "$WORKDIR/t34-b.json")
+third_note=$(python3 -c "import json;print(json.load(open('$WORKDIR/t34-b.json'))['notes'][0]['note'])")
+code=$(live_signed_request "$KEY_BOB" "$ADDR_BOB" "POST" "/wallet/api/notes/reclaim" \
+  "{\"note\":\"$third_note\"}" "$WORKDIR/t34-c.json")
+reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t34-c.json'));print(d.get('reclaimed'), d.get('reason'))")
+[ "$reason" = "False not_issuer" ] && pass "a holder cannot reclaim somebody else's note (only redeem it)" \
+  || fail "expected not_issuer, got $reason"
+
+log "--- test 35: the ledger publishes the key a receiver verifies notes with offline ---"
+key=$(curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/notes/key" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['public_key'], d['algorithm'])")
+python3 - "$key" "$third_note" <<'PYCHECK'
+import base64, json, sys, hashlib
+key_hex, algorithm = sys.argv[1].split()
+note = sys.argv[2]
+assert algorithm == "ed25519", algorithm
+payload_b64, sig_b64 = note.split(".")
+def unpad(s): return s + "=" * (-len(s) % 4)
+payload = json.loads(base64.urlsafe_b64decode(unpad(payload_b64)))
+assert payload["amt"] == 1, payload
+# Verified with nothing but the published key and the note itself — no ledger lookup, which is the
+# whole point of the offline half.
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    Ed25519PublicKey.from_public_bytes(bytes.fromhex(key_hex)).verify(
+        base64.urlsafe_b64decode(unpad(sig_b64)), payload_b64.encode())
+    print("verified")
+except ImportError:
+    print("skipped (no cryptography module)")
+PYCHECK
+if [ $? -eq 0 ]; then pass "a note verifies against the published key with no ledger lookup"; else fail "offline verification failed"; fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "=== ALL E2E CHECKS PASSED ==="

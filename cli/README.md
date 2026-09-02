@@ -344,6 +344,67 @@ command could change the mode or the files under you.
 
 Every question is paid for separately, and the session prints its running total when you leave.
 
+## Paying offline
+
+Load the purse while you have a network, and after that a payment needs nothing from either side:
+
+```
+$ aicoin note load 50                     # online, once
+7 note(s) worth 50 aicoin are in the purse — they can be paid with no network
+
+$ aicoin note pay 15                      # offline
+eyJ2IjoxLCJpZCI6ImE5...  .  Zm9vYmFy...
+eyJ2IjoxLCJpZCI6IjE3...  .  YmF6cXV4...
+
+15 aicoin in 2 note(s). Fingerprint(s): 3F-A2-9C 7B-01-D4
+The other side should see the same fingerprint(s). These are out of your purse now.
+```
+
+The other person, also offline:
+
+```
+$ aicoin note accept eyJ2IjoxLCJpZCI6ImE5...
+✓ genuine · 10 aicoin · from 00c0759c5748… · 3F-A2-9C
+kept 1 note(s) — `aicoin note sync` when you have a network to make them yours
+```
+
+The fingerprints match, so both sides know the note arrived as it left. `✓ genuine` means the
+ledger's signature checks out against a public key this wallet cached the last time it was online —
+no network was used to say that.
+
+```
+$ aicoin note sync                        # back online
+✓ 3F-A2-9C · 10 aicoin credited
+```
+
+| | |
+|---|---|
+| `note load <amount>` | mint notes and put them in the purse (the only step needing a network) |
+| `note list` | what the purse is carrying |
+| `note pay <amount>` | hand over notes worth exactly that |
+| `note accept <note>` | verify one you were given and keep it |
+| `note verify <note>` | check one without keeping it |
+| `note sync` | redeem what you accepted |
+| `note reclaim` | take back notes nobody accepted |
+
+### What this does and does not promise
+
+- **The coins leave your balance when you load the purse**, not when you hand a note over. That is
+  what stops you spending them twice: you no longer have them.
+- **Offline, a receiver can tell genuine from forged, and read the amount off the note.** They
+  cannot tell whether it has already been given to someone else — that is a fact about the ledger,
+  and the ledger is not there.
+- **Redemption is first-come.** A note handed to two people credits exactly one; the other is told
+  `already redeemed`. Every note names its issuer and every step lands in both transaction logs, so
+  it is attributable afterwards — not preventable beforehand. Treat a note like cash, because that
+  is what it is.
+- **Exact change or nothing.** `note pay 3` fails if the purse holds 50/10/5/1, because a note
+  cannot be broken in half offline and handing over a 5 would pay more than was owed.
+- **A lost note is not lost money**: `note reclaim` returns anything nobody accepted, and notes
+  expire (30 days by default) rather than sitting against your balance forever.
+- The purse is `~/.aicoin/purse.json`, mode 0600. Every note in it is spendable by whoever can read
+  the file.
+
 ## Tokens
 
 `aicoin token` issues one for other tools; `ask`, `call` and `consortium` don't need it — they mint
