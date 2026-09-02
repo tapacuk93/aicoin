@@ -61,9 +61,15 @@ const (
 	modeSingle = "single"
 )
 
-// statsPath keeps the record next to the wallet it belongs to, so a second wallet (a test one, a
-// separate proxy) keeps its own history rather than polluting the first's.
+// statsPath keeps the record beside the wallet it belongs to and named after it, so a second wallet
+// — a test one, a separate proxy — keeps its own history rather than polluting the first's.
 func statsPath(walletPath string) string {
+	return sidecarPath(walletPath, "stats")
+}
+
+// legacyStatsPath is where the record lived when it was named after the directory rather than the
+// wallet. Read once, so a mode preference and a few calls' history survive the rename.
+func legacyStatsPath(walletPath string) string {
 	return filepath.Join(filepath.Dir(walletPath), "stats.json")
 }
 
@@ -72,7 +78,11 @@ func loadStats(walletPath string) *stats {
 	s := &stats{Mode: modeMulti, Providers: map[string]*providerStats{}, path: path}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return s
+		if legacy, legacyErr := os.ReadFile(legacyStatsPath(walletPath)); legacyErr == nil {
+			data = legacy
+		} else {
+			return s
+		}
 	}
 	// A corrupt or half-written record is not worth an error: it is a convenience file, and losing
 	// it costs a few calls' worth of history.

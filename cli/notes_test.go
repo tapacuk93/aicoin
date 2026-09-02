@@ -114,15 +114,36 @@ func TestAPurseCanMakeExactAmountsOrRefuses(t *testing.T) {
 	}
 }
 
-func TestSpentNotesLeaveThePurse(t *testing.T) {
+func TestHandedOverNotesStopBeingSpendableAndBecomeReceipts(t *testing.T) {
 	p := &purse{Mine: []heldNote{{Amount: 10, Hash: "a"}, {Amount: 5, Hash: "b"}}}
 	chosen, _ := p.pick(10)
-	p.removeMine(chosen)
+	p.handOver(chosen)
+
 	if len(p.Mine) != 1 || p.Mine[0].Hash != "b" {
-		t.Fatalf("the handed-over note should be gone: %+v", p.Mine)
+		t.Fatalf("the handed-over note should no longer be carried: %+v", p.Mine)
 	}
 	if p.total() != 5 {
-		t.Fatalf("expected 5 left, got %v", p.total())
+		t.Fatalf("expected 5 left to spend, got %v", p.total())
+	}
+	// Kept as a receipt: the issuer needs the string to reclaim coins a receiver never redeemed,
+	// and — unavoidably — it is what makes a deliberate replay possible.
+	if len(p.Spent) != 1 || p.Spent[0].Hash != "a" || p.Spent[0].HandedAt == 0 {
+		t.Fatalf("expected a dated receipt: %+v", p.Spent)
+	}
+}
+
+func TestAReceiptCanBeFoundByWhatIsWrittenOnIt(t *testing.T) {
+	// `note replay 3F-A2-9C` takes the fingerprint two people read to each other, so the reference
+	// a person has in front of them is the one that works.
+	p := &purse{Spent: []heldNote{{Amount: 10, Hash: "3fa29c00ff", Fingerprint: "3F-A2-9C"}}}
+	if _, found := p.findSpent("3F-A2-9C"); !found {
+		t.Error("a fingerprint should find the receipt")
+	}
+	if _, found := p.findSpent("3fa29c"); !found {
+		t.Error("the head of the hash should find it too")
+	}
+	if _, found := p.findSpent("11-22-33"); found {
+		t.Error("something else should not")
 	}
 }
 
@@ -142,5 +163,22 @@ func TestALoadIsSplitIntoNotesWorthCarrying(t *testing.T) {
 	smallest := notes[len(notes)-1]
 	if smallest > 5 {
 		t.Fatalf("expected small change in the spread, got %v", notes)
+	}
+}
+
+func TestEachWalletGetsItsOwnPurse(t *testing.T) {
+	// Two wallets in one directory sharing a purse means each can spend the other's notes — and it
+	// silently swallowed one side of a double-spend demonstration before this was fixed.
+	alice := pursePath("/tmp/aicoin/alice.json")
+	bob := pursePath("/tmp/aicoin/bob.json")
+	if alice == bob {
+		t.Fatalf("two wallets must not share a purse: %s", alice)
+	}
+	if !strings.Contains(alice, "alice") || !strings.Contains(bob, "bob") {
+		t.Fatalf("the purse should be named after its wallet: %s / %s", alice, bob)
+	}
+	// The stats file has the same problem and the same fix.
+	if statsPath("/tmp/aicoin/alice.json") == statsPath("/tmp/aicoin/bob.json") {
+		t.Fatal("two wallets must not share a record either")
 	}
 }
