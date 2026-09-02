@@ -366,6 +366,12 @@ func cmdNoteAccept(args []string, keep bool) error {
 			_ = p.save()
 		}
 	}
+	// Whether the wallet that issued these notes is in debt — visible to anybody, since a balance
+	// is public. Worth knowing before accepting: a wallet that has overspent cannot issue more,
+	// which makes what you are holding likelier to be the last of what it had. Offline this cannot
+	// be checked, and it says so rather than implying an all-clear.
+	issuerDebt := map[string]float64{}
+	checkedIssuers := newClient(*url, 5*time.Second)
 	accepted := 0
 	// A hand-off is either a bare note, or a note with the nonce and claim that bind it to this
 	// wallet. Fields, so a pasted line of either shape works.
@@ -388,6 +394,11 @@ func cmdNoteAccept(args []string, keep bool) error {
 			fmt.Fprintf(os.Stderr, "✗ %s · genuine, but made out to %s… — not you\n",
 				fingerprint, payload.Payee[:12])
 			continue
+		}
+		if _, seen := issuerDebt[payload.Issuer]; !seen {
+			if balance, balErr := checkedIssuers.balance(payload.Issuer); balErr == nil {
+				issuerDebt[payload.Issuer] = balance
+			}
 		}
 		binding := "bearer — whoever holds it can redeem it, including whoever else was handed a copy"
 		if payload.Payee != "" {
@@ -416,6 +427,13 @@ func cmdNoteAccept(args []string, keep bool) error {
 		}
 		fmt.Fprintf(os.Stderr, "✓ genuine · %s aicoin · from %s… · %s\n   %s\n",
 			formatCoins(payload.Amount), payload.Issuer[:12], fingerprint, binding)
+		if balance, known := issuerDebt[payload.Issuer]; known && balance < 0 {
+			// Not a reason to refuse — this note's coins left that wallet when it was issued, and
+			// are waiting for whoever redeems first. It is a reason to redeem promptly, and to
+			// think twice about the next one.
+			fmt.Fprintf(os.Stderr, "   ! that wallet is %s aicoin in debt and can issue no more — "+
+				"sync this one sooner rather than later\n", formatCoins(-balance))
+		}
 		if !keep {
 			continue
 		}

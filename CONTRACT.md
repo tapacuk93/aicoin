@@ -450,6 +450,13 @@ The hash walk is verified in Java, not in the Lua script: Redis's Lua offers onl
 
 *The CLI does not drive chains yet — `aicoin note` uses individual notes. The endpoints above are complete and covered end-to-end.*
 
+### Reputation
+`GET /wallet/api/reputation/{address}` → `{"address":..,"balance":N,"owed":N,"double_spends":N}`. Public, like a balance.
+
+Two facts, deliberately not a score: what the wallet owes, and how many double-spends have been **proven** against it — a proven one being two claims on one note, signed by that wallet over two different payees. A single number would blur two different meanings into something that looks like a credit rating and is not one. No counterparties and no history are exposed; a balance is already public, and this adds one counter to it.
+
+A proven double-spend is also written into the **victim's** own transaction log as a `double_spend` entry. Being told once, in the moment a sync happened to print it, is not the same as having a record of it.
+
 ### Additional proxy-side endpoints
 - `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"half_life_days":110}` computed directly from the ledger — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life. Always includes `Access-Control-Allow-Origin: *` — this is public, read-only data fetched cross-origin by the landing page at aicoin.oeaio.com (a separate origin from the proxy).
 - `GET /free-coins/available` → `{"available": N}` — the real, live remaining count in the shared Redis-backed pool (`AicoinLedger.getFreeCoinsRemaining`), the same counter `POST /wallet/api/claim` atomically decrements. Not a static admin-managed file — this number is authoritative and changes in real time as wallets claim. A ledger-lookup failure resolves to `{"available": 0}`.

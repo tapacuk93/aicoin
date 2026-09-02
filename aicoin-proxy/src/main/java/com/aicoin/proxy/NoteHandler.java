@@ -214,6 +214,9 @@ final class NoteHandler {
                 sendJson(ctx, "{\"credited\":false,\"reason\":\"redeemed\"}");
                 return;
             }
+            // Counted against the issuer and written into this wallet's own history: being told
+            // once, in the moment it happened, is not the same as having a record of it.
+            ledger.recordDoubleSpend(note.getIssuer(), holder, note.getId(), note.getAmount());
             sendJson(ctx, "{\"credited\":false,\"reason\":\"redeemed\""
                     + ",\"double_spend\":{\"issuer\":\"" + note.getIssuer() + "\""
                     + ",\"note_id\":\"" + note.getId() + "\""
@@ -247,6 +250,36 @@ final class NoteHandler {
      * {@code GET /wallet/api/notes/status/{hash}} — is this note still open? By hash, not by note:
      * asking after one should not require handing the secret to anybody, including this server.
      */
+    /**
+     * {@code GET /wallet/api/reputation/{address}} — what anybody can know about a wallet before
+     * dealing with it, out of what the ledger already publishes: whether it owes anything, and how
+     * many double-spends have been proven against it.
+     *
+     * <p>Deliberately not a score. Those are two facts with two different meanings, and a single
+     * number would blur them into something that looks like a credit rating and is not one. No
+     * counterparties and no history: a balance is already public, and this adds one counter to it.
+     */
+    static void serveReputation(ChannelHandlerContext ctx, AicoinLedger ledger, String address) {
+        if (!address.matches("[0-9a-fA-F]{64}")) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "address must be 64 hex characters");
+            return;
+        }
+        String wallet = address.toLowerCase(java.util.Locale.ROOT);
+        ledger.getBalance(wallet, balance -> {
+            if (!balance.isPresent()) {
+                sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not reach the ledger");
+                return;
+            }
+            ledger.doubleSpendCount(wallet, doubleSpends -> {
+                double held = balance.get();
+                sendJson(ctx, "{\"address\":\"" + wallet + "\""
+                        + ",\"balance\":" + held
+                        + ",\"owed\":" + (held < 0 ? -held : 0)
+                        + ",\"double_spends\":" + doubleSpends + "}");
+            });
+        });
+    }
+
     static void serveStatus(ChannelHandlerContext ctx, AicoinLedger ledger, String noteHash) {
         if (!noteHash.matches("[0-9a-fA-F]{64}")) {
             sendError(ctx, HttpResponseStatus.BAD_REQUEST, "hash must be 64 hex characters");
