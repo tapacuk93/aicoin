@@ -22,3 +22,4 @@ logs/
 # Go CLI binary (built to ~/.local/bin, never into the tree)
 cli/aicoin
 __pycache__/
+cli/cli

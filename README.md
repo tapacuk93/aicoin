@@ -89,6 +89,11 @@ With a directory attached the call is **led** by one model rather than drafted b
 the files in front of it, four independent drafts are four re-readings of the same material, billed
 four times, and they converge anyway — so one leads and the rest improve its answer round by round.
 
+`aicoin single` switches to one model per question — the panel is one paid call per member per
+round, which is the wrong price for a small request — and picks whichever model has carried the most
+turns for you, measured from the consortium responses themselves. `aicoin stats` shows the count,
+`aicoin multi` goes back.
+
 It also does everything the wallet page does — create a wallet, check a balance, claim, transfer,
 issue and revoke tokens — plus `ask` for a single model. While a call runs it shows the wallet and a
 clock; when it lands it shows what the call took out of the balance:

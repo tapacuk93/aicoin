@@ -53,6 +53,12 @@ const usage = `aicoin — command-line wallet and AI client for an aicoin-proxy
     aicoin call -ai <p> <path> [-data <json>]  raw pass-through to a provider's own API
     aicoin session [dir]                       the same as "aicoin ."
 
+  Mode
+    aicoin single [provider]         one model per question instead of the whole panel;
+                                     with no name, whichever has carried the most work here
+    aicoin multi                     back to the panel
+    aicoin stats                     what each model has carried, and what it failed
+
   Proxy
     aicoin price                     what one aicoin currently costs
     aicoin health                    which providers are configured and healthy
@@ -104,6 +110,12 @@ func main() {
 		return
 	case "session":
 		err = cmdSession(args)
+	case "single":
+		err = cmdSingle(args)
+	case "multi":
+		err = cmdMulti(args)
+	case "stats":
+		err = cmdStats(args)
 	default:
 		if looksLikeDir(command) {
 			// `aicoin .` — open a session on that directory rather than asking a question whose
@@ -497,20 +509,28 @@ func cmdHealth(args []string) error {
 // chatBody mirrors the proxy's own per-provider chat shapes (see ChatAdapter). `ask` sends a
 // provider's real request to a provider's real path — the proxy forwards it untouched — so the
 // shape has to be that provider's, not a shape of this CLI's invention.
-func chatBody(provider, model, prompt string, maxTokens int) (path string, body []byte, err error) {
+func chatBody(provider, model, system, prompt string, maxTokens int) (path string, body []byte, err error) {
 	switch provider {
 	case "anthropic":
-		body, err = json.Marshal(map[string]any{
+		request := map[string]any{
 			"model":      model,
 			"max_tokens": maxTokens,
 			"messages":   []map[string]string{{"role": "user", "content": prompt}},
-		})
+		}
+		if system != "" {
+			request["system"] = system
+		}
+		body, err = json.Marshal(request)
 		return "/v1/messages", body, err
 	case "google":
-		body, err = json.Marshal(map[string]any{
+		request := map[string]any{
 			"contents":         []map[string]any{{"role": "user", "parts": []map[string]string{{"text": prompt}}}},
 			"generationConfig": map[string]any{"maxOutputTokens": maxTokens},
-		})
+		}
+		if system != "" {
+			request["systemInstruction"] = map[string]any{"parts": []map[string]string{{"text": system}}}
+		}
+		body, err = json.Marshal(request)
 		return "/v1beta/models/" + model + ":generateContent", body, err
 	default:
 		// OpenAI-compatible: OpenAI itself, Mistral, Kimi. OpenAI's newer models take the cap
@@ -519,10 +539,15 @@ func chatBody(provider, model, prompt string, maxTokens int) (path string, body 
 		if provider == "openai" {
 			capField = "max_completion_tokens"
 		}
+		messages := []map[string]string{}
+		if system != "" {
+			messages = append(messages, map[string]string{"role": "system", "content": system})
+		}
+		messages = append(messages, map[string]string{"role": "user", "content": prompt})
 		body, err = json.Marshal(map[string]any{
 			"model":    model,
 			capField:   maxTokens,
-			"messages": []map[string]string{{"role": "user", "content": prompt}},
+			"messages": messages,
 		})
 		return "/v1/chat/completions", body, err
 	}
@@ -613,7 +638,7 @@ func cmdAsk(args []string) error {
 	if err != nil {
 		return err
 	}
-	path, body, err := chatBody(*provider, chosenModel, prompt, *maxTokens)
+	path, body, err := chatBody(*provider, chosenModel, "", prompt, *maxTokens)
 	if err != nil {
 		return err
 	}
@@ -738,6 +763,7 @@ func cmdConsortium(args []string) error {
 	if err != nil {
 		return err
 	}
+	record := loadStats(*walletPath)
 
 	// What the panel is told about where this was run. The listing goes by default because a
 	// question asked inside a project is nearly always about that project; contents are opt-in,
@@ -759,6 +785,37 @@ func cmdConsortium(args []string) error {
 			note += " (trimmed to fit)"
 		}
 		fmt.Fprintf(os.Stderr, "%s, %d chars\n", note, gathered.Chars)
+	}
+
+	// `aicoin single` switches this CLI to one model per question. An explicit -mode means the
+	// caller wants a consortium regardless, so it wins.
+	if record.Mode == modeSingle && *mode == "auto" {
+		client := newClient(*url, 10*time.Minute)
+		provider := ""
+		why := "pinned for this call"
+		if *providers != "" {
+			provider = strings.TrimSpace(strings.Split(*providers, ",")[0])
+		}
+		if provider == "" {
+			enabled, healthErr := enabledProviders(client)
+			if healthErr != nil {
+				return healthErr
+			}
+			provider, why, err = chooseSingleProvider(record, enabled)
+			if err != nil {
+				return err
+			}
+		}
+		model := defaultModels[provider]
+		if model == "" {
+			return fmt.Errorf("no default model for %q", provider)
+		}
+		if balance, balErr := client.balance(wallet.Address); balErr == nil {
+			fmt.Fprintf(os.Stderr, "wallet %s… · %s aicoin · single mode: %s (%s)\n",
+				wallet.Address[:12], formatCoins(balance), provider, why)
+		}
+		_, err = askOne(client, wallet, record, provider, model, background, prompt, root, *auto, confirmOnStdin)
+		return err
 	}
 
 	request := map[string]any{"prompt": prompt}
@@ -835,6 +892,8 @@ func cmdConsortium(args []string) error {
 		}
 	}
 	reportFailures(parsed)
+	record.recordConsortium(parsed)
+	_ = record.save()
 	fmt.Fprintf(os.Stderr, "\n%s\n", howItWent(parsed))
 	if balanceErr == nil {
 		balanceAfter, afterErr := client.balance(wallet.Address)
