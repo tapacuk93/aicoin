@@ -57,7 +57,7 @@ const usage = `aicoin — command-line wallet and AI client for an aicoin-proxy
     aicoin single [provider]         one model per question instead of the whole panel;
                                      with no name, whichever has carried the most work here
     aicoin multi                     back to the panel
-    aicoin stats                     what each model has carried, and what it failed
+    aicoin ais                       which models have been used, what they cost, what they failed
 
   Proxy
     aicoin price                     what one aicoin currently costs
@@ -114,8 +114,8 @@ func main() {
 		err = cmdSingle(args)
 	case "multi":
 		err = cmdMulti(args)
-	case "stats":
-		err = cmdStats(args)
+	case "ais", "stats":
+		err = cmdAis(args)
 	default:
 		if looksLikeDir(command) {
 			// `aicoin .` — open a session on that directory rather than asking a question whose
@@ -685,7 +685,10 @@ type consortiumResult struct {
 	Mode          string   `json:"mode"`
 	Calls         int      `json:"calls"`
 	CoinsCharged  int64    `json:"coins_charged"`
-	Reviews       []struct {
+	// Spend breaks the total down by provider. Only the proxy can: it settles each turn against
+	// that provider's own reported usage.
+	Spend   map[string]int64 `json:"spend"`
+	Reviews []struct {
 		Round    int    `json:"round"`
 		Provider string `json:"provider"`
 		Clean    bool   `json:"clean"`

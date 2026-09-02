@@ -94,3 +94,41 @@ func TestSummaryNamesWhoLedTheCall(t *testing.T) {
 		t.Fatalf("got %q", panel)
 	}
 }
+
+func TestBacktickedLinesAreSubcommandsAndNothingElseIs(t *testing.T) {
+	// The point of the backticks: a question that starts with a command word is still a question.
+	// `single` switches mode; "single out the slowest handler" asks the panel something.
+	for line, want := range map[string]string{
+		"`single`":        "single",
+		"  `single kimi`": "single kimi",
+		"`ais`":           "ais",
+	} {
+		got, ok := backtickCommand(line)
+		if !ok || got != want {
+			t.Errorf("%q should be the subcommand %q, got %q (ok=%v)", line, want, got, ok)
+		}
+	}
+	for _, line := range []string{
+		"single",
+		"single out the slowest handler",
+		"what does `single` do?",
+		"`",
+		"``",
+		"`unclosed",
+	} {
+		if inner, ok := backtickCommand(line); ok {
+			t.Errorf("%q should have stayed a question, got subcommand %q", line, inner)
+		}
+	}
+}
+
+func TestTheActionProtocolTellsTheModelToChooseAName(t *testing.T) {
+	// "create empty file" came back asking which filename to use. An unspecified name is a
+	// decision to make, not a blocker.
+	if !strings.Contains(actionProtocol, "Do not ask for") {
+		t.Error("the protocol should forbid asking for a filename")
+	}
+	if !strings.Contains(actionProtocol, "choose a") {
+		t.Error("the protocol should tell it to choose one")
+	}
+}

@@ -25,8 +25,8 @@ const (
 	// reviews — is sent to every panelist on every round, so history is not free; the newest
 	// exchanges are the ones a follow-up question is about.
 	sessionHistoryBudget = 12000
-	sessionBanner        = `aicoin — every question goes to the whole panel, which then reviews its own answer.
-Type a question, or /help for what else. Ctrl-D to leave.`
+	sessionBanner        = "aicoin — every question goes to the whole panel, which then reviews its own answer.\n" +
+		"Type a question, or `help` for the subcommands. Ctrl-D to leave."
 )
 
 // exchange is one question and the answer the panel settled on.
@@ -121,6 +121,11 @@ func runSession(dir string, url string, walletPath string, state *sessionState) 
 		question := strings.TrimSpace(line)
 		if question == "" {
 			continue
+		}
+		// Backticks mark a subcommand, so a question that happens to start with a command word is
+		// still a question: `single` switches mode, single does not.
+		if inner, isCommand := backtickCommand(question); isCommand {
+			question = "/" + strings.TrimPrefix(inner, "/")
 		}
 		if strings.HasPrefix(question, "/") {
 			stop, err := state.command(question, client, wallet)
@@ -251,6 +256,19 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 	return nil
 }
 
+// backtickCommand reads `command args` — a line wrapped in backticks — and returns what is inside.
+func backtickCommand(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if len(trimmed) < 3 || !strings.HasPrefix(trimmed, "`") || !strings.HasSuffix(trimmed, "`") {
+		return "", false
+	}
+	inner := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+	if inner == "" || strings.Contains(inner, "`") {
+		return "", false
+	}
+	return inner, true
+}
+
 // singleProvider picks the model for a single-mode turn: whichever the record says has carried the
 // most work here, restricted to what this proxy actually has a key for.
 func (s *sessionState) singleProvider(client *Client) (string, string, error) {
@@ -280,20 +298,23 @@ func (s *sessionState) confirm(prompt string) bool {
 	return strings.EqualFold(strings.TrimSpace(line), "y")
 }
 
-const sessionHelp = `  /f <glob>        include these files' contents in every question (blank to clear)
-  /panel <a,b>     which models sit on the panel (blank for all of them)
-  /rounds <n>      cap the review rounds
-  /v               show or hide each round's comments
-  /files           what the panel can currently see
-  /balance         what the wallet holds
-  /single [model]  one model per question instead of the panel (cheaper by the panel size)
-  /multi           back to the panel
-  /stats           what each model has carried here, and what it failed
-  /auto            apply proposed file changes without asking (currently off)
-  /claim           take the free-coin faucet's grant
-  /reset           forget this session's exchanges
-  /help            this
-  /exit            leave (Ctrl-D does too)`
+const sessionHelp = "Subcommands go in backticks, so anything else is a question for the panel:\n" + `
+  ` + "`f <glob>`" + `        include these files' contents in every question (blank to clear)
+  ` + "`panel <a,b>`" + `     which models sit on the panel (blank for all of them)
+  ` + "`rounds <n>`" + `      cap the review rounds
+  ` + "`v`" + `               show or hide each round's comments
+  ` + "`files`" + `           what the panel can currently see
+  ` + "`balance`" + `         what the wallet holds
+  ` + "`single [model]`" + `  one model per question instead of the panel (cheaper by the panel size)
+  ` + "`multi`" + `           back to the panel
+  ` + "`ais`" + `             which models have been used, what they cost, what they failed
+  ` + "`auto`" + `            apply proposed file changes without asking (currently off)
+  ` + "`claim`" + `           take the free-coin faucet's grant
+  ` + "`reset`" + `           forget this session's exchanges
+  ` + "`help`" + `            this
+  ` + "`exit`" + `            leave (Ctrl-D does too)
+
+(A leading / works too: /help, /exit.)`
 
 // command handles a /line. It returns true when the session should end.
 func (s *sessionState) command(line string, client *Client, wallet *Wallet) (bool, error) {
@@ -376,7 +397,7 @@ func (s *sessionState) command(line string, client *Client, wallet *Wallet) (boo
 			return false, err
 		}
 		fmt.Fprintln(os.Stderr, "consortium mode on — the whole panel, then rounds of review")
-	case "/stats":
+	case "/ais", "/stats":
 		fmt.Fprint(os.Stderr, s.record.render())
 	case "/auto":
 		s.auto = !s.auto

@@ -551,7 +551,7 @@ curl -X POST http://localhost:8080/consortium \
 ```json
 {"answer":"...","settled":true,"stopped_reason":"clean","rounds":2,
  "panel":["anthropic","openai","google","kimi"],"editor":"anthropic",
- "calls":13,"coins_charged":15,
+ "calls":13,"coins_charged":15,"spend":{"anthropic":8,"openai":4,"kimi":3},
  "reviews":[{"round":1,"provider":"openai","clean":false,"comments":"..."}],
  "errors":[]}
 ```
