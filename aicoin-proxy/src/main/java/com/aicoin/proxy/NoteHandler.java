@@ -83,6 +83,10 @@ final class NoteHandler {
         // to two people and only the named one can redeem it, so the second is holding nothing
         // rather than holding a race. It costs foreknowledge of who is being paid.
         String payee = field(new String(body, CharsetUtil.UTF_8), "payee");
+        // A claim-required note is bearer until it is handed over, and then redeemable only by the
+        // person it was handed to — so a copy taken off a screen is worth nothing.
+        boolean requireClaim = new String(body, CharsetUtil.UTF_8)
+                .matches("(?s).*\"claimed\"\\s*:\\s*true.*");
         if (payee != null && !payee.matches("[0-9a-fA-F]{64}")) {
             sendError(ctx, HttpResponseStatus.BAD_REQUEST, "payee must be a 64-character address");
             return;
@@ -94,7 +98,7 @@ final class NoteHandler {
                 return;
             }
             issueNext(ctx, ledger, signer.get(), issuer, amounts, expiresAt,
-                    payee == null ? "" : payee.toLowerCase(java.util.Locale.ROOT), new ArrayList<>());
+                    payee == null ? "" : payee.toLowerCase(java.util.Locale.ROOT), requireClaim, new ArrayList<>());
         });
     }
 
@@ -105,15 +109,15 @@ final class NoteHandler {
      */
     private static void issueNext(ChannelHandlerContext ctx, AicoinLedger ledger, NoteSigner signer,
                                    String issuer, List<Double> remaining, long expiresAt, String payee,
-                                   List<String> minted) {
+                                   boolean requireClaim, List<String> minted) {
         if (remaining.isEmpty()) {
             sendIssued(ctx, minted, null);
             return;
         }
         double amount = remaining.get(0);
         List<Double> rest = remaining.subList(1, remaining.size());
-        Note note = Note.mint(amount, issuer, expiresAt, payee);
-        ledger.issueNote(issuer, amount, note.hash(), expiresAt, payee, result -> {
+        Note note = Note.mint(amount, issuer, expiresAt, payee, requireClaim);
+        ledger.issueNote(issuer, amount, note.hash(), expiresAt, payee, requireClaim, result -> {
             if (!result.isReachable()) {
                 sendIssued(ctx, minted, "could not reach the ledger");
                 return;
@@ -129,12 +133,13 @@ final class NoteHandler {
                         + ",\"fingerprint\":\"" + note.fingerprint() + "\""
                         + ",\"hash\":\"" + note.hash() + "\""
                         + ",\"expires_at\":" + expiresAt
-                        + ",\"payee\":\"" + payee + "\"}");
+                        + ",\"payee\":\"" + payee + "\""
+                        + ",\"claimed\":" + requireClaim + "}");
             } catch (Exception e) {
                 sendIssued(ctx, minted, "could not sign the note");
                 return;
             }
-            issueNext(ctx, ledger, signer, issuer, rest, expiresAt, payee, minted);
+            issueNext(ctx, ledger, signer, issuer, rest, expiresAt, payee, requireClaim, minted);
         });
     }
 
@@ -149,12 +154,27 @@ final class NoteHandler {
 
     /** {@code POST /wallet/api/notes/redeem} — live-signed. Body {@code {"note":"<the string>"}}. */
     static void serveRedeem(ChannelHandlerContext ctx, byte[] body, AicoinLedger ledger, String holder) {
-        Optional<Note> note = Note.decode(field(new String(body, CharsetUtil.UTF_8), "note"));
+        String text = new String(body, CharsetUtil.UTF_8);
+        Optional<Note> note = Note.decode(field(text, "note"));
         if (!note.isPresent()) {
             sendError(ctx, HttpResponseStatus.BAD_REQUEST, "body must carry a note");
             return;
         }
-        ledger.redeemNote(holder, note.get().hash(), result -> {
+        // A claim, if there is one, binds this note to this redeemer: the issuer signed the
+        // redeemer's own address and a nonce the redeemer chose. Neither side can make one alone,
+        // which is what makes a photographed note worthless to the photographer.
+        String nonce = field(text, "nonce");
+        String signature = field(text, "claim");
+        String claim = "";
+        if (nonce != null || signature != null) {
+            if (!NoteClaim.verify(note.get().getIssuer(), note.get().getId(), holder, nonce, signature)) {
+                sendJson(ctx, "{\"credited\":false,\"reason\":\"bad_claim\"}");
+                return;
+            }
+            claim = nonce + ":" + signature;
+        }
+        String finalClaim = claim;
+        ledger.redeemNote(holder, note.get().hash(), claim, result -> {
             if (!result.isReachable()) {
                 sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not reach the ledger");
                 return;
@@ -164,11 +184,41 @@ final class NoteHandler {
                 // note twice, and the person reading this is the one who did not get the coins.
                 // not_payee is the other: this note was made out to somebody else, and no race was
                 // ever winnable.
+                if ("redeemed".equals(result.getDetail()) && !finalClaim.isEmpty()) {
+                    // ...and if both sides claimed it, the loser gets more than an apology: two
+                    // claims on one note are two statements the payer signed that cannot both be
+                    // honest, and anybody can check them.
+                    sendDoubleSpendProof(ctx, ledger, note.get(), holder, finalClaim);
+                    return;
+                }
                 sendJson(ctx, "{\"credited\":false,\"reason\":\"" + result.getDetail() + "\"}");
                 return;
             }
             sendJson(ctx, "{\"credited\":true,\"amount\":" + Note.formatAmount(note.get().getAmount())
                     + ",\"balance\":" + result.getValue() + "}");
+        });
+    }
+
+    /**
+     * Answers a losing redemption with the evidence, when there is any: the claim the winner
+     * presented and the claim this caller presented, both signed by the same payer over different
+     * payees. Neither could have been forged by a receiver, so the pair names the culprit without
+     * anybody having to be believed.
+     */
+    private static void sendDoubleSpendProof(ChannelHandlerContext ctx, AicoinLedger ledger, Note note,
+                                              String holder, String ourClaim) {
+        ledger.noteState(note.hash(), state -> {
+            String theirClaim = state.map(fields -> fields.getOrDefault("claim", "")).orElse("");
+            String redeemedBy = state.map(fields -> fields.getOrDefault("redeemed_by", "")).orElse("");
+            if (theirClaim.isEmpty() || theirClaim.equals(ourClaim)) {
+                sendJson(ctx, "{\"credited\":false,\"reason\":\"redeemed\"}");
+                return;
+            }
+            sendJson(ctx, "{\"credited\":false,\"reason\":\"redeemed\""
+                    + ",\"double_spend\":{\"issuer\":\"" + note.getIssuer() + "\""
+                    + ",\"note_id\":\"" + note.getId() + "\""
+                    + ",\"claims\":[{\"payee\":\"" + redeemedBy + "\",\"claim\":\"" + theirClaim + "\"}"
+                    + ",{\"payee\":\"" + holder + "\",\"claim\":\"" + ourClaim + "\"}]}}");
         });
     }
 

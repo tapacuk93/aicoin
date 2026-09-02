@@ -217,6 +217,17 @@ final class WalletSignature {
         }
     }
 
+    /**
+     * Whether {@code address} signed {@code message} — the same Ed25519 check the live-signature
+     * path makes, exposed for the one other place a wallet's signature has to be checked against
+     * its address: a payer's claim binding a note to the person they handed it to.
+     */
+    static boolean signedBy(String address, String message, String signatureHex) {
+        Optional<PublicKey> key = parsePublicKey(address);
+        return key.isPresent()
+                && verifyRawSignature(key.get(), message.getBytes(java.nio.charset.StandardCharsets.UTF_8), signatureHex);
+    }
+
     private static Optional<PublicKey> parsePublicKey(String addressHex) {
         if (!isValidHex(addressHex, ADDRESS_HEX_LENGTH)) {
             return Optional.empty();

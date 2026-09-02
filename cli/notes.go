@@ -38,6 +38,11 @@ type heldNote struct {
 	Payee      string `json:"payee,omitempty"`
 	AcceptedAt int64  `json:"accepted_at,omitempty"`
 	HandedAt   int64  `json:"handed_at,omitempty"`
+	// Nonce and Claim bind this note to one wallet: the nonce is the receiver's, the claim is the
+	// payer's signature over it. Neither side can produce the pair alone, so a note copied off
+	// somebody's screen is worthless to whoever copied it.
+	Nonce string `json:"nonce,omitempty"`
+	Claim string `json:"claim,omitempty"`
 }
 
 type purse struct {
@@ -52,6 +57,10 @@ type purse struct {
 	// second hand-off possible. See `note replay`: the capability is inherent to a bearer note,
 	// which is printed to a terminal the moment it is paid.
 	Spent []heldNote `json:"spent"`
+
+	// Nonces this wallet has handed out in payment requests and not yet used. A claim is only ours
+	// if it names a nonce we chose.
+	Nonces []string `json:"nonces,omitempty"`
 
 	path string
 }
@@ -152,6 +161,36 @@ func verifyNote(encoded, ledgerKeyHex string) (*notePayload, error) {
 			time.Unix(payload.Expires, 0).Format("2 Jan 2006"))
 	}
 	return &payload, nil
+}
+
+// claimMessage is the exact text a payer signs to bind a note to one payee — the same bytes the
+// ledger checks, so a claim that verifies here verifies there.
+func claimMessage(noteID, payee, nonce string) string {
+	return "aicoin-claim\n" + noteID + "\n" + payee + "\n" + nonce
+}
+
+// verifyClaim checks that the note's issuer really signed it over to this wallet, with this nonce.
+func verifyClaim(issuer, noteID, payee, nonce, signatureHex string) bool {
+	key, err := hex.DecodeString(issuer)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return false
+	}
+	signature, err := hex.DecodeString(signatureHex)
+	if err != nil {
+		return false
+	}
+	return ed25519.Verify(key, []byte(claimMessage(noteID, payee, nonce)), signature)
+}
+
+// holdsNonce reports whether this wallet chose a nonce — so a claim naming somebody else's, or one
+// nobody asked for, is not mistaken for a payment to us.
+func (p *purse) holdsNonce(nonce string) bool {
+	for _, held := range p.Nonces {
+		if held == nonce {
+			return true
+		}
+	}
+	return false
 }
 
 // hashOfNoteID is the ledger's key for a note: the hash of the secret, never the secret. Asking

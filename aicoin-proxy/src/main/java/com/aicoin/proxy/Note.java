@@ -43,20 +43,23 @@ final class Note {
     private final long expiresAtSeconds;
     /** The only wallet that may redeem this note, or empty for a bearer note anyone can. */
     private final String payee;
+    /** True when holding the string is not enough: only a claim from the issuer, naming the redeemer, redeems it. */
+    private final boolean requireClaim;
 
-    Note(String id, double amount, String issuer, long expiresAtSeconds, String payee) {
+    Note(String id, double amount, String issuer, long expiresAtSeconds, String payee, boolean requireClaim) {
         this.id = id;
         this.amount = amount;
         this.issuer = issuer;
         this.expiresAtSeconds = expiresAtSeconds;
         this.payee = payee == null ? "" : payee;
+        this.requireClaim = requireClaim;
     }
 
     /** A fresh note id: {@value #ID_BYTES} bytes from {@link SecureRandom}, hex-encoded. */
-    static Note mint(double amount, String issuer, long expiresAtSeconds, String payee) {
+    static Note mint(double amount, String issuer, long expiresAtSeconds, String payee, boolean requireClaim) {
         byte[] raw = new byte[ID_BYTES];
         RANDOM.nextBytes(raw);
-        return new Note(hex(raw), amount, issuer, expiresAtSeconds, payee);
+        return new Note(hex(raw), amount, issuer, expiresAtSeconds, payee, requireClaim);
     }
 
     String getId() {
@@ -78,6 +81,11 @@ final class Note {
     /** Empty for a bearer note; otherwise the one wallet that can redeem this. */
     String getPayee() {
         return payee;
+    }
+
+    /** Whether holding this string is enough to redeem it, or a claim from the issuer is needed too. */
+    boolean isClaimRequired() {
+        return requireClaim;
     }
 
     /** What the ledger is keyed by: the hash of the secret, never the secret. */
@@ -108,7 +116,7 @@ final class Note {
     String payloadJson() {
         return "{\"v\":1,\"id\":\"" + id + "\",\"amt\":" + formatAmount(amount)
                 + ",\"iss\":\"" + issuer + "\",\"exp\":" + expiresAtSeconds
-                + ",\"pay\":\"" + payee + "\"}";
+                + ",\"pay\":\"" + payee + "\",\"clm\":" + (requireClaim ? 1 : 0) + "}";
     }
 
     String encodedPayload() {
@@ -150,9 +158,11 @@ final class Note {
                 return Optional.empty();
             }
             Object payee = fields.get("pay");
+            Object claimed = fields.get("clm");
             return Optional.of(new Note((String) id, ((Number) amount).doubleValue(),
                     (String) issuer, ((Number) expiry).longValue(),
-                    payee instanceof String ? (String) payee : ""));
+                    payee instanceof String ? (String) payee : "",
+                    claimed instanceof Number && ((Number) claimed).intValue() == 1));
         } catch (Exception e) {
             return Optional.empty();
         }
