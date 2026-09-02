@@ -413,6 +413,43 @@ the right denominations for them. So a purse carries both — bound notes for th
 to pay, bearer notes for strangers — and `note list` shows which is which. A note made out to
 somebody else is refused at `accept` rather than kept, since it would never redeem.
 
+### Notes that only the person you paid can use
+
+A bearer note is redeemable by whoever holds the string — including whoever photographs it off your
+screen while you are paying with it. A claim closes that:
+
+```
+# the receiver, first:
+$ aicoin note request
+5f2a91c0…  9f2c81aa3e04…          # their address, and a nonce nobody else has seen
+
+# the payer:
+$ aicoin note load 20 -claimed    # while online
+$ aicoin note pay 5 -to 5f2a91c0… -nonce 9f2c81aa3e04…    # offline
+
+# the receiver again, offline:
+✓ genuine · 5 aicoin · from 00c0759c5748… · 3F-A2-9C
+   claimed for you — signed over to your address against the nonce you gave,
+   so a copy of this is no use to anyone else
+```
+
+Neither side can make a claim alone. The receiver has a nonce and an address and no way to produce
+the payer's signature; the payer has the key and cannot guess a nonce they were never given. So a
+payment cannot be prepared for somebody you have not met, and a copy of one is worthless to the
+copier.
+
+And if the payer hands the same note to two people, both claims reach the ledger — two signatures by
+the same payer naming two different payees, which cannot both be honest. The loser gets the pair
+back as proof rather than an apology:
+
+```
+✗ 3F-A2-9C · already redeemed by someone else
+   proof of double-spend by 00c0759c5748…:
+     signed over to 5f2a91c0… (a1b2c3…)
+     signed over to 7d4e88f1… (d4e5f6…)
+   anyone can check those against the issuer's address; neither could be forged.
+```
+
 ### What this does and does not promise
 
 - **The coins leave your balance when you load the purse**, not when you hand a note over. That is

@@ -820,6 +820,59 @@ reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t34-c.json'));print(
 [ "$reason" = "False not_issuer" ] && pass "a holder cannot reclaim somebody else's note (only redeem it)" \
   || fail "expected not_issuer, got $reason"
 
+log "--- test 38: a claim-required note is worthless to whoever merely copied it ---"
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" -H "X-Admin-Token: $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"address\":\"$ADDR_ALICE\",\"amount\":4,\"reason\":\"e2e claim test\",\"reference\":\"e2e-claim-1\"}"
+code=$(live_signed_request "$KEY_ALICE" "$ADDR_ALICE" "POST" "/wallet/api/notes/issue" \
+  '{"amounts":[2],"claimed":true}' "$WORKDIR/t38-issue.json")
+claimed_note=$(python3 -c "import json;print(json.load(open('$WORKDIR/t38-issue.json'))['notes'][0]['note'])")
+
+# Carol photographed it off a screen. The string alone gets her nothing.
+code=$(live_signed_request "$KEY_CAROL" "$ADDR_CAROL" "POST" "/wallet/api/notes/redeem" \
+  "{\"note\":\"$claimed_note\"}" "$WORKDIR/t38-copy.json")
+reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t38-copy.json'));print(d.get('credited'), d.get('reason'))")
+[ "$reason" = "False claim_required" ] && pass "holding the string is not enough — a copy redeems nothing" \
+  || fail "expected claim_required, got $reason"
+
+# Bob gives alice a nonce; alice signs the note over to bob; bob redeems.
+NONCE="9f2c81aa"
+NOTE_ID=$(python3 -c "
+import base64, json
+n = '$claimed_note'.split('.')[0]
+print(json.loads(base64.urlsafe_b64decode(n + '=' * (-len(n) % 4)))['id'])
+")
+CLAIM=$(python3 - "$KEY_ALICE" "$NOTE_ID" "$ADDR_BOB" "$NONCE" <<'PYSIGN'
+import subprocess, sys, tempfile, os
+key, note_id, payee, nonce = sys.argv[1:5]
+message = "aicoin-claim" + chr(10) + note_id + chr(10) + payee + chr(10) + nonce
+with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+    fh.write(message)
+    path = fh.name
+sig = subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", key, "-in", path],
+                     capture_output=True).stdout
+os.unlink(path)
+print(sig.hex())
+PYSIGN
+)
+bal_bob_before=$(balance_of "$ADDR_BOB")
+code=$(live_signed_request "$KEY_BOB" "$ADDR_BOB" "POST" "/wallet/api/notes/redeem" \
+  "{\"note\":\"$claimed_note\",\"nonce\":\"$NONCE\",\"claim\":\"$CLAIM\"}" "$WORKDIR/t38-bob.json")
+bal_bob_after=$(balance_of "$ADDR_BOB")
+gained=$(python3 -c "print(round(float('$bal_bob_after') - float('$bal_bob_before'), 6))")
+[ "$code" = "200" ] && [ "$gained" = "2.0" ] && pass "the person it was signed over to redeems it" \
+  || fail "expected bob to gain 2, got code=$code gained=$gained: $(cat "$WORKDIR/t38-bob.json")"
+
+# And a claim naming bob does not work for carol, even with the note and the claim in hand.
+code=$(live_signed_request "$KEY_ALICE" "$ADDR_ALICE" "POST" "/wallet/api/notes/issue" \
+  '{"amounts":[1],"claimed":true}' "$WORKDIR/t38-b.json")
+second_note=$(python3 -c "import json;print(json.load(open('$WORKDIR/t38-b.json'))['notes'][0]['note'])")
+code=$(live_signed_request "$KEY_CAROL" "$ADDR_CAROL" "POST" "/wallet/api/notes/redeem" \
+  "{\"note\":\"$second_note\",\"nonce\":\"$NONCE\",\"claim\":\"$CLAIM\"}" "$WORKDIR/t38-c.json")
+reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t38-c.json'));print(d.get('reason'))")
+[ "$reason" = "bad_claim" ] && pass "a claim made out to somebody else does not redeem for you" \
+  || fail "expected bad_claim, got $reason"
+
 log "--- test 37: a hash chain — one preloaded secret standing in for a purse of notes ---"
 # Alice picks a seed and hashes it 5 times. Only the tip goes to the ledger; the seed never leaves.
 read -r CHAIN_TIP LINK3 LINK5 <<<"$(python3 -c "

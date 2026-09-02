@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,6 +20,7 @@ const noteUsage = `aicoin note — coins that change hands offline
   aicoin note load <amount>     turn balance into notes and put them in the purse (needs a network)
   aicoin note list              what the purse is carrying
   aicoin note pay <amount>      hand over notes worth exactly that — no network
+  aicoin note request           your address and a fresh nonce, for whoever is paying you
   aicoin note accept <note>     check a note you were given and keep it — no network
   aicoin note sync              redeem what you accepted, and see what became of what you paid
   aicoin note reclaim           take back notes nobody accepted
@@ -38,6 +42,8 @@ func cmdNote(args []string) error {
 		return cmdNoteList(rest)
 	case "pay":
 		return cmdNotePay(rest)
+	case "request":
+		return cmdNoteRequest(rest)
 	case "accept":
 		return cmdNoteAccept(rest, true)
 	case "verify":
@@ -56,11 +62,39 @@ func cmdNote(args []string) error {
 	}
 }
 
+// cmdNoteRequest is the receiver's half of a hand-off: their address, and a nonce nobody else has
+// seen. A payer cannot prepare a payment for them without it, and a payment made with it is no use
+// to anybody else.
+func cmdNoteRequest(args []string) error {
+	fs := flag.NewFlagSet("note request", flag.ExitOnError)
+	_, walletPath := common(fs)
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	wallet, err := loadWallet(*walletPath)
+	if err != nil {
+		return err
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return err
+	}
+	p := loadPurse(*walletPath)
+	p.Nonces = append(p.Nonces, hex.EncodeToString(nonce))
+	if err := p.save(); err != nil {
+		return err
+	}
+	fmt.Printf("%s %s\n", wallet.Address, hex.EncodeToString(nonce))
+	fmt.Fprintln(os.Stderr, "give this to whoever is paying you: `aicoin note pay <amount> -to <address> -nonce <nonce>`")
+	return nil
+}
+
 func cmdNoteLoad(args []string) error {
 	fs := flag.NewFlagSet("note load", flag.ExitOnError)
 	url, walletPath := common(fs)
 	denoms := fs.String("d", "", "denominations to mint, comma-separated (default: a spread of 50/25/10/5/1)")
 	payee := fs.String("for", "", "make these notes out to one wallet — only they can redeem them")
+	claimed := fs.Bool("claimed", false, "require a claim to redeem: holding the string is not enough")
 	days := fs.Int("days", 30, "how long the notes stay redeemable")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -102,6 +136,9 @@ func cmdNoteLoad(args []string) error {
 		}
 		request["payee"] = strings.ToLower(*payee)
 	}
+	if *claimed {
+		request["claimed"] = true
+	}
 	body, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -137,6 +174,10 @@ func cmdNoteLoad(args []string) error {
 		fmt.Fprintf(os.Stderr, "%d note(s) worth %s aicoin, made out to %s… — only they can redeem them,\n"+
 			"so handing one to two people leaves the second with nothing rather than a race\n",
 			len(issued.Notes), formatCoins(minted), (*payee)[:12])
+	} else if *claimed {
+		fmt.Fprintf(os.Stderr, "%d note(s) worth %s aicoin, redeemable only with a claim — pay with\n"+
+			"`note pay <amount> -to <address> -nonce <nonce>` and a copy of the string is worth nothing\n",
+			len(issued.Notes), formatCoins(minted))
 	} else {
 		fmt.Fprintf(os.Stderr, "%d bearer note(s) worth %s aicoin are in the purse — anyone holding one can "+
 			"redeem it\n", len(issued.Notes), formatCoins(minted))
@@ -220,6 +261,7 @@ func cmdNotePay(args []string) error {
 	fs := flag.NewFlagSet("note pay", flag.ExitOnError)
 	_, walletPath := common(fs)
 	to := fs.String("to", "", "who is being paid — spends notes made out to them where possible")
+	nonce := fs.String("nonce", "", "the nonce from their `note request` — binds these notes to them alone")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
@@ -239,11 +281,36 @@ func cmdNotePay(args []string) error {
 		return fmt.Errorf("the purse cannot make exactly %s from what it is carrying (%s aicoin) — "+
 			"`aicoin note load` for smaller notes", formatCoins(amount), formatCoins(p.total()))
 	}
+	// A claim binds each note to the person being paid: the payer signs their address and the
+	// nonce they chose. Neither side could have produced it alone, so a copy of what is printed
+	// below is no use to anybody but them.
+	claims := map[string]string{}
+	if *nonce != "" {
+		if *to == "" {
+			return fmt.Errorf("-nonce needs -to: a claim names who is being paid")
+		}
+		wallet, err := loadWallet(*walletPath)
+		if err != nil {
+			return err
+		}
+		for _, note := range chosen {
+			payload, verifyErr := verifyNote(note.Note, p.LedgerKey)
+			if payload == nil {
+				return verifyErr
+			}
+			claims[note.Note] = hex.EncodeToString(
+				ed25519.Sign(wallet.private(), []byte(claimMessage(payload.ID, strings.ToLower(*to), *nonce))))
+		}
+	}
 	p.handOver(chosen)
 	if err := p.save(); err != nil {
 		return err
 	}
 	for _, note := range chosen {
+		if claim, ok := claims[note.Note]; ok {
+			fmt.Printf("%s %s %s\n", note.Note, *nonce, claim)
+			continue
+		}
 		fmt.Println(note.Note)
 	}
 	fmt.Fprintf(os.Stderr, "\n%s aicoin in %d note(s). Fingerprint(s):", formatCoins(amount), len(chosen))
@@ -300,7 +367,16 @@ func cmdNoteAccept(args []string, keep bool) error {
 		}
 	}
 	accepted := 0
-	for _, line := range strings.Fields(encoded) {
+	// A hand-off is either a bare note, or a note with the nonce and claim that bind it to this
+	// wallet. Fields, so a pasted line of either shape works.
+	fields := strings.Fields(encoded)
+	for index := 0; index < len(fields); index++ {
+		line := fields[index]
+		nonce, claim := "", ""
+		if index+2 < len(fields) && !strings.Contains(fields[index+1], ".") && !strings.Contains(fields[index+2], ".") {
+			nonce, claim = fields[index+1], fields[index+2]
+			index += 2
+		}
 		payload, err := verifyNote(line, p.LedgerKey)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "✗ %v\n", err)
@@ -317,6 +393,27 @@ func cmdNoteAccept(args []string, keep bool) error {
 		if payload.Payee != "" {
 			binding = "made out to you — nobody else can redeem it, so it cannot have been spent elsewhere"
 		}
+		if claim != "" {
+			if me == "" {
+				fmt.Fprintf(os.Stderr, "✗ %s · a claim was offered but this wallet has no address to check it against\n",
+					fingerprint)
+				continue
+			}
+			if !p.holdsNonce(nonce) {
+				// Somebody else's nonce means somebody else's payment: this is a copy of a
+				// hand-off that was not made to us.
+				fmt.Fprintf(os.Stderr, "✗ %s · claimed with a nonce this wallet never issued — "+
+					"this payment was made to somebody else\n", fingerprint)
+				continue
+			}
+			if !verifyClaim(payload.Issuer, payload.ID, strings.ToLower(me), nonce, claim) {
+				fmt.Fprintf(os.Stderr, "✗ %s · the claim is not the issuer signing this note over to you\n",
+					fingerprint)
+				continue
+			}
+			binding = "claimed for you — signed over to your address against the nonce you gave, " +
+				"so a copy of this is no use to anyone else"
+		}
 		fmt.Fprintf(os.Stderr, "✓ genuine · %s aicoin · from %s… · %s\n   %s\n",
 			formatCoins(payload.Amount), payload.Issuer[:12], fingerprint, binding)
 		if !keep {
@@ -329,7 +426,7 @@ func cmdNoteAccept(args []string, keep bool) error {
 		p.Received = append(p.Received, heldNote{
 			Note: strings.TrimSpace(line), Amount: payload.Amount, Fingerprint: fingerprint,
 			Hash: hashOfNoteID(payload.ID), ExpiresAt: payload.Expires, Issuer: payload.Issuer,
-			Payee: payload.Payee, AcceptedAt: time.Now().Unix(),
+			Payee: payload.Payee, Nonce: nonce, Claim: claim, AcceptedAt: time.Now().Unix(),
 		})
 		accepted++
 	}
@@ -407,7 +504,12 @@ func cmdNoteSync(args []string) error {
 	var kept []heldNote
 	var credited float64
 	for _, note := range p.Received {
-		body, marshalErr := json.Marshal(map[string]string{"note": note.Note})
+		request := map[string]string{"note": note.Note}
+		if note.Claim != "" {
+			request["nonce"] = note.Nonce
+			request["claim"] = note.Claim
+		}
+		body, marshalErr := json.Marshal(request)
 		if marshalErr != nil {
 			kept = append(kept, note)
 			continue
@@ -419,10 +521,18 @@ func cmdNoteSync(args []string) error {
 			continue
 		}
 		var result struct {
-			Credited bool    `json:"credited"`
-			Amount   float64 `json:"amount"`
-			Balance  float64 `json:"balance"`
-			Reason   string  `json:"reason"`
+			Credited    bool    `json:"credited"`
+			Amount      float64 `json:"amount"`
+			Balance     float64 `json:"balance"`
+			Reason      string  `json:"reason"`
+			DoubleSpend *struct {
+				Issuer string `json:"issuer"`
+				NoteID string `json:"note_id"`
+				Claims []struct {
+					Payee string `json:"payee"`
+					Claim string `json:"claim"`
+				} `json:"claims"`
+			} `json:"double_spend"`
 		}
 		if json.Unmarshal(response, &result) != nil {
 			kept = append(kept, note)
@@ -439,6 +549,15 @@ func cmdNoteSync(args []string) error {
 		case "redeemed":
 			fmt.Fprintf(os.Stderr, "✗ %s · already redeemed by someone else — you were given a note that was spent\n",
 				note.Fingerprint)
+			if result.DoubleSpend != nil && len(result.DoubleSpend.Claims) == 2 {
+				// Not an accusation, a proof: two claims on one note, signed by the same payer,
+				// naming two different people. Nobody has to be believed.
+				fmt.Fprintf(os.Stderr, "   proof of double-spend by %s…:\n", result.DoubleSpend.Issuer[:12])
+				for _, c := range result.DoubleSpend.Claims {
+					fmt.Fprintf(os.Stderr, "     signed over to %s… (%s)\n", c.Payee[:12], c.Claim)
+				}
+				fmt.Fprintln(os.Stderr, "   anyone can check those against the issuer's address; neither could be forged.")
+			}
 		case "expired", "unknown":
 			fmt.Fprintf(os.Stderr, "✗ %s · %s\n", note.Fingerprint, result.Reason)
 		default:
