@@ -566,6 +566,36 @@ final class AicoinLedger implements AutoCloseable {
         });
     }
 
+    /**
+     * Records a proven double-spend: two claims on one note, signed by the same payer over two
+     * different payees. Counted against the issuer, and written into the losing wallet's own
+     * transaction log — the person who was defrauded should be able to see it in their history
+     * rather than only in the moment the sync happened to print it.
+     */
+    void recordDoubleSpend(String issuer, String victim, String noteId, double amount) {
+        long nowMillis = Instant.now().toEpochMilli();
+        commands.incr("aicoin:" + TAG + ":double-spends:" + issuer);
+        commands.rpush(txKey(victim), "{\"type\":\"double_spend\",\"amount\":" + Note.formatAmount(amount)
+                + ",\"counterparty\":\"" + issuer + "\",\"note_id\":\"" + noteId + "\""
+                + ",\"at\":" + nowMillis + "}");
+        commands.ltrim(txKey(victim), -TX_LOG_CAP, -1);
+    }
+
+    /** How many proven double-spends stand against a wallet. Public: it is what a rating is made of. */
+    void doubleSpendCount(String address, Consumer<Long> onResult) {
+        commands.get("aicoin:" + TAG + ":double-spends:" + address).whenComplete((value, err) -> {
+            if (err != null || value == null) {
+                onResult.accept(0L);
+                return;
+            }
+            try {
+                onResult.accept(Long.parseLong(value));
+            } catch (NumberFormatException e) {
+                onResult.accept(0L);
+            }
+        });
+    }
+
     /** What the ledger knows about a chain: how much of it is left, and what it is worth a link. */
     void chainState(String chainId, Consumer<Optional<Map<String, String>>> onResult) {
         commands.hgetall(chainKey(chainId)).whenComplete((values, err) -> {

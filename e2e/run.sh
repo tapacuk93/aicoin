@@ -820,6 +820,55 @@ reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t34-c.json'));print(
 [ "$reason" = "False not_issuer" ] && pass "a holder cannot reclaim somebody else's note (only redeem it)" \
   || fail "expected not_issuer, got $reason"
 
+log "--- test 40: a proven double-spend is recorded against the payer and shown to the victim ---"
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" -H "X-Admin-Token: $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"address\":\"$ADDR_DAVE\",\"amount\":2,\"reason\":\"e2e double spend\",\"reference\":\"e2e-ds-1\"}"
+code=$(live_signed_request "$KEY_DAVE" "$ADDR_DAVE" "POST" "/wallet/api/notes/issue" \
+  '{"amounts":[1],"claimed":true}' "$WORKDIR/t40-issue.json")
+ds_note=$(python3 -c "import json;print(json.load(open('$WORKDIR/t40-issue.json'))['notes'][0]['note'])")
+DS_ID=$(python3 -c "
+import base64, json
+n = '$ds_note'.split('.')[0]
+print(json.loads(base64.urlsafe_b64decode(n + '=' * (-len(n) % 4)))['id'])
+")
+sign_claim() {
+  python3 - "$1" "$2" "$3" "$4" <<'PYSIGN'
+import subprocess, sys, tempfile, os
+key, note_id, payee, nonce = sys.argv[1:5]
+message = "aicoin-claim" + chr(10) + note_id + chr(10) + payee + chr(10) + nonce
+with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+    fh.write(message); path = fh.name
+sig = subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", key, "-in", path],
+                     capture_output=True).stdout
+os.unlink(path)
+print(sig.hex())
+PYSIGN
+}
+# Dave signs the same note over to two people — the thing that cannot be prevented, only proven.
+CLAIM_BOB=$(sign_claim "$KEY_DAVE" "$DS_ID" "$ADDR_BOB" "aa11")
+CLAIM_CAROL=$(sign_claim "$KEY_DAVE" "$DS_ID" "$ADDR_CAROL" "bb22")
+live_signed_request "$KEY_BOB" "$ADDR_BOB" "POST" "/wallet/api/notes/redeem" \
+  "{\"note\":\"$ds_note\",\"nonce\":\"aa11\",\"claim\":\"$CLAIM_BOB\"}" "$WORKDIR/t40-bob.json" > /dev/null
+code=$(live_signed_request "$KEY_CAROL" "$ADDR_CAROL" "POST" "/wallet/api/notes/redeem" \
+  "{\"note\":\"$ds_note\",\"nonce\":\"bb22\",\"claim\":\"$CLAIM_CAROL\"}" "$WORKDIR/t40-carol.json")
+claims=$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t40-carol.json'))
+proof = d.get('double_spend') or {}
+print(len(proof.get('claims', [])), proof.get('issuer', '')[:8])
+")
+[ "$claims" = "2 ${ADDR_DAVE:0:8}" ] && pass "carol is handed both claims: a proof signed by dave, not an accusation" \
+  || fail "expected a two-claim proof naming dave, got $claims"
+
+# It is on dave's record, and in carol's own history — not only in the moment it happened.
+rep=$(curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/reputation/$ADDR_DAVE" | python3 -c "import json,sys;print(json.load(sys.stdin)['double_spends'])")
+[ "$rep" = "1" ] && pass "one double-spend stands against that wallet, for anyone to look up" \
+  || fail "expected a count of 1, got $rep"
+seen=$(curl -s "http://127.0.0.1:$PROXY_PORT/admin/wallets/$ADDR_CAROL/transactions" -H "X-Admin-Token: $ADMIN_TOKEN" \
+  | python3 -c "import json,sys;print(any(t.get('type') == 'double_spend' for t in json.load(sys.stdin)['transactions']))")
+[ "$seen" = "True" ] && pass "and it is in the victim's own transaction history" || fail "expected a double_spend entry for carol"
+
 log "--- test 39: a metered call can leave a wallet owing, and it owes until it pays ---"
 KEY_MALLORY="$WORKDIR/mallory.pem"; gen_wallet "$KEY_MALLORY"; ADDR_MALLORY=$(wallet_address "$KEY_MALLORY")
 curl -s -o /dev/null -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" -H "X-Admin-Token: $ADMIN_TOKEN" \
