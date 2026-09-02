@@ -170,11 +170,16 @@ A question is still answered with prose; the operations only appear when you ask
 
 ### What it costs, while it happens
 
+While the call runs, the line rewriting itself is your wallet — polled live, so it drops as each
+turn settles:
+
 ```
 context: 34 files listed, 3 included in full, 18432 chars
-wallet 00c0759c5748… · 42 aicoin
-⠹ asking the panel · every turn is a paid call  1m14s
+987 aicoin  −13
 ```
+
+There is no spinner: what is worth watching during a call that spends money is the money. A
+consortium ticks down turn by turn; a single call holds still until it settles at the end.
 
 ...and when it lands:
 

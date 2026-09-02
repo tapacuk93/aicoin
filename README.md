@@ -95,8 +95,9 @@ turns for you, measured from the consortium responses themselves. `aicoin ais` s
 has cost you and what it failed, `aicoin multi` goes back.
 
 It also does everything the wallet page does — create a wallet, check a balance, claim, transfer,
-issue and revoke tokens — plus `ask` for a single model. While a call runs it shows the wallet and a
-clock; when it lands it shows what the call took out of the balance:
+issue and revoke tokens — plus `ask` for a single model. While a call runs, the line on screen is the wallet
+itself — polled live, dropping as each turn settles — and when it lands it shows what the call took
+out of the balance:
 
 ```
 ◆◆◆◆◇◇◇◇◇◇  15 aicoin spent · 27 left

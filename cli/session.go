@@ -206,9 +206,9 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 	}
 
 	balanceBefore, balanceErr := client.balance(wallet.Address)
-	spin := startSpinner("asking the panel · every turn is a paid call")
+	meter := startCoinMeter(client, wallet.Address, balanceBefore)
 	responseBody, _, err := client.withToken(wallet, "POST", "/consortium", body, nil)
-	spin.finish()
+	meter.finish()
 	if err != nil {
 		return err
 	}
