@@ -590,6 +590,17 @@ final class AicoinLedger implements AutoCloseable {
      * to tell a wallet with a history from a wallet with none, not to publish anybody's dealings.
      */
     void walletSummary(String address, Consumer<Optional<Map<String, Long>>> onResult) {
+        walletSummary(address, new java.util.ArrayList<>(), onResult);
+    }
+
+    /**
+     * As above, and hands back the counterparty addresses it saw — for the caller to ask after
+     * <em>their</em> standing. Counting distinct wallets is not enough on its own: three of them
+     * can be created in a minute, so what matters is whether they are wallets with anything to
+     * lose. The addresses are used and dropped; only counts are ever published.
+     */
+    void walletSummary(String address, List<String> counterpartiesOut,
+                        Consumer<Optional<Map<String, Long>>> onResult) {
         commands.lrange(txKey(address), 0, -1).whenComplete((entries, err) -> {
             if (err != null) {
                 LOG.log(Level.WARNING, "wallet summary failed for " + address, err);
@@ -630,6 +641,7 @@ final class AicoinLedger implements AutoCloseable {
             summary.put("claims", claims);
             summary.put("first_seen", firstSeen);
             summary.put("counterparties", (long) counterparties.size());
+            counterpartiesOut.addAll(counterparties);
             onResult.accept(Optional.of(summary));
         });
     }
@@ -674,6 +686,95 @@ final class AicoinLedger implements AutoCloseable {
                 }
                 onResult.accept(Optional.of(rows));
             });
+        });
+    }
+
+    /**
+     * Makes the loser of a double-spend whole, out of the wallet that did it.
+     *
+     * <p>The victim is credited what they were handed and the double-spender is debited the same,
+     * in one script — a compensation, not a clawback. Nobody else's settled payment is touched;
+     * the money comes from the party who signed the same note over to two people, whose balance
+     * goes negative if it has to. Owing blocks them from spending until it is paid, and their
+     * rating is nought until then either.
+     *
+     * <p>Both sides of it land in both wallets' transaction logs, because a compensation nobody
+     * can see is indistinguishable from nothing happening.
+     */
+    private static final String COMPENSATE_SCRIPT =
+            "local amount = tonumber(ARGV[1]) "
+            + "local victimBalance = tonumber(redis.call('INCRBYFLOAT', KEYS[1], tostring(amount))) "
+            + "local payerBalance = tonumber(redis.call('INCRBYFLOAT', KEYS[2], '-' .. tostring(amount))) "
+            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='double_spend_compensation', amount=amount, "
+            + "  counterparty=ARGV[3], balance_after=victimBalance, at=tonumber(ARGV[2])})) "
+            + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
+            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='double_spend_penalty', amount=amount, "
+            + "  counterparty=ARGV[4], balance_after=payerBalance, at=tonumber(ARGV[2])})) "
+            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
+            + "return tostring(payerBalance)";
+
+    /** Credits the victim and charges the double-spender, atomically. */
+    void compensateDoubleSpend(String victim, String payer, double amount) {
+        long nowMillis = Instant.now().toEpochMilli();
+        commands.eval(COMPENSATE_SCRIPT, ScriptOutputType.VALUE,
+                new String[] {balanceKey(victim), balanceKey(payer), txKey(victim), txKey(payer)},
+                String.valueOf(amount), String.valueOf(nowMillis), payer, victim)
+                .whenComplete((result, err) -> {
+                    if (err != null) {
+                        LOG.log(Level.WARNING, "double-spend compensation failed", err);
+                    }
+                });
+    }
+
+    /**
+     * How many of {@code addresses} are wallets with something to lose: no proven double-spend, not
+     * in debt, and having actually used the thing — bought coins or paid for calls.
+     *
+     * <p>This is what stops "dealt with three different wallets" being worth a point for three
+     * throwaways made in a minute. Bounded by {@code limit}, because it walks other wallets'
+     * records and a rating is looked up in front of somebody waiting to be paid.
+     */
+    void solidCounterparties(List<String> addresses, int limit, Consumer<Long> onResult) {
+        List<String> sample = addresses.size() > limit ? addresses.subList(0, limit) : addresses;
+        if (sample.isEmpty()) {
+            onResult.accept(0L);
+            return;
+        }
+        List<CompletableFuture<Boolean>> pending = new ArrayList<>();
+        for (String address : sample) {
+            CompletableFuture<Boolean> solid = commands.get(balanceKey(address)).toCompletableFuture()
+                    .thenCombine(commands.get("aicoin:" + TAG + ":double-spends:" + address).toCompletableFuture(),
+                            (held, spends) -> {
+                                double balance = held == null ? 0 : Double.parseDouble(held);
+                                return balance >= 0 && (spends == null || "0".equals(spends));
+                            })
+                    .thenCombine(commands.lrange(txKey(address), 0, -1).toCompletableFuture(),
+                            (clean, entries) -> {
+                                if (!clean || entries == null) {
+                                    return false;
+                                }
+                                for (String entry : entries) {
+                                    if (entry.contains("\"type\":\"iap\"") || entry.contains("\"type\":\"debit\"")) {
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            });
+            pending.add(solid);
+        }
+        CompletableFuture.allOf(pending.toArray(new CompletableFuture[0])).whenComplete((ignored, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "counterparty weighing failed", err);
+                onResult.accept(0L);
+                return;
+            }
+            long solid = 0;
+            for (CompletableFuture<Boolean> future : pending) {
+                if (Boolean.TRUE.equals(future.join())) {
+                    solid++;
+                }
+            }
+            onResult.accept(solid);
         });
     }
 

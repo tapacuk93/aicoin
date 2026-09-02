@@ -218,7 +218,14 @@ final class NoteHandler {
             // Counted against the issuer and written into this wallet's own history: being told
             // once, in the moment it happened, is not the same as having a record of it.
             ledger.recordDoubleSpend(note.getIssuer(), holder, note.getId(), note.getAmount());
-            sendJson(ctx, "{\"credited\":false,\"reason\":\"redeemed\""
+            // And the loser is made whole out of the wallet that did it — a compensation, not a
+            // clawback: nobody else's settled payment is touched, the money comes from the party
+            // who signed the same note over to two people, and their balance goes negative if it
+            // has to. Owing blocks them from spending until they pay it back.
+            ledger.compensateDoubleSpend(holder, note.getIssuer(), note.getAmount());
+            sendJson(ctx, "{\"credited\":true,\"compensated\":true"
+                    + ",\"amount\":" + Note.formatAmount(note.getAmount())
+                    + ",\"reason\":\"redeemed\""
                     + ",\"double_spend\":{\"issuer\":\"" + note.getIssuer() + "\""
                     + ",\"note_id\":\"" + note.getId() + "\""
                     + ",\"claims\":[{\"payee\":\"" + redeemedBy + "\",\"claim\":\"" + theirClaim + "\"}"
@@ -317,10 +324,29 @@ final class NoteHandler {
                 sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not reach the ledger");
                 return;
             }
-            ledger.doubleSpendCount(wallet, doubleSpends -> ledger.walletSummary(wallet, summary -> {
+            java.util.List<String> counterparties = new java.util.ArrayList<>();
+            ledger.doubleSpendCount(wallet, doubleSpends -> ledger.walletSummary(wallet, counterparties, summary -> {
                 double held = balance.get();
-                java.util.Map<String, Long> counts = summary.orElse(java.util.Map.of());
+                java.util.Map<String, Long> counts = new java.util.LinkedHashMap<>(summary.orElse(java.util.Map.of()));
                 long now = System.currentTimeMillis();
+                // How many of those counterparties are wallets with something to lose. Bounded:
+                // this walks other wallets' records, and a rating lookup happens in front of
+                // somebody waiting to take a payment.
+                ledger.solidCounterparties(counterparties, MAX_COUNTERPARTIES_WEIGHED, solid -> {
+                    counts.put("solid_counterparties", solid);
+                    respondReputation(ctx, wallet, balance.get(), doubleSpends, counts, now);
+                });
+            }));
+        });
+    }
+
+    /** How many counterparties are looked at when weighing a rating. */
+    private static final int MAX_COUNTERPARTIES_WEIGHED = 10;
+
+    private static void respondReputation(ChannelHandlerContext ctx, String wallet, double held,
+                                           long doubleSpends, java.util.Map<String, Long> counts, long now) {
+        {
+            {
                 int rating = Reputation.score(held, doubleSpends, counts, now);
                 StringBuilder reasons = new StringBuilder("[");
                 boolean first = true;
@@ -338,9 +364,10 @@ final class NoteHandler {
                         + ",\"calls\":" + counts.getOrDefault("calls", 0L)
                         + ",\"counterparties\":" + counts.getOrDefault("counterparties", 0L)
                         + ",\"first_seen\":" + counts.getOrDefault("first_seen", 0L)
+                        + ",\"solid_counterparties\":" + counts.getOrDefault("solid_counterparties", 0L)
                         + ",\"reasons\":" + reasons + "}");
-            }));
-        });
+            }
+        }
     }
 
     static void serveStatus(ChannelHandlerContext ctx, AicoinLedger ledger, String noteHash) {

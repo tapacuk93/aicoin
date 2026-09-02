@@ -22,8 +22,8 @@ final class Reputation {
     /** Old enough that a throwaway would have had to be created a week in advance. */
     private static final long ESTABLISHED_MILLIS = 7L * 24 * 60 * 60 * 1000;
 
-    /** Distinct wallets dealt with before that counts for anything. Three is not a network, but it is not one. */
-    private static final long DEALT_WITH = 3;
+    /** Wallets in good standing dealt with before that counts for anything. Two is not a network, but it is not nobody. */
+    private static final long DEALT_WITH = 2;
 
     private Reputation() {
     }
@@ -59,9 +59,11 @@ final class Reputation {
             // something to fake at scale.
             points++;
         }
-        if (summary.getOrDefault("counterparties", 0L) >= DEALT_WITH) {
-            // Dealings with several different wallets. One wallet paying itself in a circle earns
-            // nothing here, which is the point: this counts distinct counterparties, not volume.
+        if (summary.getOrDefault("solid_counterparties", 0L) >= DEALT_WITH) {
+            // Dealings with several different wallets that themselves have something to lose.
+            // Distinct counterparties alone would be worth a point for three throwaways created in
+            // a minute; what is counted here is wallets that are clean, solvent and have actually
+            // used the thing — which somebody else had to build first.
             points++;
         }
         long firstSeen = summary.getOrDefault("first_seen", 0L);
@@ -95,9 +97,16 @@ final class Reputation {
             reasons.add("has never spent anything on a call");
         }
         long counterparties = summary.getOrDefault("counterparties", 0L);
-        reasons.add(counterparties == 0
-                ? "has never dealt with another wallet"
-                : "has dealt with " + counterparties + " different wallet" + (counterparties == 1 ? "" : "s"));
+        long solid = summary.getOrDefault("solid_counterparties", 0L);
+        if (counterparties == 0) {
+            reasons.add("has never dealt with another wallet");
+        } else if (solid == 0) {
+            reasons.add("has dealt with " + counterparties + " wallet" + (counterparties == 1 ? "" : "s")
+                    + ", none of them established");
+        } else {
+            reasons.add("has dealt with " + counterparties + " wallet" + (counterparties == 1 ? "" : "s")
+                    + ", " + solid + " of them established");
+        }
         long firstSeen = summary.getOrDefault("first_seen", 0L);
         if (firstSeen > 0) {
             long days = (nowMillis - firstSeen) / (24 * 60 * 60 * 1000);
