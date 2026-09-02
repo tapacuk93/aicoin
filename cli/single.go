@@ -117,7 +117,8 @@ func askOne(client *Client, wallet *Wallet, record *stats, provider, model, back
 	requestHeaders := chatHeaders(provider)
 	requestHeaders["X-AI"] = provider
 	startBalance, _ := client.balance(wallet.Address)
-	meter := startCoinMeter(client, wallet.Address, startBalance)
+	price, _ := client.priceUSD()
+	meter := startCoinMeter(client, wallet.Address, startBalance, price)
 	responseBody, headers, err := client.withToken(wallet, "POST", path, body, requestHeaders)
 	meter.finish()
 	if err != nil {
@@ -147,9 +148,10 @@ func askOne(client *Client, wallet *Wallet, record *stats, provider, model, back
 		return 0, nil
 	}
 	if balance, balErr := client.balance(wallet.Address); balErr == nil {
-		fmt.Fprintf(os.Stderr, "\n%s · %s aicoin · %s left\n", provider, charged, formatCoins(balance))
+		fmt.Fprintf(os.Stderr, "\n%s · %s aicoin%s · %s left%s\n", provider, charged,
+			bracketed(usd(float64(coins), price)), formatCoins(balance), bracketed(usd(balance, price)))
 	} else {
-		fmt.Fprintf(os.Stderr, "\n%s · %s aicoin\n", provider, charged)
+		fmt.Fprintf(os.Stderr, "\n%s · %s aicoin%s\n", provider, charged, bracketed(usd(float64(coins), price)))
 	}
 	return coins, nil
 }
@@ -221,12 +223,13 @@ func cmdMulti(args []string) error {
 // cmdAis prints which models have been used, what each cost, and what each failed.
 func cmdAis(args []string) error {
 	fs := flag.NewFlagSet("ais", flag.ExitOnError)
-	_, walletPath := common(fs)
+	url, walletPath := common(fs)
 	if err := parse(fs, args); err != nil {
 		return err
 	}
 	record := loadStats(*walletPath)
-	fmt.Print(record.render())
+	price, _ := newClient(*url, 30*time.Second).priceUSD()
+	fmt.Print(record.render(price))
 	fmt.Fprintf(os.Stderr, "\nmode: %s\n", record.Mode)
 	return nil
 }

@@ -142,7 +142,7 @@ func TestAnUnreadableRecordIsNotFatal(t *testing.T) {
 func TestStatsTableNamesWhatItMeasured(t *testing.T) {
 	record := loadStats(filepath.Join(t.TempDir(), "wallet.json"))
 	record.recordConsortium(consortiumFixture([]string{"anthropic", "kimi"}, "anthropic", 1))
-	table := record.render()
+	table := record.render(0.0055)
 	for _, want := range []string{"anthropic", "kimi", "carried", "single mode would use"} {
 		if !strings.Contains(table, want) {
 			t.Errorf("the table should mention %q:\n%s", want, table)

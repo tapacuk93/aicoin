@@ -163,7 +163,25 @@ apply? [y/N]
 - **An open detail is decided, not asked about.** "Create an empty file" with no name given gets a
   file with a sensible name and a line saying what it chose — a missing filename is a decision to
   make, not a reason to stop and ask.
-- Only `write` and `delete` exist. There is no shell, and the proxy has no filesystem at all — the
+- **It can run things too.** Ask it to build, test or run something and the plan includes the
+  commands, shown verbatim — that is what you are consenting to, so it is never summarised:
+
+  ```
+  the panel proposes 3 change(s) in .:
+    create   HelloWorld.java (118 bytes)
+    run      javac HelloWorld.java
+             (compile the Java source)
+    run      java HelloWorld
+             (run the compiled program)
+  apply, and run 2 command(s)? [y/N]
+  ```
+
+  Files are written before anything runs, so one block can create a file and then compile it. A
+  command that fails stops the ones after it — they were written expecting it to have worked.
+  Commands run through `sh` in the working directory with no stdin, and are stopped after five
+  minutes. **`-y` covers running as well as writing**: it means letting the panel run shell
+  commands on your machine unattended.
+- `write`, `delete` and `run` are all there is. The proxy has no filesystem and no shell — the
   acting happens here, on your machine, where the directory is.
 
 A question is still answered with prose; the operations only appear when you asked for a change.
@@ -175,7 +193,7 @@ turn settles:
 
 ```
 context: 34 files listed, 3 included in full, 18432 chars
-987 aicoin  −13
+987 aicoin · $5.43  −13 ($0.07)
 ```
 
 There is no spinner: what is worth watching during a call that spends money is the money. A
@@ -185,8 +203,11 @@ consortium ticks down turn by turn; a single call holds still until it settles a
 
 ```
 settled — a whole round with no comments | 2 round(s), 13 calls | panel anthropic,openai,google,kimi, editor anthropic
-◆◆◆◆◇◇◇◇◇◇  15 aicoin spent · 27 left
+◆◆◆◆◇◇◇◇◇◇  15 aicoin spent ($0.08) · 27 left ($0.15)
 ```
+
+Every coin figure is also given in dollars, at `GET /price` — which is what calls through this
+proxy have actually cost on average, not a market rate. There is no market.
 
 The bar is the share of the wallet this call took. It takes minutes, and **every turn is a paid
 call** — a four-model panel over two rounds is 13 calls and is billed as 13.
@@ -219,11 +240,11 @@ was empty are not held against anyone.
 
 ```
 $ aicoin ais
-model         aicoin   share  carried failed  comments
-anthropic        118     54%       37      1         9
-kimi              54     25%       21      6        14
-openai            46     21%       19      0         4
-total            218
+model         aicoin       usd   share  carried failed  comments
+anthropic        118     $0.65     54%       37      1         9
+kimi              54     $0.30     25%       21      6        14
+openai            46     $0.25     21%       19      0         4
+total            218     $1.20
 
 single mode would use anthropic — carried 37 turns here, 97% of them without failing
 ```

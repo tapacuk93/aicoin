@@ -190,7 +190,7 @@ func (s *stats) best() (provider string, why string) {
 
 // render is the table behind `aicoin ais`: which models have been used, what they cost, and what
 // they failed — the evidence for whatever single mode picked.
-func (s *stats) render() string {
+func (s *stats) render(price float64) string {
 	if len(s.Providers) == 0 {
 		return "no model has been used yet — ask something first\n"
 	}
@@ -210,23 +210,28 @@ func (s *stats) render() string {
 		total += entry.Coins
 	}
 	var out strings.Builder
-	out.WriteString(fmt.Sprintf("%-12s %8s %7s %8s %6s %9s\n",
-		"model", "aicoin", "share", "carried", "failed", "comments"))
+	out.WriteString(fmt.Sprintf("%-12s %8s %9s %7s %8s %6s %9s\n",
+		"model", "aicoin", "usd", "share", "carried", "failed", "comments"))
 	for _, name := range names {
 		entry := s.Providers[name]
 		share := ""
 		if total > 0 {
 			share = fmt.Sprintf("%.0f%%", float64(entry.Coins)/float64(total)*100)
 		}
-		out.WriteString(fmt.Sprintf("%-12s %8d %7s %8d %6d %9d\n",
-			name, entry.Coins, share, entry.carried(), entry.Failures, entry.Comments))
+		out.WriteString(fmt.Sprintf("%-12s %8d %9s %7s %8d %6d %9d\n",
+			name, entry.Coins, usd(float64(entry.Coins), price), share,
+			entry.carried(), entry.Failures, entry.Comments))
 	}
-	out.WriteString(fmt.Sprintf("%-12s %8d\n", "total", total))
+	out.WriteString(fmt.Sprintf("%-12s %8d %9s\n", "total", total, usd(float64(total), price)))
 	chosen, why := s.best()
 	if chosen != "" {
 		out.WriteString(fmt.Sprintf("\nsingle mode would use %s — %s\n", chosen, why))
 	}
 	out.WriteString("\ncarried = turns completed; comments = reviews that found something.\n" +
 		"None of it says whether an answer was good: that is not in what the proxy reports.\n")
+	if price > 0 {
+		out.WriteString(fmt.Sprintf("usd is at the current price of %s a coin — what these calls\n"+
+			"have cost on average, not a market rate.\n", usd(1, price)))
+	}
 	return out.String()
 }
