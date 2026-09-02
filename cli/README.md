@@ -250,22 +250,35 @@ between two questions is seen as it is now. Inside a session:
 
 | | |
 |---|---|
-| `` `f <glob>` `` | include these files' contents from now on (blank clears) |
-| `` `panel <a,b>` `` | which models sit on the panel (blank for all) |
-| `` `rounds <n>` `` | cap the review rounds |
-| `` `v` `` | show or hide each round's comments |
-| `` `files` `` | what the panel can currently see |
-| `` `balance` `` | what the wallet holds |
-| `` `single [model]` `` | one model per question instead of the panel |
-| `` `multi` `` | back to the panel |
-| `` `ais` `` | which models have been used and what each cost |
-| `` `auto` `` | apply proposed changes without asking (off by default) |
-| `` `claim` `` | take the faucet's grant, when the wallet runs out mid-session |
-| `` `reset` `` | forget this session's exchanges |
-| `` `exit` `` | leave — Ctrl-D does too |
+| `f <glob>` | include these files' contents from now on (blank clears) |
+| `panel <a,b>` | which models sit on the panel (blank for all) |
+| `rounds <n>` | cap the review rounds |
+| `v` | show or hide each round's comments |
+| `files` | what the panel can currently see |
+| `balance` | what the wallet holds |
+| `single [model]` | one model per question instead of the panel |
+| `multi` | back to the panel |
+| `ais` | which models have been used and what each cost |
+| `auto` | apply proposed changes without asking (off by default) |
+| `claim` | take the faucet's grant, when the wallet runs out mid-session |
+| `reset` | forget this session's exchanges |
+| `exit` | leave — Ctrl-D does too |
 
-**Subcommands go in backticks**, so everything else is a question: `` `single` `` switches mode,
-while *single out the slowest handler* asks the panel something. (A leading `/` works too.)
+**A line that is exactly one of these is a subcommand; everything else is a question.** `single`
+switches mode, while *single out the slowest handler* asks the panel — the trailing words are not
+something `single` could take, so it stays a question. The same goes for arguments that do not fit:
+`rounds 2` is a command, `rounds of review — how many are useful?` is not, and `single gpt7` is a
+question because that is not a model this proxy knows.
+
+When you want to settle it yourself:
+
+| | |
+|---|---|
+| `\single` | a backslash forces a question — ask the panel about the word itself |
+| `` `single` `` or `/single` | backticks or a slash force a command, for arguments this would not otherwise recognise (`` `f some odd name` ``) |
+
+The doubt always resolves towards a question, because a question costs a call while a mistaken
+command could change the mode or the files under you.
 
 Every question is paid for separately, and the session prints its running total when you leave.
 
