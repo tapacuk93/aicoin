@@ -108,7 +108,7 @@ func contains(list []string, value string) bool {
 // consortium answer gets.
 // Returns what the call was charged, so a session can keep its running total.
 func askOne(client *Client, wallet *Wallet, record *stats, provider, model, background, question string,
-	root string, auto bool, confirm func(string) bool) (int64, error) {
+	root string, auto bool, confirm func(string) bool, vault *secretVault) (int64, error) {
 
 	path, body, err := chatBody(provider, model, singleSystem(background), question, 4000)
 	if err != nil {
@@ -142,7 +142,7 @@ func askOne(client *Client, wallet *Wallet, record *stats, provider, model, back
 	} else if root == "" {
 		fmt.Println(text)
 	} else {
-		deliverAnswer(root, text, auto, confirm)
+		deliverAnswer(root, text, auto, confirm, vault)
 	}
 	if charged == "" {
 		return 0, nil

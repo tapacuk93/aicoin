@@ -101,7 +101,7 @@ func TestThePlanSaysWhetherItCreatesOrOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := describe(planned)
+	text := describe(planned, nil)
 	if !strings.Contains(text, "create   new.txt") {
 		t.Errorf("a new file should read as created: %s", text)
 	}
@@ -141,12 +141,12 @@ func TestNothingIsWrittenWithoutApproval(t *testing.T) {
 	root := t.TempDir()
 	answer := "```aicoin-actions\n[{\"op\":\"write\",\"path\":\"a.txt\",\"content\":\"x\"}]\n```"
 
-	deliverAnswer(root, answer, false, func(string) bool { return false })
+	deliverAnswer(root, answer, false, func(string) bool { return false }, nil)
 	if _, err := os.Stat(filepath.Join(root, "a.txt")); !os.IsNotExist(err) {
 		t.Fatal("a declined plan must write nothing")
 	}
 
-	deliverAnswer(root, answer, false, func(string) bool { return true })
+	deliverAnswer(root, answer, false, func(string) bool { return true }, nil)
 	if _, err := os.Stat(filepath.Join(root, "a.txt")); err != nil {
 		t.Fatal("an approved plan should have been applied")
 	}
@@ -156,7 +156,7 @@ func TestAutoSkipsTheQuestionEntirely(t *testing.T) {
 	root := t.TempDir()
 	answer := "```aicoin-actions\n[{\"op\":\"write\",\"path\":\"b.txt\",\"content\":\"x\"}]\n```"
 	asked := false
-	deliverAnswer(root, answer, true, func(string) bool { asked = true; return false })
+	deliverAnswer(root, answer, true, func(string) bool { asked = true; return false }, nil)
 	if asked {
 		t.Fatal("-y means do not ask")
 	}
@@ -252,7 +252,7 @@ func TestRunActionsAreParsedAndDescribedVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := describe(planned)
+	text := describe(planned, nil)
 	// The command is what is being consented to, so it is shown exactly, not summarised.
 	if !strings.Contains(text, "go test ./...") || !strings.Contains(text, "check it passes") {
 		t.Fatalf("the plan should show the command and its reason: %s", text)
@@ -308,7 +308,7 @@ func TestNothingRunsWithoutApproval(t *testing.T) {
 	root := t.TempDir()
 	answer := "```aicoin-actions\n[{\"op\":\"run\",\"command\":\"touch ran.txt\"}]\n```"
 	var asked string
-	deliverAnswer(root, answer, false, func(prompt string) bool { asked = prompt; return false })
+	deliverAnswer(root, answer, false, func(prompt string) bool { asked = prompt; return false }, nil)
 
 	if _, err := os.Stat(filepath.Join(root, "ran.txt")); !os.IsNotExist(err) {
 		t.Fatal("a declined plan must not run anything")

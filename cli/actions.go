@@ -155,10 +155,19 @@ func planActions(root string, actions []action) ([]plannedAction, error) {
 	return planned, nil
 }
 
+// writtenSize is how big the file will actually be — with any withheld values back in it. The
+// content is not printed either way, so the size can tell the truth about what lands on disk.
+func writtenSize(entry plannedAction, vault *secretVault) int {
+	if vault == nil {
+		return len(entry.Content)
+	}
+	return len(vault.reveal(entry.Content))
+}
+
 // describe renders the plan for a human to approve. Replacements and deletions are named as such:
 // the difference between creating a file and overwriting one that already has something in it is
 // the whole reason this is confirmed rather than applied.
-func describe(planned []plannedAction) string {
+func describe(planned []plannedAction, vault *secretVault) string {
 	var out strings.Builder
 	for _, entry := range planned {
 		switch {
@@ -174,9 +183,9 @@ func describe(planned []plannedAction) string {
 			out.WriteString(fmt.Sprintf("  delete   %s (%d bytes)\n", entry.Path, entry.OldSize))
 		case entry.Existing:
 			out.WriteString(fmt.Sprintf("  replace  %s (%d bytes, was %d)\n",
-				entry.Path, len(entry.Content), entry.OldSize))
+				entry.Path, writtenSize(entry, vault), entry.OldSize))
 		default:
-			out.WriteString(fmt.Sprintf("  create   %s (%d bytes)\n", entry.Path, len(entry.Content)))
+			out.WriteString(fmt.Sprintf("  create   %s (%d bytes)\n", entry.Path, writtenSize(entry, vault)))
 		}
 	}
 	return out.String()
@@ -189,7 +198,7 @@ func describe(planned []plannedAction) string {
 // something in them, and it is wrong often enough to make an unattended `rm`/overwrite a bad
 // trade. `-y` (or `/auto` in a session) is there for people who have decided otherwise, and a
 // non-interactive run without it prints the plan and does nothing, because there is nobody to ask.
-func deliverAnswer(root, answer string, auto bool, confirm func(string) bool) {
+func deliverAnswer(root, answer string, auto bool, confirm func(string) bool, vault *secretVault) {
 	actions, ok := parseActions(answer)
 	if !ok {
 		fmt.Println(answer)
@@ -209,7 +218,11 @@ func deliverAnswer(root, answer string, auto bool, confirm func(string) bool) {
 			runs++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "the panel proposes %d change(s) in %s:\n%s", len(planned), root, describe(planned))
+	// The plan shows references, never values: a plan is printed, and scrollback is forever.
+	fmt.Fprintf(os.Stderr, "the panel proposes %d change(s) in %s:\n%s", len(planned), root, describe(planned, vault))
+	if secrets := secretsInPlan(planned, vault); secrets > 0 {
+		fmt.Fprintf(os.Stderr, "  (%d withheld value(s) put back in on applying)\n", secrets)
+	}
 	prompt := "apply? [y/N] "
 	if runs > 0 {
 		// Naming it: agreeing to a file being written and agreeing to a shell command running are
@@ -220,7 +233,7 @@ func deliverAnswer(root, answer string, auto bool, confirm func(string) bool) {
 		fmt.Fprintln(os.Stderr, "nothing was written")
 		return
 	}
-	if err := applyActions(root, planned); err != nil {
+	if err := applyActions(root, revealPlan(planned, vault)); err != nil {
 		fmt.Fprintf(os.Stderr, "aicoin: %v\n", err)
 		return
 	}
@@ -230,6 +243,33 @@ func deliverAnswer(root, answer string, auto bool, confirm func(string) bool) {
 // runTimeout bounds a single command. Long enough for a build or a test run, short enough that a
 // command waiting on input nobody is going to type does not hold the session open forever.
 const runTimeout = 5 * time.Minute
+
+// secretsInPlan counts the withheld values this plan will put back, without naming any of them.
+func secretsInPlan(planned []plannedAction, vault *secretVault) int {
+	if vault == nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range planned {
+		count += vault.used(entry.Content) + vault.used(entry.Command)
+	}
+	return count
+}
+
+// revealPlan substitutes the real values into what is about to be written or run — the last moment
+// before it leaves this process, and the first time the values have been anywhere near the answer.
+func revealPlan(planned []plannedAction, vault *secretVault) []plannedAction {
+	if vault == nil {
+		return planned
+	}
+	revealed := make([]plannedAction, len(planned))
+	for i, entry := range planned {
+		entry.Content = vault.reveal(entry.Content)
+		entry.Command = vault.reveal(entry.Command)
+		revealed[i] = entry
+	}
+	return revealed
+}
 
 // applyActions carries out an approved plan: every file change first, then the commands, in the
 // order they were given. That order is what lets one block write a file and then compile it.

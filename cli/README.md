@@ -216,6 +216,42 @@ The answer goes to **stdout** and all of the above to stderr, so `aicoin "..." >
 you the answer and nothing else. `-v` prints each round's comments; `-json` prints the proxy's whole
 response.
 
+## Secrets
+
+Everything after `$$` on a line is a secret. It never leaves this machine.
+
+```
+$ aicoin 'create a .env with STRIPE_KEY set to $$sk-live-9f3aQ7zz'
+1 value(s) withheld — the panel sees a reference, not the value
+the panel proposes 1 change(s) in .:
+  create   .env (36 bytes)
+  (1 withheld value(s) put back in on applying)
+applied 1 change(s)
+
+$ cat .env
+STRIPE_KEY=sk-live-9f3aQ7zz
+```
+
+The value is taken out before anything is sent — out of the question, out of the file contents
+pulled in with `-f`, out of the session history — and replaced with `{{SECRET_1}}`. The model is
+told the reference stands for something it will not be shown, and that writing the reference is how
+the value gets where it belongs; this CLI puts the real text back on this side, at the moment the
+file is written or the command is run.
+
+So the proxy sees the reference. Every panelist sees the reference. The shared record that four
+models read over several rounds has the reference in it. The value exists in one process's memory,
+and in the file it was asked to end up in.
+
+- **The plan shows the reference, not the value** — a plan is printed, and scrollback is forever.
+  The byte count is the size the file will actually be, since that number gives nothing away.
+- **The same value twice is one secret.** Two references would tell the model there are two values,
+  which is itself something it does not need to know.
+- **Nothing is remembered.** The vault lives for one command or one session, and is never written
+  to the stats file, the history, or anywhere else.
+- **The marker is literal.** `what does $$ mean in a shell?` withholds the rest of that question —
+  the rule fails towards withholding, which is the right direction for a rule about secrets, but it
+  is worth knowing before you type it.
+
 ## One model, or all of them
 
 A consortium is one paid call per panelist per round. That is the right price for a question worth

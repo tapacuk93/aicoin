@@ -90,6 +90,10 @@ With a directory attached the call is **led** by one model rather than drafted b
 the files in front of it, four independent drafts are four re-readings of the same material, billed
 four times, and they converge anyway — so one leads and the rest improve its answer round by round.
 
+Anything after `$$` on a line is a secret: it is replaced with a reference before the question is
+sent, and put back only when a file is written or a command is run on your machine. The proxy and
+every model see `{{SECRET_1}}`; the key itself never leaves.
+
 `aicoin single` switches to one model per question — the panel is one paid call per member per
 round, which is the wrong price for a small request — and picks whichever model has carried the most
 turns for you, measured from the consortium responses themselves. `aicoin ais` shows what each model
