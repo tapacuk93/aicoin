@@ -722,10 +722,6 @@ func parseConsortium(body []byte) (*consortiumResult, error) {
 	return &result, nil
 }
 
-func jsonBytes(value any) ([]byte, error) {
-	return json.Marshal(value)
-}
-
 // howItWent is the one-line summary printed after a consortium call: whether it settled, how many
 // rounds and calls it took, and which shape it ran in.
 func howItWent(result *consortiumResult) string {

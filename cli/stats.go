@@ -100,7 +100,7 @@ func (s *stats) save() error {
 	return os.WriteFile(s.path, append(data, '\n'), 0o600)
 }
 
-func (s *stats) for_(provider string) *providerStats {
+func (s *stats) entryFor(provider string) *providerStats {
 	if s.Providers[provider] == nil {
 		s.Providers[provider] = &providerStats{}
 	}
@@ -113,24 +113,24 @@ func (s *stats) for_(provider string) *providerStats {
 // every round, the editor merged and revised, and `errors` names who failed at what.
 func (s *stats) recordConsortium(result *consortiumResult) {
 	for _, provider := range result.Panel {
-		entry := s.for_(provider)
+		entry := s.entryFor(provider)
 		// One review per round, plus — for whoever wrote the answer — the draft and the revisions.
 		entry.Turns += result.Rounds
 		entry.Reviews += result.Rounds
 	}
 	if result.Editor != "" {
-		editor := s.for_(result.Editor)
+		editor := s.entryFor(result.Editor)
 		editor.Led++
 		// The draft (or merge), plus one revision per round that did not settle.
 		editor.Turns++
 	}
 	for _, review := range result.Reviews {
 		if !review.Clean {
-			s.for_(review.Provider).Comments++
+			s.entryFor(review.Provider).Comments++
 		}
 	}
 	for provider, coins := range result.Spend {
-		s.for_(provider).Coins += coins
+		s.entryFor(provider).Coins += coins
 	}
 	for _, failure := range result.Errors {
 		// An empty wallet is not the model's fault and must not count against it: the turn was
@@ -138,12 +138,12 @@ func (s *stats) recordConsortium(result *consortiumResult) {
 		if strings.Contains(failure.Error, "insufficient balance") {
 			continue
 		}
-		s.for_(failure.Provider).Failures++
+		s.entryFor(failure.Provider).Failures++
 	}
 }
 
 func (s *stats) recordSingle(provider string, ok bool, coins int64) {
-	entry := s.for_(provider)
+	entry := s.entryFor(provider)
 	entry.Turns++
 	entry.Led++
 	entry.Coins += coins

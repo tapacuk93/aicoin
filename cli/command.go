@@ -94,7 +94,7 @@ func looksLikeCommand(line string) bool {
 	case noArgs:
 		return len(args) == 0
 	case optionalProvider:
-		return len(args) == 0 || (len(args) == 1 && contains(ChatProviders, strings.ToLower(args[0])))
+		return len(args) == 0 || (len(args) == 1 && contains(chatProviders, strings.ToLower(args[0])))
 	case optionalPanel:
 		if len(args) == 0 {
 			return true
@@ -103,7 +103,7 @@ func looksLikeCommand(line string) bool {
 			return false
 		}
 		for _, name := range strings.Split(args[0], ",") {
-			if !contains(ChatProviders, strings.ToLower(strings.TrimSpace(name))) {
+			if !contains(chatProviders, strings.ToLower(strings.TrimSpace(name))) {
 				return false
 			}
 		}

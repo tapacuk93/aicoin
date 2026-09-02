@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -46,7 +47,6 @@ type sessionState struct {
 	verbose   bool
 	auto      bool
 	record    *stats
-	url       string
 	reader    *bufio.Reader
 	history   []exchange
 	spent     int64
@@ -89,7 +89,6 @@ func runSession(dir string, url string, walletPath string, state *sessionState) 
 	}
 	state.dir = absolute
 	state.record = loadStats(walletPath)
-	state.url = url
 
 	wallet, err := loadWallet(walletPath)
 	if err != nil {
@@ -200,7 +199,7 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 	if s.rounds > 0 {
 		request["max_rounds"] = s.rounds
 	}
-	body, err := jsonBytes(request)
+	body, err := json.Marshal(request)
 	if err != nil {
 		return err
 	}
@@ -379,10 +378,9 @@ func (s *sessionState) command(line string, client *Client, wallet *Wallet) (boo
 	case "single":
 		s.record.Mode = modeSingle
 		if rest != "" {
-			pinned := strings.ToLower(rest)
-			if !contains(ChatProviders, pinned) {
-				return false, fmt.Errorf("%q is not a model this proxy can chat with (%s)",
-					pinned, strings.Join(ChatProviders, ", "))
+			pinned, err := pinProvider(rest)
+			if err != nil {
+				return false, err
 			}
 			s.record.SingleProvider = pinned
 		} else {
