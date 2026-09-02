@@ -44,6 +44,8 @@ type sessionState struct {
 	rounds    int
 	budget    int
 	verbose   bool
+	auto      bool
+	reader    *bufio.Reader
 	history   []exchange
 	spent     int64
 	turns     int
@@ -101,6 +103,7 @@ func runSession(dir string, url string, walletPath string, state *sessionState) 
 	}
 
 	reader := bufio.NewReader(os.Stdin)
+	state.reader = reader
 	for {
 		fmt.Fprint(os.Stderr, "\naicoin ▸ ")
 		line, err := reader.ReadString('\n')
@@ -145,7 +148,7 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 	if err != nil {
 		return err
 	}
-	background := gathered.Text
+	background := gathered.Text + "\n\n" + actionProtocol
 	if history := s.historyText(); history != "" {
 		background = strings.TrimSpace(background + "\n\n" + history)
 	}
@@ -184,7 +187,7 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 		return nil
 	}
 
-	fmt.Println(parsed.Answer)
+	deliverAnswer(s.dir, parsed.Answer, s.auto, s.confirm)
 	if s.verbose {
 		for _, review := range parsed.Reviews {
 			if review.Clean {
@@ -194,9 +197,7 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 			fmt.Fprintf(os.Stderr, "\nround %d — %s:\n%s\n", review.Round, review.Provider, review.Comments)
 		}
 	}
-	for _, failure := range parsed.Errors {
-		fmt.Fprintf(os.Stderr, "! %s failed at the %s turn: %s\n", failure.Provider, failure.Stage, failure.Error)
-	}
+	reportFailures(parsed)
 
 	s.history = append(s.history, exchange{Question: question, Answer: parsed.Answer})
 	s.spent += parsed.CoinsCharged
@@ -222,12 +223,30 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 	return nil
 }
 
+// confirm asks the yes/no question on the session's own input stream, so the answer comes from the
+// same place the questions do. Piped input is not asked at all — the next line is the next
+// question, not consent to overwrite a file.
+func (s *sessionState) confirm(prompt string) bool {
+	if !stdinIsTTY() {
+		fmt.Fprintln(os.Stderr, "(not a terminal — nothing applied; start the session with -y to apply without asking)")
+		return false
+	}
+	fmt.Fprint(os.Stderr, prompt)
+	line, err := s.reader.ReadString('\n')
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(line), "y")
+}
+
 const sessionHelp = `  /f <glob>        include these files' contents in every question (blank to clear)
   /panel <a,b>     which models sit on the panel (blank for all of them)
   /rounds <n>      cap the review rounds
   /v               show or hide each round's comments
   /files           what the panel can currently see
   /balance         what the wallet holds
+  /auto            apply proposed file changes without asking (currently off)
+  /claim           take the free-coin faucet's grant
   /reset           forget this session's exchanges
   /help            this
   /exit            leave (Ctrl-D does too)`
@@ -286,6 +305,19 @@ func (s *sessionState) command(line string, client *Client, wallet *Wallet) (boo
 	case "/v":
 		s.verbose = !s.verbose
 		fmt.Fprintf(os.Stderr, "round comments: %v\n", s.verbose)
+	case "/auto":
+		s.auto = !s.auto
+		if s.auto {
+			fmt.Fprintln(os.Stderr, "file changes will be applied without asking")
+		} else {
+			fmt.Fprintln(os.Stderr, "file changes will be confirmed first")
+		}
+	case "/claim":
+		amount, balance, err := claimCoins(client, wallet)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(os.Stderr, "claimed %s aicoin — %s in the wallet\n", formatCoins(amount), formatCoins(balance))
 	case "/reset":
 		s.history = nil
 		fmt.Fprintln(os.Stderr, "this session's exchanges are forgotten")
