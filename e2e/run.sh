@@ -820,6 +820,58 @@ reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t34-c.json'));print(
 [ "$reason" = "False not_issuer" ] && pass "a holder cannot reclaim somebody else's note (only redeem it)" \
   || fail "expected not_issuer, got $reason"
 
+log "--- test 37: a hash chain — one preloaded secret standing in for a purse of notes ---"
+# Alice picks a seed and hashes it 5 times. Only the tip goes to the ledger; the seed never leaves.
+read -r CHAIN_TIP LINK3 LINK5 <<<"$(python3 -c "
+import hashlib
+seed = 'aa' * 32
+def h(v): return hashlib.sha256(v.encode()).hexdigest()
+links = [seed]
+for _ in range(5):
+    links.append(h(links[-1]))
+# links[5] is the tip; links[2] is what paying 3 of the 5 looks like
+print(links[5], links[2], links[5])
+")"
+# Alice has spent most of her claim by now; the operator tops her up with the endpoint that exists
+# for exactly that.
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" -H "X-Admin-Token: $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"address\":\"$ADDR_ALICE\",\"amount\":5,\"reason\":\"e2e chain test\",\"reference\":\"e2e-chain-1\"}"
+bal_alice_before=$(balance_of "$ADDR_ALICE")
+code=$(live_signed_request "$KEY_ALICE" "$ADDR_ALICE" "POST" "/wallet/api/chains/open" \
+  "{\"tip\":\"$CHAIN_TIP\",\"links\":5,\"per_link\":1}" "$WORKDIR/t37-open.json")
+bal_alice_after=$(balance_of "$ADDR_ALICE")
+reserved=$(python3 -c "print(round(float('$bal_alice_before') - float('$bal_alice_after'), 6))")
+[ "$code" = "200" ] && [ "$reserved" = "5.0" ] && pass "5 aicoin reserved against a chain the ledger only knows the tip of" \
+  || fail "expected a 5-coin reservation, got code=$code reserved=$reserved: $(cat "$WORKDIR/t37-open.json")"
+
+# Bob was handed link 2 offline — worth three links — and hashes forward to prove it.
+bal_bob_before=$(balance_of "$ADDR_BOB")
+code=$(live_signed_request "$KEY_BOB" "$ADDR_BOB" "POST" "/wallet/api/chains/redeem" \
+  "{\"chain\":\"$CHAIN_TIP\",\"preimage\":\"$LINK3\",\"steps\":3}" "$WORKDIR/t37-redeem.json")
+bal_bob_after=$(balance_of "$ADDR_BOB")
+gained=$(python3 -c "print(round(float('$bal_bob_after') - float('$bal_bob_before'), 6))")
+[ "$code" = "200" ] && [ "$gained" = "3.0" ] && pass "one link paid 3 aicoin, proved by hashing forward" \
+  || fail "expected 3 aicoin, got code=$code gained=$gained: $(cat "$WORKDIR/t37-redeem.json")"
+
+# The tip advanced, so the same link cannot be spent again — by anybody.
+code=$(live_signed_request "$KEY_CAROL" "$ADDR_CAROL" "POST" "/wallet/api/chains/redeem" \
+  "{\"chain\":\"$CHAIN_TIP\",\"preimage\":\"$LINK3\",\"steps\":3}" "$WORKDIR/t37-again.json")
+reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t37-again.json'));print(d.get('credited'), d.get('reason'))")
+[ "$reason" = "False bad_preimage" ] && pass "the tip advanced: the same link is spent, for everyone" \
+  || fail "expected bad_preimage on a replay, got $reason"
+
+# What is left is what was not paid, and the ledger says so.
+remaining=$(curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/chains/status/$CHAIN_TIP" | python3 -c "import json,sys;print(json.load(sys.stdin)['remaining'])")
+[ "$remaining" = "2" ] && pass "2 links left of 5" || fail "expected 2 remaining, got $remaining"
+
+# A link from somewhere else does not fit this chain, however well-formed it is.
+code=$(live_signed_request "$KEY_BOB" "$ADDR_BOB" "POST" "/wallet/api/chains/redeem" \
+  "{\"chain\":\"$CHAIN_TIP\",\"preimage\":\"$(python3 -c "print('bb'*32)")\",\"steps\":1}" "$WORKDIR/t37-bad.json")
+reason=$(python3 -c "import json;d=json.load(open('$WORKDIR/t37-bad.json'));print(d.get('reason'))")
+[ "$reason" = "bad_preimage" ] && pass "a preimage that does not hash to the tip is refused" \
+  || fail "expected bad_preimage, got $reason"
+
 log "--- test 36: a note made out to one wallet cannot be redeemed by another ---"
 code=$(live_signed_request "$KEY_ALICE" "$ADDR_ALICE" "POST" "/wallet/api/notes/issue" \
   "{\"amounts\":[1],\"payee\":\"$ADDR_BOB\"}" "$WORKDIR/t36-issue.json")

@@ -189,6 +189,20 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             requireLiveSignature(ctx, request, body, address -> NoteHandler.serveReclaim(ctx, body, ledger, address));
             return;
         }
+        if (request.method() == HttpMethod.POST && "/wallet/api/chains/open".equals(path)) {
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> NoteHandler.serveChainOpen(ctx, body, ledger, address));
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/wallet/api/chains/redeem".equals(path)) {
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> NoteHandler.serveChainRedeem(ctx, body, ledger, address));
+            return;
+        }
+        if (request.method() == HttpMethod.GET && path.startsWith("/wallet/api/chains/status/")) {
+            NoteHandler.serveChainStatus(ctx, ledger, path.substring("/wallet/api/chains/status/".length()));
+            return;
+        }
         if (request.method() == HttpMethod.POST && "/wallet/api/redeem-iap".equals(path)) {
             handleRedeemIap(ctx, ByteBufUtil.getBytes(request.content()));
             return;

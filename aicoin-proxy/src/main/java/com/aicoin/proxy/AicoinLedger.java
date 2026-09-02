@@ -184,6 +184,68 @@ final class AicoinLedger implements AutoCloseable {
             + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
             + "return {1, tostring(newBalance), tostring(amount)}";
 
+    /**
+     * Opens a hash chain, per CONTRACT.md's "Chains": one 32-byte secret in the wallet stands in
+     * for a whole purse of notes.
+     *
+     * <p>The wallet picks a seed and hashes it {@code links} times; only the tip — the last hash —
+     * is sent here, and the coins for the whole chain leave the balance now. Nothing about the
+     * seed can be worked back from the tip, and finding a second seed that hashes to the same tip
+     * is a preimage search nobody is going to win.
+     */
+    private static final String OPEN_CHAIN_SCRIPT =
+            "local links = tonumber(ARGV[1]) "
+            + "local perLink = tonumber(ARGV[2]) "
+            + "local total = links * perLink "
+            + "if links <= 0 or perLink <= 0 then return {0, '0', 'amount'} end "
+            + "local balance = tonumber(redis.call('GET', KEYS[1]) or '0') "
+            + "if balance < total then return {0, tostring(balance), 'insufficient'} end "
+            + "if redis.call('EXISTS', KEYS[2]) == 1 then return {0, tostring(balance), 'duplicate'} end "
+            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], '-' .. tostring(total)) "
+            + "redis.call('HSET', KEYS[2], 'tip', ARGV[3], 'issuer', ARGV[4], 'per_link', ARGV[2], "
+            + "  'remaining', ARGV[1], 'payee', ARGV[7], 'opened_at', ARGV[5], 'expires_at', ARGV[6]) "
+            + "redis.call('EXPIREAT', KEYS[2], tonumber(ARGV[6])) "
+            + "redis.call('SADD', KEYS[3], ARGV[4]) "
+            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='chain_opened', amount=total, "
+            + "  balance_after=tonumber(newBalance), at=tonumber(ARGV[5])})) "
+            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
+            + "return {1, tostring(newBalance), tostring(total)}";
+
+    /**
+     * Redeems {@code steps} links of a chain. The caller proves it by handing over a preimage that
+     * hashes to the current tip in {@code steps} hops — which only somebody the payer gave it to
+     * can do — and the tip then advances to that preimage.
+     *
+     * <p>Advancing is what makes a chain safe to spend a piece at a time: every redemption moves
+     * the tip <em>down</em>, so the same link cannot be presented twice, and a chain can never pay
+     * out more than the links it was opened with.
+     */
+    private static final String REDEEM_CHAIN_SCRIPT =
+            "if redis.call('EXISTS', KEYS[1]) == 0 then return {0, '0', 'unknown'} end "
+            + "local steps = tonumber(ARGV[2]) "
+            + "local remaining = tonumber(redis.call('HGET', KEYS[1], 'remaining')) "
+            + "if steps <= 0 or steps > remaining then return {0, '0', 'exhausted'} end "
+            + "local payee = redis.call('HGET', KEYS[1], 'payee') "
+            + "if payee ~= nil and payee ~= false and payee ~= '' and payee ~= ARGV[3] then "
+            + "  return {0, '0', 'not_payee'} "
+            + "end "
+            // The hash walk happens in Java, on SHA-256: Redis's Lua offers only sha1hex, and a
+            // ledger is no place to introduce a hash whose collision resistance is already gone.
+            // What stays here is the part that must be atomic — the tip is only advanced if it is
+            // still the one that was verified against, so two redemptions racing cannot both win.
+            + "local tip = redis.call('HGET', KEYS[1], 'tip') "
+            + "if tip ~= ARGV[5] then return {0, '0', 'conflict'} end "
+            + "local perLink = tonumber(redis.call('HGET', KEYS[1], 'per_link')) "
+            + "local amount = steps * perLink "
+            + "redis.call('HSET', KEYS[1], 'tip', ARGV[1], 'remaining', remaining - steps) "
+            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[2], tostring(amount)) "
+            + "redis.call('SADD', KEYS[3], ARGV[3]) "
+            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='chain_redeemed', amount=amount, "
+            + "  counterparty=redis.call('HGET', KEYS[1], 'issuer'), balance_after=tonumber(newBalance), "
+            + "  at=tonumber(ARGV[4])})) "
+            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
+            + "return {1, tostring(newBalance), tostring(amount)}";
+
     private static final String DEBIT_SCRIPT =
             "local amount = tonumber(ARGV[1]) "
             + "local balance = tonumber(redis.call('GET', KEYS[1]) or '0') "
@@ -439,6 +501,60 @@ final class AicoinLedger implements AutoCloseable {
                 new String[] {noteKey(noteHash), balanceKey(issuer), txKey(issuer)},
                 issuer, String.valueOf(nowMillis));
         complete(future, "note reclaim", onResult);
+    }
+
+    /** Reserves {@code links} × {@code perLink} coins against a hash chain the wallet holds the seed for. */
+    void openChain(String issuer, String tip, int links, double perLink, long expiresAtSeconds, String payee,
+                    Consumer<NoteResult> onResult) {
+        long nowMillis = Instant.now().toEpochMilli();
+        RedisFuture<List<Object>> future = commands.eval(OPEN_CHAIN_SCRIPT, ScriptOutputType.MULTI,
+                new String[] {balanceKey(issuer), chainKey(tip), KNOWN_WALLETS_KEY, txKey(issuer)},
+                String.valueOf(links), String.valueOf(perLink), tip, issuer,
+                String.valueOf(nowMillis), String.valueOf(expiresAtSeconds), payee == null ? "" : payee);
+        complete(future, "chain open", onResult);
+    }
+
+    /**
+     * Credits {@code steps} links to {@code holder}, who proved the claim with a preimage that
+     * hashes to the chain's current tip in that many hops.
+     *
+     * <p>The walk is verified here rather than in the script, so it can use SHA-256; the script
+     * then advances the tip only if nothing moved it in between.
+     */
+    void redeemChain(String holder, String chainId, String preimage, int steps, Consumer<NoteResult> onResult) {
+        chainState(chainId, state -> {
+            if (!state.isPresent()) {
+                onResult.accept(NoteResult.unreachable());
+                return;
+            }
+            Map<String, String> chain = state.get();
+            if (chain.isEmpty()) {
+                onResult.accept(NoteResult.of(false, 0, "unknown"));
+                return;
+            }
+            String tip = chain.getOrDefault("tip", "");
+            if (!HashChain.walksTo(preimage, steps, tip)) {
+                onResult.accept(NoteResult.of(false, 0, "bad_preimage"));
+                return;
+            }
+            long nowMillis = Instant.now().toEpochMilli();
+            RedisFuture<List<Object>> future = commands.eval(REDEEM_CHAIN_SCRIPT, ScriptOutputType.MULTI,
+                    new String[] {chainKey(chainId), balanceKey(holder), KNOWN_WALLETS_KEY, txKey(holder)},
+                    preimage, String.valueOf(steps), holder, String.valueOf(nowMillis), tip);
+            complete(future, "chain redeem", onResult);
+        });
+    }
+
+    /** What the ledger knows about a chain: how much of it is left, and what it is worth a link. */
+    void chainState(String chainId, Consumer<Optional<Map<String, String>>> onResult) {
+        commands.hgetall(chainKey(chainId)).whenComplete((values, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "chain lookup failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            onResult.accept(Optional.of(values == null ? Map.of() : values));
+        });
     }
 
     /** What the ledger knows about a note: its state, and — for an open one — what it is worth. */
@@ -1209,6 +1325,14 @@ final class AicoinLedger implements AutoCloseable {
      */
     private static String noteKey(String noteHash) {
         return "aicoin:" + TAG + ":note:" + noteHash;
+    }
+
+    /**
+     * A chain is keyed by the tip it was opened with — a hash, and therefore already safe to hold:
+     * it says nothing about the seed and cannot be walked backwards.
+     */
+    private static String chainKey(String openingTip) {
+        return "aicoin:" + TAG + ":chain:" + openingTip;
     }
 
     private static String adminCreditKey(String reference) {

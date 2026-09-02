@@ -221,6 +221,126 @@ final class NoteHandler {
         });
     }
 
+    /**
+     * {@code POST /wallet/api/chains/open} — live-signed. Body
+     * {@code {"tip":"<64 hex>","links":20,"per_link":1}}, optionally {@code "payee"} and
+     * {@code "ttl_seconds"}. Reserves {@code links × per_link} coins against a chain whose seed
+     * only the wallet has.
+     *
+     * <p>The wallet sends a hash, never the seed. One 32-byte secret at home therefore stands in
+     * for a purse of notes: no signature per coin, no note per coin, and nothing the ledger holds
+     * could spend it.
+     */
+    static void serveChainOpen(ChannelHandlerContext ctx, byte[] body, AicoinLedger ledger, String issuer) {
+        String text = new String(body, CharsetUtil.UTF_8);
+        String tip = field(text, "tip");
+        if (tip == null || !tip.matches("[0-9a-f]{64}")) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "tip must be 64 lowercase hex characters");
+            return;
+        }
+        int links = (int) number(text, "links", 0);
+        if (links <= 0 || links > HashChain.MAX_LINKS) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "links must be between 1 and " + HashChain.MAX_LINKS);
+            return;
+        }
+        double perLink = number(text, "per_link", 1);
+        if (!(perLink > 0)) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "per_link must be positive");
+            return;
+        }
+        String payee = field(text, "payee");
+        if (payee != null && !payee.matches("[0-9a-fA-F]{64}")) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "payee must be a 64-character address");
+            return;
+        }
+        long expiresAt = Instant.now().getEpochSecond() + ttlSeconds(text);
+        ledger.openChain(issuer, tip, links, perLink,
+                expiresAt, payee == null ? "" : payee.toLowerCase(java.util.Locale.ROOT), result -> {
+                    if (!result.isReachable()) {
+                        sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not reach the ledger");
+                        return;
+                    }
+                    if (!result.isOk()) {
+                        sendJson(ctx, "{\"opened\":false,\"reason\":\"" + result.getDetail() + "\"}");
+                        return;
+                    }
+                    sendJson(ctx, "{\"opened\":true,\"chain\":\"" + tip + "\",\"links\":" + links
+                            + ",\"per_link\":" + Note.formatAmount(perLink)
+                            + ",\"reserved\":" + result.getDetail()
+                            + ",\"expires_at\":" + expiresAt + "}");
+                });
+    }
+
+    /**
+     * {@code POST /wallet/api/chains/redeem} — live-signed. Body
+     * {@code {"chain":"<opening tip>","preimage":"<64 hex>","steps":3}}.
+     *
+     * <p>Handing over a link is the payment: whoever holds one can prove it belongs to the chain by
+     * hashing forward, and cannot work out the links behind it. The tip advances on redemption, so
+     * the same link is spendable exactly once and the chain can never pay out more than it reserved.
+     */
+    static void serveChainRedeem(ChannelHandlerContext ctx, byte[] body, AicoinLedger ledger, String holder) {
+        String text = new String(body, CharsetUtil.UTF_8);
+        String chain = field(text, "chain");
+        String preimage = field(text, "preimage");
+        int steps = (int) number(text, "steps", 0);
+        if (chain == null || !chain.matches("[0-9a-f]{64}") || preimage == null || !preimage.matches("[0-9a-f]{64}")) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "chain and preimage must be 64 lowercase hex characters");
+            return;
+        }
+        if (steps <= 0 || steps > HashChain.MAX_LINKS) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "steps must be between 1 and " + HashChain.MAX_LINKS);
+            return;
+        }
+        ledger.redeemChain(holder, chain, preimage, steps, result -> {
+            if (!result.isReachable()) {
+                sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not reach the ledger");
+                return;
+            }
+            if (!result.isOk()) {
+                sendJson(ctx, "{\"credited\":false,\"reason\":\"" + result.getDetail() + "\"}");
+                return;
+            }
+            sendJson(ctx, "{\"credited\":true,\"amount\":" + result.getDetail()
+                    + ",\"balance\":" + result.getValue() + "}");
+        });
+    }
+
+    /** {@code GET /wallet/api/chains/status/{opening tip}} — how much of a chain is left. */
+    static void serveChainStatus(ChannelHandlerContext ctx, AicoinLedger ledger, String chain) {
+        if (!chain.matches("[0-9a-fA-F]{64}")) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST, "chain must be 64 hex characters");
+            return;
+        }
+        ledger.chainState(chain.toLowerCase(java.util.Locale.ROOT), state -> {
+            if (!state.isPresent()) {
+                sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not reach the ledger");
+                return;
+            }
+            Map<String, String> fields = state.get();
+            if (fields.isEmpty()) {
+                sendJson(ctx, "{\"state\":\"unknown\"}");
+                return;
+            }
+            sendJson(ctx, "{\"state\":\"open\",\"remaining\":" + fields.getOrDefault("remaining", "0")
+                    + ",\"per_link\":" + fields.getOrDefault("per_link", "0")
+                    + ",\"payee\":\"" + fields.getOrDefault("payee", "") + "\""
+                    + ",\"expires_at\":" + fields.getOrDefault("expires_at", "0") + "}");
+        });
+    }
+
+    private static double number(String body, String name, double fallback) {
+        Matcher matcher = Pattern.compile("\"" + name + "\"\\s*:\\s*(-?[0-9.]+)").matcher(body);
+        if (!matcher.find()) {
+            return fallback;
+        }
+        try {
+            return Double.parseDouble(matcher.group(1));
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
     private static List<Double> amounts(String body) {
         List<Double> amounts = new ArrayList<>();
         Matcher list = Pattern.compile("\"amounts\"\\s*:\\s*\\[([^\\]]*)\\]").matcher(body);
