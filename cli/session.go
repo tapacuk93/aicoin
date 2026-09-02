@@ -45,6 +45,8 @@ type sessionState struct {
 	budget    int
 	verbose   bool
 	auto      bool
+	record    *stats
+	url       string
 	reader    *bufio.Reader
 	history   []exchange
 	spent     int64
@@ -86,6 +88,8 @@ func runSession(dir string, url string, walletPath string, state *sessionState) 
 		return fmt.Errorf("%s is not a directory", dir)
 	}
 	state.dir = absolute
+	state.record = loadStats(walletPath)
+	state.url = url
 
 	wallet, err := loadWallet(walletPath)
 	if err != nil {
@@ -94,7 +98,7 @@ func runSession(dir string, url string, walletPath string, state *sessionState) 
 	client := newClient(url, 30*time.Minute)
 
 	fmt.Fprintln(os.Stderr, sessionBanner)
-	fmt.Fprintf(os.Stderr, "directory %s\n", absolute)
+	fmt.Fprintf(os.Stderr, "directory %s · %s mode\n", absolute, state.record.Mode)
 	balance, balanceErr := client.balance(wallet.Address)
 	if balanceErr == nil {
 		fmt.Fprintf(os.Stderr, "wallet %s… · %s aicoin\n", wallet.Address[:12], formatCoins(balance))
@@ -153,6 +157,28 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 		background = strings.TrimSpace(background + "\n\n" + history)
 	}
 
+	// One model per question, when this CLI is in single mode. Same directory, same ability to
+	// propose changes — one call instead of one per panelist per round.
+	if s.record.Mode == modeSingle {
+		provider, why, chooseErr := s.singleProvider(client)
+		if chooseErr != nil {
+			return chooseErr
+		}
+		model := defaultModels[provider]
+		if model == "" {
+			return fmt.Errorf("no default model for %q", provider)
+		}
+		fmt.Fprintf(os.Stderr, "%s · %s\n", provider, why)
+		charged, err := askOne(client, wallet, s.record, provider, model, background, question,
+			s.dir, s.auto, s.confirm)
+		if err != nil {
+			return err
+		}
+		s.spent += charged
+		s.turns++
+		return nil
+	}
+
 	request := map[string]any{"prompt": question, "context": background}
 	if s.providers != "" {
 		var panel []string
@@ -199,6 +225,8 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 	}
 	reportFailures(parsed)
 
+	s.record.recordConsortium(parsed)
+	_ = s.record.save()
 	s.history = append(s.history, exchange{Question: question, Answer: parsed.Answer})
 	s.spent += parsed.CoinsCharged
 	s.turns++
@@ -223,6 +251,19 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 	return nil
 }
 
+// singleProvider picks the model for a single-mode turn: whichever the record says has carried the
+// most work here, restricted to what this proxy actually has a key for.
+func (s *sessionState) singleProvider(client *Client) (string, string, error) {
+	if s.providers != "" {
+		return strings.TrimSpace(strings.Split(s.providers, ",")[0]), "chosen for this session", nil
+	}
+	enabled, err := enabledProviders(client)
+	if err != nil {
+		return "", "", err
+	}
+	return chooseSingleProvider(s.record, enabled)
+}
+
 // confirm asks the yes/no question on the session's own input stream, so the answer comes from the
 // same place the questions do. Piped input is not asked at all — the next line is the next
 // question, not consent to overwrite a file.
@@ -245,6 +286,9 @@ const sessionHelp = `  /f <glob>        include these files' contents in every q
   /v               show or hide each round's comments
   /files           what the panel can currently see
   /balance         what the wallet holds
+  /single [model]  one model per question instead of the panel (cheaper by the panel size)
+  /multi           back to the panel
+  /stats           what each model has carried here, and what it failed
   /auto            apply proposed file changes without asking (currently off)
   /claim           take the free-coin faucet's grant
   /reset           forget this session's exchanges
@@ -305,6 +349,35 @@ func (s *sessionState) command(line string, client *Client, wallet *Wallet) (boo
 	case "/v":
 		s.verbose = !s.verbose
 		fmt.Fprintf(os.Stderr, "round comments: %v\n", s.verbose)
+	case "/single":
+		s.record.Mode = modeSingle
+		if rest != "" {
+			pinned := strings.ToLower(rest)
+			if !contains(ChatProviders, pinned) {
+				return false, fmt.Errorf("%q is not a model this proxy can chat with (%s)",
+					pinned, strings.Join(ChatProviders, ", "))
+			}
+			s.record.SingleProvider = pinned
+		} else {
+			s.record.SingleProvider = ""
+		}
+		if err := s.record.save(); err != nil {
+			return false, err
+		}
+		provider, why, err := s.singleProvider(client)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "single mode on")
+			return false, nil
+		}
+		fmt.Fprintf(os.Stderr, "single mode on — %s (%s)\n", provider, why)
+	case "/multi":
+		s.record.Mode = modeMulti
+		if err := s.record.save(); err != nil {
+			return false, err
+		}
+		fmt.Fprintln(os.Stderr, "consortium mode on — the whole panel, then rounds of review")
+	case "/stats":
+		fmt.Fprint(os.Stderr, s.record.render())
 	case "/auto":
 		s.auto = !s.auto
 		if s.auto {

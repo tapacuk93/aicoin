@@ -55,6 +55,9 @@ recovery phrase. Back it up (`aicoin export`) or lose the coins.
 |---|---|
 | `aicoin "<question>"` | ask the panel — the same as `aicoin consortium` |
 | `aicoin .` | open a session on this directory (`aicoin session [dir]`) |
+| `aicoin single [model]` | one model per question instead of the panel |
+| `aicoin multi` | back to the panel |
+| `aicoin stats` | what each model has carried here, and what it failed |
 | `aicoin new [-force]` | create a wallet; refuses to overwrite one without `-force` |
 | `aicoin show` | address and balance |
 | `aicoin import -key <hex>` | adopt an existing key (a seed, or an expanded private key) |
@@ -184,6 +187,42 @@ The answer goes to **stdout** and all of the above to stderr, so `aicoin "..." >
 you the answer and nothing else. `-v` prints each round's comments; `-json` prints the proxy's whole
 response.
 
+## One model, or all of them
+
+A consortium is one paid call per panelist per round. That is the right price for a question worth
+reviewing and the wrong one for "create an empty file" — in a large directory it is how a wallet
+reaches zero mid-session.
+
+```
+$ aicoin single
+single mode on — anthropic (carried 37 turns here, 97% of them without failing)
+one call per question instead of one per panelist per round. `aicoin multi` to go back.
+```
+
+Single mode is the same client with the panel switched off: one call, still grounded in the
+directory, still able to propose file changes. The mode sticks until you change it, and
+`/single` and `/multi` do the same thing inside a session.
+
+**Which model it picks is measured, not chosen.** Every consortium response says who was on the
+panel, who led it, who reviewed, and who failed at what — so this CLI keeps a running count in
+`~/.aicoin/stats.json` and single mode uses whichever model has *carried* the most turns here:
+turns completed, with the ones it failed subtracted. Turns that never happened because the wallet
+was empty are not held against anyone.
+
+```
+$ aicoin stats
+provider      carried   failed    led   reviews  comments
+anthropic          37        1     12        25         9
+kimi               21        6      0        21        14
+openai             19        0      7        19         4
+
+single mode would use anthropic — carried 37 turns here, 97% of them without failing
+```
+
+`aicoin single kimi` pins one instead; `aicoin single` with no name goes back to whichever is
+carrying the work. What the table does *not* claim is that the top model gives better answers —
+whether an answer was good is not in what the proxy reports, so it is not measured here.
+
 ## Sessions
 
 ```
@@ -207,6 +246,9 @@ between two questions is seen as it is now. Inside a session:
 | `/v` | show or hide each round's comments |
 | `/files` | what the panel can currently see |
 | `/balance` | what the wallet holds |
+| `/single [model]` | one model per question instead of the panel |
+| `/multi` | back to the panel |
+| `/stats` | what each model has carried here |
 | `/auto` | apply proposed changes without asking (off by default) |
 | `/claim` | take the faucet's grant, when the wallet runs out mid-session |
 | `/reset` | forget this session's exchanges |
