@@ -630,6 +630,27 @@ paid for and cannot be recalled.
 A consortium call takes minutes, not seconds, and holds one HTTP connection
 open for the whole of it.
 
+## Admin credit
+
+```
+curl -X POST http://localhost:8080/admin/credit \
+  -H "X-Admin-Token: $AICOIN_PROXY_ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"address":"<64 hex>","amount":1000,"reason":"dev top-up","reference":"top-up-2026-09-02"}'
+
+{"address":"00c0759c…","amount":1000.0,"credited":true,"balance":1004.0,"reason":"dev top-up"}
+```
+
+The operator putting coins in a wallet. `reference` is an idempotency key — the same one credits
+once however many times it is sent, and `credited:false` means it had already been applied. Without
+one, every request is a fresh credit.
+
+**Nothing backs these coins**: the faucet is bounded by a shared pool and an IAP credit by a real
+payment, while this is the operator saying they will pay for the calls it buys. Hence admin-token
+only, a 1,000,000 ceiling per call against a mistyped zero, and an `admin_credit` entry — carrying
+its `reason` — written into the wallet's transaction log in the same atomic script as the balance,
+so a balance is never larger than the log can explain. Negative amounts are refused: clawing coins
+back would be a debit with no call behind it.
+
 ## Additional proxy-side endpoints
 
 - `GET /price` — computed directly from the ledger, returns
