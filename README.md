@@ -91,6 +91,23 @@ model instead — four independent drafts over the same directory are four re-re
 four times. Every turn is an ordinary paid call, and the response says how many it made and what
 each model cost.
 
+## Paying offline
+
+A wallet can turn balance into **bearer notes** — signed strings it preloads while it has a network,
+and hands over later with no network on either side:
+
+```bash
+aicoin note load 50     # online, once
+aicoin note pay 15      # offline: prints notes and their fingerprints
+aicoin note accept ...  # offline: "✓ genuine · 10 aicoin · from 00c0759c…"
+aicoin note sync        # online again: credited
+```
+
+The coins leave the issuer's balance at load time, so they cannot be spent twice. What offline
+hand-off cannot establish is whether a note has already been given to someone else — redemption is
+therefore first-come, and the second person to try is told so plainly. It is a bearer instrument
+with the properties of one; every note names its issuer, and every step is in both transaction logs.
+
 ## Where coins come from
 
 - **The faucet** — `POST /wallet/api/claim`, a fixed grant per wallet per hour, from a shared pool
@@ -101,7 +118,7 @@ each model cost.
 - **The operator** — `POST /admin/credit`, admin-token only. Nothing backs these coins beyond a
   willingness to pay for the calls they buy, which is why each one is written into the wallet's
   transaction log as what it is.
-- **Another wallet** — a signed transfer.
+- **Another wallet** — a signed transfer, or a bearer note handed over offline.
 
 A spend ceiling (`POST /admin/budget`) bounds what the operator can be billed upstream: when
 production spend reaches it the paywall goes empty, while calls for coins already sold keep working

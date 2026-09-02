@@ -114,6 +114,69 @@ final class AicoinLedger implements AutoCloseable {
             + "redis.call('LTRIM', KEYS[5], -" + TX_LOG_CAP + ", -1) "
             + "return 1";
 
+    /**
+     * Turns balance into a bearer note, per CONTRACT.md's "Offline notes": the coins leave the
+     * issuer's balance <em>now</em>, at issue, and sit against the note until somebody redeems it.
+     *
+     * <p>That ordering is the whole design. A note handed over offline cannot be checked against
+     * the ledger at the moment it changes hands, so the one thing that must not be possible is the
+     * issuer spending those coins again while the note is in someone's pocket — and it isn't,
+     * because the issuer no longer has them.
+     */
+    private static final String ISSUE_NOTE_SCRIPT =
+            "local amount = tonumber(ARGV[1]) "
+            + "if amount <= 0 then return {0, '0', 'amount'} end "
+            + "local balance = tonumber(redis.call('GET', KEYS[1]) or '0') "
+            + "if balance < amount then return {0, tostring(balance), 'insufficient'} end "
+            + "if redis.call('EXISTS', KEYS[2]) == 1 then return {0, tostring(balance), 'duplicate'} end "
+            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], '-' .. ARGV[1]) "
+            + "redis.call('HSET', KEYS[2], 'amount', ARGV[1], 'issuer', ARGV[2], 'state', 'open', "
+            + "  'issued_at', ARGV[3], 'expires_at', ARGV[4]) "
+            + "redis.call('EXPIREAT', KEYS[2], tonumber(ARGV[5])) "
+            + "redis.call('SADD', KEYS[3], ARGV[2]) "
+            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='note_issued', amount=amount, "
+            + "  balance_after=tonumber(newBalance), at=tonumber(ARGV[3])})) "
+            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
+            + "return {1, tostring(newBalance), 'issued'}";
+
+    /**
+     * Redeems a note into the holder's wallet. First caller wins, atomically: the state flips from
+     * open to redeemed inside the same script that credits the balance, so two people racing the
+     * same note produce exactly one credit and one "already redeemed".
+     */
+    private static final String REDEEM_NOTE_SCRIPT =
+            "if redis.call('EXISTS', KEYS[1]) == 0 then return {0, '0', 'unknown'} end "
+            + "local state = redis.call('HGET', KEYS[1], 'state') "
+            + "if state ~= 'open' then return {0, '0', state} end "
+            + "local expires = tonumber(redis.call('HGET', KEYS[1], 'expires_at')) "
+            + "if expires and tonumber(ARGV[2]) > expires then return {0, '0', 'expired'} end "
+            + "local amount = tonumber(redis.call('HGET', KEYS[1], 'amount')) "
+            + "redis.call('HSET', KEYS[1], 'state', 'redeemed', 'redeemed_by', ARGV[1], 'redeemed_at', ARGV[2]) "
+            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[2], tostring(amount)) "
+            + "redis.call('SADD', KEYS[3], ARGV[1]) "
+            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='note_redeemed', amount=amount, "
+            + "  counterparty=redis.call('HGET', KEYS[1], 'issuer'), balance_after=tonumber(newBalance), "
+            + "  at=tonumber(ARGV[2])})) "
+            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
+            + "return {1, tostring(newBalance), tostring(amount)}";
+
+    /**
+     * Takes an unredeemed note back. Without this, a note that is lost — a phone dropped in a
+     * river, a QR nobody scanned — burns the coins it holds, and the issuer paid for them.
+     */
+    private static final String RECLAIM_NOTE_SCRIPT =
+            "if redis.call('EXISTS', KEYS[1]) == 0 then return {0, '0', 'unknown'} end "
+            + "local state = redis.call('HGET', KEYS[1], 'state') "
+            + "if state ~= 'open' then return {0, '0', state} end "
+            + "if redis.call('HGET', KEYS[1], 'issuer') ~= ARGV[1] then return {0, '0', 'not_issuer'} end "
+            + "local amount = tonumber(redis.call('HGET', KEYS[1], 'amount')) "
+            + "redis.call('HSET', KEYS[1], 'state', 'reclaimed', 'redeemed_at', ARGV[2]) "
+            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[2], tostring(amount)) "
+            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='note_reclaimed', amount=amount, "
+            + "  balance_after=tonumber(newBalance), at=tonumber(ARGV[2])})) "
+            + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
+            + "return {1, tostring(newBalance), tostring(amount)}";
+
     private static final String DEBIT_SCRIPT =
             "local amount = tonumber(ARGV[1]) "
             + "local balance = tonumber(redis.call('GET', KEYS[1]) or '0') "
@@ -295,6 +358,148 @@ final class AicoinLedger implements AutoCloseable {
             }
             onResult.accept(TransferResult.decided(result != null && result == 1L));
         });
+    }
+
+    /**
+     * The ledger's note-signing keypair, generated on first use and kept from then on. Created with
+     * SETNX so two proxies starting at once end up with the same key rather than one overwriting
+     * the other's notes.
+     */
+    void noteSigningKey(Consumer<Optional<String>> onResult) {
+        String key = "aicoin:" + TAG + ":note-signing-key";
+        commands.get(key).whenComplete((existing, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "note key lookup failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            if (existing != null && !existing.isEmpty()) {
+                onResult.accept(Optional.of(existing));
+                return;
+            }
+            String generated;
+            try {
+                generated = NoteSigner.generateStored();
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "could not generate a note signing key", e);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            commands.setnx(key, generated).whenComplete((won, setErr) -> {
+                if (setErr != null) {
+                    LOG.log(Level.WARNING, "note key store failed", setErr);
+                    onResult.accept(Optional.empty());
+                    return;
+                }
+                if (Boolean.TRUE.equals(won)) {
+                    LOG.info("generated the ledger's note-signing key");
+                    onResult.accept(Optional.of(generated));
+                    return;
+                }
+                // Somebody else got there first; theirs is the one notes are signed with.
+                commands.get(key).whenComplete((theirs, getErr) ->
+                        onResult.accept(getErr == null && theirs != null && !theirs.isEmpty()
+                                ? Optional.of(theirs) : Optional.empty()));
+            });
+        });
+    }
+
+    /** Moves {@code amount} out of {@code issuer}'s balance and into a note. */
+    void issueNote(String issuer, double amount, String noteHash, long expiresAtSeconds, Consumer<NoteResult> onResult) {
+        long nowMillis = Instant.now().toEpochMilli();
+        RedisFuture<List<Object>> future = commands.eval(ISSUE_NOTE_SCRIPT, ScriptOutputType.MULTI,
+                new String[] {balanceKey(issuer), noteKey(noteHash), KNOWN_WALLETS_KEY, txKey(issuer)},
+                String.valueOf(amount), issuer, String.valueOf(nowMillis),
+                String.valueOf(expiresAtSeconds * 1000), String.valueOf(expiresAtSeconds));
+        complete(future, "note issue", onResult);
+    }
+
+    /** Credits an open note to {@code holder}. First caller wins. */
+    void redeemNote(String holder, String noteHash, Consumer<NoteResult> onResult) {
+        long nowMillis = Instant.now().toEpochMilli();
+        RedisFuture<List<Object>> future = commands.eval(REDEEM_NOTE_SCRIPT, ScriptOutputType.MULTI,
+                new String[] {noteKey(noteHash), balanceKey(holder), KNOWN_WALLETS_KEY, txKey(holder)},
+                holder, String.valueOf(nowMillis));
+        complete(future, "note redeem", onResult);
+    }
+
+    /** Returns an unredeemed note's value to the wallet that issued it. */
+    void reclaimNote(String issuer, String noteHash, Consumer<NoteResult> onResult) {
+        long nowMillis = Instant.now().toEpochMilli();
+        RedisFuture<List<Object>> future = commands.eval(RECLAIM_NOTE_SCRIPT, ScriptOutputType.MULTI,
+                new String[] {noteKey(noteHash), balanceKey(issuer), txKey(issuer)},
+                issuer, String.valueOf(nowMillis));
+        complete(future, "note reclaim", onResult);
+    }
+
+    /** What the ledger knows about a note: its state, and — for an open one — what it is worth. */
+    void noteState(String noteHash, Consumer<Optional<Map<String, String>>> onResult) {
+        commands.hgetall(noteKey(noteHash)).whenComplete((values, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "note lookup failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            onResult.accept(Optional.of(values == null ? Map.of() : values));
+        });
+    }
+
+    private void complete(RedisFuture<List<Object>> future, String what, Consumer<NoteResult> onResult) {
+        future.whenComplete((raw, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger " + what + " failed", err);
+                onResult.accept(NoteResult.unreachable());
+                return;
+            }
+            boolean ok = ((Number) raw.get(0)).longValue() == 1L;
+            double value = Double.parseDouble(String.valueOf(raw.get(1)));
+            String detail = String.valueOf(raw.get(2));
+            onResult.accept(NoteResult.of(ok, value, detail));
+        });
+    }
+
+    /**
+     * Outcome of a note operation: unreachable, or a decided yes/no with the resulting balance and
+     * a one-word reason ({@code insufficient}, {@code redeemed}, {@code expired}, {@code unknown},
+     * {@code not_issuer}) that the handler turns into a status code.
+     */
+    static final class NoteResult {
+        private final boolean reachable;
+        private final boolean ok;
+        private final double value;
+        private final String detail;
+
+        private NoteResult(boolean reachable, boolean ok, double value, String detail) {
+            this.reachable = reachable;
+            this.ok = ok;
+            this.value = value;
+            this.detail = detail;
+        }
+
+        static NoteResult unreachable() {
+            return new NoteResult(false, false, 0, "unreachable");
+        }
+
+        static NoteResult of(boolean ok, double value, String detail) {
+            return new NoteResult(true, ok, value, detail);
+        }
+
+        boolean isReachable() {
+            return reachable;
+        }
+
+        boolean isOk() {
+            return ok;
+        }
+
+        /** The balance after the operation, or — on redeem and reclaim — the note's face value. */
+        double getValue() {
+            return value;
+        }
+
+        String getDetail() {
+            return detail;
+        }
     }
 
     /**
@@ -986,6 +1191,15 @@ final class AicoinLedger implements AutoCloseable {
 
     private static String txKey(String address) {
         return "aicoin:" + TAG + ":tx:" + address;
+    }
+
+    /**
+     * A note is keyed by the <em>hash</em> of its secret, so the ledger can tell you whether a note
+     * you hold is still open without the ledger itself holding anything that could be spent. A
+     * dump of this database redeems nothing.
+     */
+    private static String noteKey(String noteHash) {
+        return "aicoin:" + TAG + ":note:" + noteHash;
     }
 
     private static String adminCreditKey(String reference) {
