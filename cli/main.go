@@ -553,6 +553,17 @@ func chatBody(provider, model, system, prompt string, maxTokens int) (path strin
 	}
 }
 
+// chatHeaders are the headers a provider requires beyond auth, which the proxy forwards untouched.
+// Anthropic rejects a Messages API call without a version header outright — the proxy's own
+// consortium turns set it, and a request this CLI composes has to set it too.
+func chatHeaders(provider string) map[string]string {
+	headers := map[string]string{}
+	if provider == "anthropic" {
+		headers["anthropic-version"] = "2023-06-01"
+	}
+	return headers
+}
+
 // chatText pulls the assistant's words out of a provider's own response shape.
 func chatText(provider string, body []byte) string {
 	var parsed map[string]any
@@ -642,8 +653,10 @@ func cmdAsk(args []string) error {
 	if err != nil {
 		return err
 	}
+	requestHeaders := chatHeaders(*provider)
+	requestHeaders["X-AI"] = *provider
 	responseBody, headers, err := newClient(*url, 5*time.Minute).
-		withToken(wallet, "POST", path, body, map[string]string{"X-AI": *provider})
+		withToken(wallet, "POST", path, body, requestHeaders)
 	if err != nil {
 		return err
 	}

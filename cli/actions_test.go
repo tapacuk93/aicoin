@@ -214,3 +214,14 @@ func TestFailuresFromAnEmptyWalletCollapseIntoOneLine(t *testing.T) {
 		t.Errorf("a real provider failure must survive the collapsing: %s", output)
 	}
 }
+
+func TestAnthropicRequestsCarryTheVersionHeader(t *testing.T) {
+	// Without it the Messages API answers 400 and the call is wasted. The proxy sets it on its own
+	// consortium turns; a request this CLI composes has to set it itself.
+	if chatHeaders("anthropic")["anthropic-version"] == "" {
+		t.Fatal("anthropic needs a version header")
+	}
+	if len(chatHeaders("openai")) != 0 || len(chatHeaders("kimi")) != 0 {
+		t.Fatal("the OpenAI-compatible providers need nothing extra")
+	}
+}

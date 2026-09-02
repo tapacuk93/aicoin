@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -101,12 +102,19 @@ func askOne(client *Client, wallet *Wallet, record *stats, provider, model, back
 	if err != nil {
 		return 0, err
 	}
+	requestHeaders := chatHeaders(provider)
+	requestHeaders["X-AI"] = provider
 	spin := startSpinner("asking " + provider + " · one paid call")
-	responseBody, headers, err := client.withToken(wallet, "POST", path, body, map[string]string{"X-AI": provider})
+	responseBody, headers, err := client.withToken(wallet, "POST", path, body, requestHeaders)
 	spin.finish()
 	if err != nil {
-		record.recordSingle(provider, false, 0)
-		_ = record.save()
+		// Only count this against the model if the model is what failed. A refused wallet, an
+		// expired token or a request this CLI got wrong never reached it, and marking those as its
+		// failures would push single mode away from a model that has done nothing wrong.
+		if isProviderFailure(err) {
+			record.recordSingle(provider, false, 0)
+			_ = record.save()
+		}
 		return 0, err
 	}
 	text := chatText(provider, responseBody)
@@ -131,6 +139,19 @@ func askOne(client *Client, wallet *Wallet, record *stats, provider, model, back
 		fmt.Fprintf(os.Stderr, "\n%s · %s aicoin\n", provider, charged)
 	}
 	return coins, nil
+}
+
+// isProviderFailure separates "the model did not answer" from "we never got that far".
+//
+// 5xx and 429 are the provider: it was reached and it did not deliver. A transport error or a
+// timeout is the same. Everything else in the 4xx range is this side — an empty wallet, a token
+// that expired, a request built wrong — and says nothing about the model.
+func isProviderFailure(err error) bool {
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status == 429 || apiErr.Status >= 500
+	}
+	return true
 }
 
 func cmdSingle(args []string) error {
