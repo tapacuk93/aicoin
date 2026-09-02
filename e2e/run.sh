@@ -866,6 +866,7 @@ import json
 d = json.load(open('$WORKDIR/t40-carol.json'))
 print(d.get('credited'), d.get('compensated'), d.get('amount'))
 ")
+# Dave still held a coin, so carol is paid in full out of it.
 [ "$compensated" = "True True 1" ] && pass "carol was paid anyway — compensated, not merely commiserated with" \
   || fail "expected a compensation of 1, got $compensated"
 [ "$claims" = "2 ${ADDR_DAVE:0:8}" ] && pass "carol is handed both claims: a proof signed by dave, not an accusation" \
@@ -1082,6 +1083,40 @@ except ImportError:
     print("skipped (no cryptography module)")
 PYCHECK
 if [ $? -eq 0 ]; then pass "a note verifies against the published key with no ledger lookup"; else fail "offline verification failed"; fi
+
+log "--- test 42: a double-spender with nothing left compensates nobody, and no coins are conjured ---"
+KEY_NAOMI="$WORKDIR/naomi.pem"; gen_wallet "$KEY_NAOMI"; ADDR_NAOMI=$(wallet_address "$KEY_NAOMI")
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" -H "X-Admin-Token: $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"address\":\"$ADDR_NAOMI\",\"amount\":1,\"reason\":\"e2e broke double-spender\",\"reference\":\"e2e-broke-1\"}"
+# Every coin she has goes into the note, so there is nothing behind it when she spends it twice.
+live_signed_request "$KEY_NAOMI" "$ADDR_NAOMI" "POST" "/wallet/api/notes/issue" \
+  '{"amounts":[1],"claimed":true}' "$WORKDIR/t42-issue.json" > /dev/null
+broke_note=$(python3 -c "import json;print(json.load(open('$WORKDIR/t42-issue.json'))['notes'][0]['note'])")
+BROKE_ID=$(python3 -c "
+import base64, json
+n = '$broke_note'.split('.')[0]
+print(json.loads(base64.urlsafe_b64decode(n + '=' * (-len(n) % 4)))['id'])
+")
+CLAIM_1=$(sign_claim "$KEY_NAOMI" "$BROKE_ID" "$ADDR_BOB" "cc33")
+CLAIM_2=$(sign_claim "$KEY_NAOMI" "$BROKE_ID" "$ADDR_CAROL" "dd44")
+live_signed_request "$KEY_BOB" "$ADDR_BOB" "POST" "/wallet/api/notes/redeem" \
+  "{\"note\":\"$broke_note\",\"nonce\":\"cc33\",\"claim\":\"$CLAIM_1\"}" "$WORKDIR/t42-bob.json" > /dev/null
+bal_carol_broke=$(balance_of "$ADDR_CAROL")
+live_signed_request "$KEY_CAROL" "$ADDR_CAROL" "POST" "/wallet/api/notes/redeem" \
+  "{\"note\":\"$broke_note\",\"nonce\":\"dd44\",\"claim\":\"$CLAIM_2\"}" "$WORKDIR/t42-carol.json" > /dev/null
+outcome=$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t42-carol.json'))
+print(d.get('credited'), d.get('amount'), d.get('owed_to_you'))
+")
+moved=$(python3 -c "print(round(float('$(balance_of "$ADDR_CAROL")') - float('$bal_carol_broke'), 6))")
+naomi_now=$(balance_of "$ADDR_NAOMI")
+# The exploit this guards: paying a victim from a balance that goes negative and is never repaid
+# mints coins, and anybody controlling all three wallets can run it in a loop.
+[ "$outcome" = "False 0 1" ] && [ "$moved" = "0.0" ] && [ "$naomi_now" = "0" ] \
+  && pass "nothing was paid and nothing was minted — the loss stays a debt, not new money" \
+  || fail "expected no compensation from an empty wallet, got outcome=$outcome moved=$moved naomi=$naomi_now"
 
 log "--- test 41: the signed ratings snapshot, checkable with no network ---"
 curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/ratings" > "$WORKDIR/t41.json"

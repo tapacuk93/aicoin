@@ -702,7 +702,17 @@ final class AicoinLedger implements AutoCloseable {
      * can see is indistinguishable from nothing happening.
      */
     private static final String COMPENSATE_SCRIPT =
-            "local amount = tonumber(ARGV[1]) "
+            "local wanted = tonumber(ARGV[1]) "
+            // Only ever out of what the double-spender actually has. Paying the victim from a
+            // balance that goes negative and is never repaid is not a compensation, it is minting:
+            // two wallets end up richer, one owes a debt nobody can collect, and anybody who
+            // controls all three can run it in a loop. What cannot be recovered from the payer is
+            // not paid — it is a debt on their record and a loss the price absorbs, which is where
+            // an uncollectable cost has to sit.
+            + "local available = tonumber(redis.call('GET', KEYS[2]) or '0') "
+            + "local amount = wanted "
+            + "if available < amount then amount = available end "
+            + "if amount <= 0 then return '0' end "
             + "local victimBalance = tonumber(redis.call('INCRBYFLOAT', KEYS[1], tostring(amount))) "
             + "local payerBalance = tonumber(redis.call('INCRBYFLOAT', KEYS[2], '-' .. tostring(amount))) "
             + "redis.call('RPUSH', KEYS[3], cjson.encode({type='double_spend_compensation', amount=amount, "
@@ -711,10 +721,13 @@ final class AicoinLedger implements AutoCloseable {
             + "redis.call('RPUSH', KEYS[4], cjson.encode({type='double_spend_penalty', amount=amount, "
             + "  counterparty=ARGV[4], balance_after=payerBalance, at=tonumber(ARGV[2])})) "
             + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
-            + "return tostring(payerBalance)";
+            + "return tostring(amount)";
 
-    /** Credits the victim and charges the double-spender, atomically. */
-    void compensateDoubleSpend(String victim, String payer, double amount) {
+    /**
+     * Credits the victim out of the double-spender, atomically, and only as far as that wallet can
+     * actually cover. Reports what was recovered — which may be nothing.
+     */
+    void compensateDoubleSpend(String victim, String payer, double amount, Consumer<Double> onResult) {
         long nowMillis = Instant.now().toEpochMilli();
         commands.eval(COMPENSATE_SCRIPT, ScriptOutputType.VALUE,
                 new String[] {balanceKey(victim), balanceKey(payer), txKey(victim), txKey(payer)},
@@ -722,6 +735,13 @@ final class AicoinLedger implements AutoCloseable {
                 .whenComplete((result, err) -> {
                     if (err != null) {
                         LOG.log(Level.WARNING, "double-spend compensation failed", err);
+                        onResult.accept(0.0);
+                        return;
+                    }
+                    try {
+                        onResult.accept(Double.parseDouble(String.valueOf(result)));
+                    } catch (NumberFormatException e) {
+                        onResult.accept(0.0);
                     }
                 });
     }
