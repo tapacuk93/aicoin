@@ -105,12 +105,14 @@ func askOne(client *Client, wallet *Wallet, record *stats, provider, model, back
 	responseBody, headers, err := client.withToken(wallet, "POST", path, body, map[string]string{"X-AI": provider})
 	spin.finish()
 	if err != nil {
-		record.recordSingle(provider, false)
+		record.recordSingle(provider, false, 0)
 		_ = record.save()
 		return 0, err
 	}
 	text := chatText(provider, responseBody)
-	record.recordSingle(provider, text != "")
+	charged := headers.Get("X-Aicoin-Charged")
+	coins, _ := strconv.ParseInt(charged, 10, 64)
+	record.recordSingle(provider, text != "", coins)
 	_ = record.save()
 	if text == "" {
 		// Paid for, and unreadable: better the raw body than nothing.
@@ -120,7 +122,6 @@ func askOne(client *Client, wallet *Wallet, record *stats, provider, model, back
 	} else {
 		deliverAnswer(root, text, auto, confirm)
 	}
-	charged := headers.Get("X-Aicoin-Charged")
 	if charged == "" {
 		return 0, nil
 	}
@@ -128,10 +129,6 @@ func askOne(client *Client, wallet *Wallet, record *stats, provider, model, back
 		fmt.Fprintf(os.Stderr, "\n%s · %s aicoin · %s left\n", provider, charged, formatCoins(balance))
 	} else {
 		fmt.Fprintf(os.Stderr, "\n%s · %s aicoin\n", provider, charged)
-	}
-	coins, convErr := strconv.ParseInt(charged, 10, 64)
-	if convErr != nil {
-		return 0, nil
 	}
 	return coins, nil
 }
@@ -188,8 +185,9 @@ func cmdMulti(args []string) error {
 	return nil
 }
 
-func cmdStats(args []string) error {
-	fs := flag.NewFlagSet("stats", flag.ExitOnError)
+// cmdAis prints which models have been used, what each cost, and what each failed.
+func cmdAis(args []string) error {
+	fs := flag.NewFlagSet("ais", flag.ExitOnError)
 	_, walletPath := common(fs)
 	if err := parse(fs, args); err != nil {
 		return err

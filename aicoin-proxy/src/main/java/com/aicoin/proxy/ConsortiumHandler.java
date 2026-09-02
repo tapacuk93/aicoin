@@ -249,6 +249,12 @@ final class ConsortiumHandler {
         private final List<String> drafts = new ArrayList<>();
         private final List<String> reviewJson = new ArrayList<>();
         private final List<String> errorJson = new ArrayList<>();
+        /**
+         * Coins charged per provider. The total is what the wallet paid, but a caller deciding
+         * which model to lean on wants to know which of them the money went to — and only this
+         * side knows, since each turn is settled against its own provider's reported usage.
+         */
+        private final java.util.Map<String, Long> coinsByProvider = new java.util.LinkedHashMap<>();
 
         private String answer;
         private int round;
@@ -511,7 +517,7 @@ final class ConsortiumHandler {
                                 charged = CoinMeter.coinsFor(priced.getCostUsd(), config.getCoinValueUsd());
                                 ledger.settleCall(wallet, charged - CALL_COST_AICOIN, provider);
                             }
-                            addCharged(charged);
+                            addCharged(provider, charged);
 
                             String text = ChatAdapter.text(provider, responseText);
                             if (text == null) {
@@ -529,8 +535,9 @@ final class ConsortiumHandler {
             calls++;
         }
 
-        private synchronized void addCharged(long charged) {
+        private synchronized void addCharged(String provider, long charged) {
             coinsCharged += charged;
+            coinsByProvider.merge(provider, charged, Long::sum);
         }
 
         private synchronized void markInsufficient() {
@@ -587,6 +594,14 @@ final class ConsortiumHandler {
                         .append(",\"mode\":").append(Json.string(lead ? "lead" : "panel"))
                         .append(",\"calls\":").append(calls)
                         .append(",\"coins_charged\":").append(coinsCharged)
+                        .append(",\"spend\":{");
+                boolean firstSpend = true;
+                for (java.util.Map.Entry<String, Long> entry : coinsByProvider.entrySet()) {
+                    json.append(firstSpend ? "" : ",")
+                            .append(Json.string(entry.getKey())).append(":").append(entry.getValue());
+                    firstSpend = false;
+                }
+                json.append("}")
                         .append(",\"reviews\":[").append(String.join(",", reviewJson)).append("]")
                         .append(",\"errors\":[").append(String.join(",", errorJson)).append("]");
                 if (includeTranscript) {

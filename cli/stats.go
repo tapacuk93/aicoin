@@ -30,6 +30,9 @@ type providerStats struct {
 	// Reviews and Comments: how often it reviewed, and how often it had something to say.
 	Reviews  int `json:"reviews"`
 	Comments int `json:"comments"`
+	// Coins is what this model has actually cost, from the proxy's own per-provider breakdown
+	// rather than from dividing a total by the number of panelists.
+	Coins int64 `json:"coins"`
 }
 
 // carried is the turns this model actually completed — the measure single mode ranks on.
@@ -126,6 +129,9 @@ func (s *stats) recordConsortium(result *consortiumResult) {
 			s.for_(review.Provider).Comments++
 		}
 	}
+	for provider, coins := range result.Spend {
+		s.for_(provider).Coins += coins
+	}
 	for _, failure := range result.Errors {
 		// An empty wallet is not the model's fault and must not count against it: the turn was
 		// never made.
@@ -136,10 +142,11 @@ func (s *stats) recordConsortium(result *consortiumResult) {
 	}
 }
 
-func (s *stats) recordSingle(provider string, ok bool) {
+func (s *stats) recordSingle(provider string, ok bool, coins int64) {
 	entry := s.for_(provider)
 	entry.Turns++
 	entry.Led++
+	entry.Coins += coins
 	if !ok {
 		entry.Failures++
 	}
@@ -181,31 +188,45 @@ func (s *stats) best() (provider string, why string) {
 		top.carried(), top.reliability()*100)
 }
 
-// render is the table behind `aicoin stats` — the evidence for whatever single mode picked.
+// render is the table behind `aicoin ais`: which models have been used, what they cost, and what
+// they failed — the evidence for whatever single mode picked.
 func (s *stats) render() string {
 	if len(s.Providers) == 0 {
-		return "nothing recorded yet — run a call or two first\n"
+		return "no model has been used yet — ask something first\n"
 	}
 	names := make([]string, 0, len(s.Providers))
 	for name := range s.Providers {
 		names = append(names, name)
 	}
+	// Ordered by what each has cost: this table is read to find out where the money went.
 	sort.Slice(names, func(i, j int) bool {
+		if s.Providers[names[i]].Coins != s.Providers[names[j]].Coins {
+			return s.Providers[names[i]].Coins > s.Providers[names[j]].Coins
+		}
 		return s.Providers[names[i]].carried() > s.Providers[names[j]].carried()
 	})
+	var total int64
+	for _, entry := range s.Providers {
+		total += entry.Coins
+	}
 	var out strings.Builder
-	out.WriteString(fmt.Sprintf("%-12s %8s %8s %6s %9s %9s\n",
-		"provider", "carried", "failed", "led", "reviews", "comments"))
+	out.WriteString(fmt.Sprintf("%-12s %8s %7s %8s %6s %9s\n",
+		"model", "aicoin", "share", "carried", "failed", "comments"))
 	for _, name := range names {
 		entry := s.Providers[name]
-		out.WriteString(fmt.Sprintf("%-12s %8d %8d %6d %9d %9d\n",
-			name, entry.carried(), entry.Failures, entry.Led, entry.Reviews, entry.Comments))
+		share := ""
+		if total > 0 {
+			share = fmt.Sprintf("%.0f%%", float64(entry.Coins)/float64(total)*100)
+		}
+		out.WriteString(fmt.Sprintf("%-12s %8d %7s %8d %6d %9d\n",
+			name, entry.Coins, share, entry.carried(), entry.Failures, entry.Comments))
 	}
+	out.WriteString(fmt.Sprintf("%-12s %8d\n", "total", total))
 	chosen, why := s.best()
 	if chosen != "" {
 		out.WriteString(fmt.Sprintf("\nsingle mode would use %s — %s\n", chosen, why))
 	}
 	out.WriteString("\ncarried = turns completed; comments = reviews that found something.\n" +
-		"Neither says whether an answer was good: that is not in what the proxy reports.\n")
+		"None of it says whether an answer was good: that is not in what the proxy reports.\n")
 	return out.String()
 }

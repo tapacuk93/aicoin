@@ -57,7 +57,7 @@ recovery phrase. Back it up (`aicoin export`) or lose the coins.
 | `aicoin .` | open a session on this directory (`aicoin session [dir]`) |
 | `aicoin single [model]` | one model per question instead of the panel |
 | `aicoin multi` | back to the panel |
-| `aicoin stats` | what each model has carried here, and what it failed |
+| `aicoin ais` | which models have been used, what each cost, what each failed |
 | `aicoin new [-force]` | create a wallet; refuses to overwrite one without `-force` |
 | `aicoin show` | address and balance |
 | `aicoin import -key <hex>` | adopt an existing key (a seed, or an expanded private key) |
@@ -160,6 +160,9 @@ apply? [y/N]
 - **Writes are whole files.** A model asked for a patch invents one against a version it
   half-remembers, so it sends the complete intended contents and this replaces the file. `replace`
   says how many bytes it is losing.
+- **An open detail is decided, not asked about.** "Create an empty file" with no name given gets a
+  file with a sensible name and a line saying what it chose — a missing filename is a decision to
+  make, not a reason to stop and ask.
 - Only `write` and `delete` exist. There is no shell, and the proxy has no filesystem at all — the
   acting happens here, on your machine, where the directory is.
 
@@ -210,14 +213,18 @@ turns completed, with the ones it failed subtracted. Turns that never happened b
 was empty are not held against anyone.
 
 ```
-$ aicoin stats
-provider      carried   failed    led   reviews  comments
-anthropic          37        1     12        25         9
-kimi               21        6      0        21        14
-openai             19        0      7        19         4
+$ aicoin ais
+model         aicoin   share  carried failed  comments
+anthropic        118     54%       37      1         9
+kimi              54     25%       21      6        14
+openai            46     21%       19      0         4
+total            218
 
 single mode would use anthropic — carried 37 turns here, 97% of them without failing
 ```
+
+The coins are exact, not apportioned: the proxy settles each turn against that provider's own
+reported usage and returns the breakdown, so this is where the money actually went.
 
 `aicoin single kimi` pins one instead; `aicoin single` with no name goes back to whichever is
 carrying the work. What the table does *not* claim is that the top model gives better answers —
@@ -240,19 +247,22 @@ between two questions is seen as it is now. Inside a session:
 
 | | |
 |---|---|
-| `/f <glob>` | include these files' contents from now on (blank clears) |
-| `/panel <a,b>` | which models sit on the panel (blank for all) |
-| `/rounds <n>` | cap the review rounds |
-| `/v` | show or hide each round's comments |
-| `/files` | what the panel can currently see |
-| `/balance` | what the wallet holds |
-| `/single [model]` | one model per question instead of the panel |
-| `/multi` | back to the panel |
-| `/stats` | what each model has carried here |
-| `/auto` | apply proposed changes without asking (off by default) |
-| `/claim` | take the faucet's grant, when the wallet runs out mid-session |
-| `/reset` | forget this session's exchanges |
-| `/exit` | leave — Ctrl-D does too |
+| `` `f <glob>` `` | include these files' contents from now on (blank clears) |
+| `` `panel <a,b>` `` | which models sit on the panel (blank for all) |
+| `` `rounds <n>` `` | cap the review rounds |
+| `` `v` `` | show or hide each round's comments |
+| `` `files` `` | what the panel can currently see |
+| `` `balance` `` | what the wallet holds |
+| `` `single [model]` `` | one model per question instead of the panel |
+| `` `multi` `` | back to the panel |
+| `` `ais` `` | which models have been used and what each cost |
+| `` `auto` `` | apply proposed changes without asking (off by default) |
+| `` `claim` `` | take the faucet's grant, when the wallet runs out mid-session |
+| `` `reset` `` | forget this session's exchanges |
+| `` `exit` `` | leave — Ctrl-D does too |
+
+**Subcommands go in backticks**, so everything else is a question: `` `single` `` switches mode,
+while *single out the slowest handler* asks the panel something. (A leading `/` works too.)
 
 Every question is paid for separately, and the session prints its running total when you leave.
 

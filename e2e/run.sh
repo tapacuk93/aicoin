@@ -571,6 +571,15 @@ print(d['answer'].replace(' ', '_'), d['settled'], d['rounds'], d['calls'], d['c
   # Canonical panel order, not the order the request happened to list them in.
   [ "$panel" = "anthropic,openai" ] && [ "$editor" = "anthropic" ] && pass "panel=[anthropic,openai], editor=anthropic (stable order)" \
     || fail "expected panel anthropic,openai editor anthropic; got panel=$panel editor=$editor"
+  # The per-provider breakdown must account for every coin the call charged: it is what a client
+  # reads to find out which model the money went to.
+  spend_total=$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t24.json'))
+print(sum(d.get('spend', {}).values()), len(d.get('spend', {})))
+")
+  [ "$spend_total" = "5 2" ] && pass "spend breaks the 5 coins down across both panelists" \
+    || fail "expected the spend map to total 5 across 2 providers, got: $spend_total"
   spent=$(python3 -c "print(round(float('$bal_grace_before') - float('$bal_grace_after'), 6))")
   [ "$spent" = "5.0" ] && pass "wallet actually paid 5 aicoin" || fail "expected 5 aicoin spent, got $spent"
   grep -qi "^X-Aicoin-Charged: 5" "$WORKDIR/t24.headers" && pass "X-Aicoin-Charged: 5 (same header a single proxied call sets)" \

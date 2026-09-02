@@ -39,6 +39,12 @@ Paths are relative to the working directory above; anything outside it is refuse
 the file or replaces it whole, so give the complete intended contents rather than a patch or an
 excerpt. List only what the request actually asked to change.
 
+If a detail is left open — a filename, which directory it belongs in, what to put in it — choose a
+sensible one and go ahead, then say in one short line what you chose and why. Do not ask for
+clarification and do not refuse for want of a name: an unspecified name is a decision to make, not a
+blocker. Ask only when the request is genuinely ambiguous about *what to do*, not about what to
+call it.
+
 If the request is a question rather than an instruction, answer it normally and emit no block.`
 
 // action is one file operation the panel proposed.

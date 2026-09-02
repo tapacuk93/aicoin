@@ -191,6 +191,8 @@ The record is bounded by `consortium.maxContextChars` (default 60,000), because 
 
 It ends when a whole review round is clean (`settled: true`), or when `consortium.maxRounds` rounds have run (`settled: false`, `stopped_reason: "round_limit"`). **The cap, not agreement, is what guarantees termination**: reviewers asked to find fault can always find some, so an uncapped "until no more comments" is an unbounded spend.
 
+`spend` breaks `coins_charged` down by provider. Only this side can: each turn is settled against its own provider's reported usage, so a client adding up its own calls could not tell which model a consortium's coins went to.
+
 **Billing is not special: every turn is one ordinary paid call.** One aicoin held before it, the metered remainder settled from that provider's own reported usage afterwards, a refund if the provider never answered — exactly the rules in "Forwarding" above. A four-panelist consortium over two rounds is 13 calls and is billed as 13 calls. The response states `calls` and `coins_charged`, and carries the same `X-Aicoin-Charged` header a single proxied call does.
 
 **Partial results are returned, not discarded.** A wallet that runs out mid-call stops the rounds where the coins ran out and returns the best answer so far with `stopped_reason: "insufficient_balance"`; only a call that cannot afford its very first turn gets `402`. A panelist that fails (error status, timeout, or a 2xx carrying no text — a reasoning model can spend its whole output cap thinking) is dropped from that round and recorded in `errors`; the call continues with the rest. If *no* panelist produces a draft, that is `502`. A client that disconnects stops the rounds at the next boundary (`stopped_reason: "client_gone"`) — the turns already in flight are paid for and cannot be recalled.
@@ -207,6 +209,7 @@ Response `200`:
   "mode": "lead",                   // or "panel" — which shape actually ran
   "calls": 8,
   "coins_charged": 8,
+  "spend": {"anthropic": 5, "openai": 3},   // coins per provider: which models the money went to
   "reviews": [{"round": 1, "provider": "openai", "clean": false, "comments": "..."}],
   "errors": [{"stage": "draft", "provider": "mistral", "error": "upstream timed out"}],
   "drafts": [{"provider": "anthropic", "text": "..."}]   // only with include_transcript
