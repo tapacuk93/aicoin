@@ -781,6 +781,7 @@ func cmdConsortium(args []string) error {
 		return err
 	}
 	record := loadStats(*walletPath)
+	vault := newSecretVault()
 
 	// What the panel is told about where this was run. The listing goes by default because a
 	// question asked inside a project is nearly always about that project; contents are opt-in,
@@ -802,6 +803,15 @@ func cmdConsortium(args []string) error {
 			note += " (trimmed to fit)"
 		}
 		fmt.Fprintf(os.Stderr, "%s, %d chars\n", note, gathered.Chars)
+	}
+
+	// Everything after a $$ marker comes out here, before any of it can be sent: the question, the
+	// caller's own context, and the contents of every file pulled in from the directory.
+	prompt = vault.redact(prompt)
+	background = vault.redact(background)
+	if note := vault.protocol(); note != "" {
+		background = strings.TrimSpace(background + "\n\n" + note)
+		fmt.Fprintf(os.Stderr, "%d value(s) withheld — the panel sees a reference, not the value\n", vault.count())
 	}
 
 	// `aicoin single` switches this CLI to one model per question. An explicit -mode means the
@@ -828,7 +838,8 @@ func cmdConsortium(args []string) error {
 			return fmt.Errorf("no default model for %q", provider)
 		}
 		fmt.Fprintf(os.Stderr, "single mode · %s (%s)\n", provider, why)
-		_, err = askOne(client, wallet, record, provider, model, background, prompt, root, *auto, confirmOnStdin)
+		_, err = askOne(client, wallet, record, provider, model, background, prompt, root, *auto,
+			confirmOnStdin, vault)
 		return err
 	}
 
@@ -893,7 +904,7 @@ func cmdConsortium(args []string) error {
 	if root == "" {
 		fmt.Println(parsed.Answer)
 	} else {
-		deliverAnswer(root, parsed.Answer, *auto, confirmOnStdin)
+		deliverAnswer(root, parsed.Answer, *auto, confirmOnStdin, vault)
 	}
 
 	if *verbose {

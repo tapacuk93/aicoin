@@ -47,6 +47,7 @@ type sessionState struct {
 	verbose   bool
 	auto      bool
 	record    *stats
+	vault     *secretVault
 	reader    *bufio.Reader
 	history   []exchange
 	spent     int64
@@ -89,6 +90,9 @@ func runSession(dir string, url string, walletPath string, state *sessionState) 
 	}
 	state.dir = absolute
 	state.record = loadStats(walletPath)
+	// One vault for the session: a secret given in the first question can be referenced in the
+	// fifth, and none of them are ever written down.
+	state.vault = newSecretVault()
 
 	wallet, err := loadWallet(walletPath)
 	if err != nil {
@@ -160,6 +164,17 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 	if history := s.historyText(); history != "" {
 		background = strings.TrimSpace(background + "\n\n" + history)
 	}
+	// Redacted here, at the last point before anything is sent — and the question is redacted
+	// before it goes into the history, so a secret cannot reappear in a later turn's context.
+	question = s.vault.redact(question)
+	background = s.vault.redact(background)
+	before := s.vault.count()
+	if note := s.vault.protocol(); note != "" {
+		background = strings.TrimSpace(background + "\n\n" + note)
+	}
+	if s.vault.count() > 0 && before > 0 {
+		fmt.Fprintf(os.Stderr, "%d value(s) withheld\n", s.vault.count())
+	}
 
 	// One model per question, when this CLI is in single mode. Same directory, same ability to
 	// propose changes — one call instead of one per panelist per round.
@@ -174,7 +189,7 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 		}
 		fmt.Fprintf(os.Stderr, "%s · %s\n", provider, why)
 		charged, err := askOne(client, wallet, s.record, provider, model, background, question,
-			s.dir, s.auto, s.confirm)
+			s.dir, s.auto, s.confirm, s.vault)
 		if err != nil {
 			return err
 		}
@@ -218,7 +233,7 @@ func (s *sessionState) askPanel(question string, client *Client, wallet *Wallet)
 		return nil
 	}
 
-	deliverAnswer(s.dir, parsed.Answer, s.auto, s.confirm)
+	deliverAnswer(s.dir, parsed.Answer, s.auto, s.confirm, s.vault)
 	if s.verbose {
 		for _, review := range parsed.Reviews {
 			if review.Clean {
