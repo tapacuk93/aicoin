@@ -166,6 +166,10 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             requireLiveSignature(ctx, request, body, address -> handleRevokeTokens(ctx, address));
             return;
         }
+        if (request.method() == HttpMethod.GET && "/wallet/api/ratings".equals(path)) {
+            NoteHandler.serveRatings(ctx, ledger);
+            return;
+        }
         if (request.method() == HttpMethod.GET && path.startsWith("/wallet/api/reputation/")) {
             NoteHandler.serveReputation(ctx, ledger, path.substring("/wallet/api/reputation/".length()));
             return;

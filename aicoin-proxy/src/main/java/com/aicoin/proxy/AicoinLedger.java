@@ -634,6 +634,49 @@ final class AicoinLedger implements AutoCloseable {
         });
     }
 
+    /**
+     * Every known wallet's balance and double-spend count, for the signed snapshot wallets carry
+     * so a rating can be checked with no network — see {@link RatingsSnapshot}.
+     *
+     * <p>Bounded: past {@code limit} wallets this stops, and the snapshot says how many it holds.
+     * A list that grows without limit is a list that eventually cannot be downloaded by the phone
+     * that needs it most.
+     */
+    void allWalletStandings(int limit, Consumer<Optional<List<String[]>>> onResult) {
+        commands.smembers(KNOWN_WALLETS_KEY).whenComplete((addresses, err) -> {
+            if (err != null || addresses == null) {
+                LOG.log(Level.WARNING, "known-wallet listing failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            List<String> wallets = new ArrayList<>(addresses);
+            Collections.sort(wallets);
+            if (wallets.size() > limit) {
+                wallets = wallets.subList(0, limit);
+            }
+            List<CompletableFuture<String[]>> pending = new ArrayList<>();
+            for (String address : wallets) {
+                CompletableFuture<String> balance = commands.get(balanceKey(address)).toCompletableFuture();
+                CompletableFuture<String> doubleSpends =
+                        commands.get("aicoin:" + TAG + ":double-spends:" + address).toCompletableFuture();
+                pending.add(balance.thenCombine(doubleSpends, (held, spends) ->
+                        new String[] {address, held == null ? "0" : held, spends == null ? "0" : spends}));
+            }
+            CompletableFuture.allOf(pending.toArray(new CompletableFuture[0])).whenComplete((ignored, allErr) -> {
+                if (allErr != null) {
+                    LOG.log(Level.WARNING, "wallet standings failed", allErr);
+                    onResult.accept(Optional.empty());
+                    return;
+                }
+                List<String[]> rows = new ArrayList<>();
+                for (CompletableFuture<String[]> future : pending) {
+                    rows.add(future.join());
+                }
+                onResult.accept(Optional.of(rows));
+            });
+        });
+    }
+
     /** How many proven double-spends stand against a wallet. Public: it is what a rating is made of. */
     void doubleSpendCount(String address, Consumer<Long> onResult) {
         commands.get("aicoin:" + TAG + ":double-spends:" + address).whenComplete((value, err) -> {

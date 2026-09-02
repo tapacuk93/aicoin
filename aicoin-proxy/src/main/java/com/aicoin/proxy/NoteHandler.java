@@ -10,6 +10,7 @@ import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.util.CharsetUtil;
 import java.time.Instant;
+import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -259,6 +260,52 @@ final class NoteHandler {
      * number would blur them into something that looks like a credit rating and is not one. No
      * counterparties and no history: a balance is already public, and this adds one counter to it.
      */
+    /**
+     * {@code GET /wallet/api/ratings} — every wallet's rating, signed, so a wallet can check one
+     * while offline. See {@link RatingsSnapshot} for why it is signed and why its age matters.
+     */
+    static void serveRatings(ChannelHandlerContext ctx, AicoinLedger ledger) {
+        NoteSigner.ensure(ledger, signer -> {
+            if (!signer.isPresent()) {
+                sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "signing is unavailable");
+                return;
+            }
+            ledger.allWalletStandings(RatingsSnapshot.MAX_WALLETS, standings -> {
+                if (!standings.isPresent()) {
+                    sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not reach the ledger");
+                    return;
+                }
+                long now = System.currentTimeMillis();
+                java.util.List<String[]> ratings = new java.util.ArrayList<>();
+                for (String[] row : standings.get()) {
+                    double balance = parseOrZero(row[1]);
+                    long doubleSpends = (long) parseOrZero(row[2]);
+                    // Scored from the two facts a snapshot can carry cheaply. The per-wallet
+                    // endpoint knows more — purchases, calls, counterparties — and rates higher;
+                    // the snapshot is the floor, and says so in the contract.
+                    ratings.add(new String[] {row[0],
+                            String.valueOf(Reputation.score(balance, doubleSpends,
+                                    java.util.Map.of("entries", 1L), now))});
+                }
+                try {
+                    String signature = HexFormat.of().formatHex(
+                            signer.get().sign(RatingsSnapshot.canonical(now, ratings)));
+                    sendJson(ctx, RatingsSnapshot.json(now, ratings, signature));
+                } catch (Exception e) {
+                    sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not sign the snapshot");
+                }
+            });
+        });
+    }
+
+    private static double parseOrZero(String value) {
+        try {
+            return Double.parseDouble(value);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
     static void serveReputation(ChannelHandlerContext ctx, AicoinLedger ledger, String address) {
         if (!address.matches("[0-9a-fA-F]{64}")) {
             sendError(ctx, HttpResponseStatus.BAD_REQUEST, "address must be 64 hex characters");

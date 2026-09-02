@@ -463,6 +463,21 @@ The reasons are published beside the number, and clients are expected to show th
 
 A proven double-spend is also written into the **victim's** own transaction log as a `double_spend` entry. Being told once, in the moment a sync happened to print it, is not the same as having a record of it.
 
+### Ratings snapshot
+`GET /wallet/api/ratings` → `{"issued_at":<epochMillis>,"count":N,"max":5000,"ratings":{"<address>":<0-5>,...},"signature":"<hex>"}`, signed with the same key notes are (`GET /wallet/api/notes/key`).
+
+A rating is only useful at the moment somebody is deciding whether to accept a payment, and that moment is exactly when there is no network — that is what offline payment means. So the ledger signs the whole list, wallets download it while they can, and the confirmation shows it from disk.
+
+The signed text is canonical and dull on purpose, because two implementations have to hash the same bytes:
+
+```
+aicoin-ratings\n<issued_at>\n<address>:<rating>\n...      (sorted by address)
+```
+
+**A snapshot cannot be fresh, and must not pretend to be.** A rating drops to zero the instant a double-spend is proven, and this morning's copy will not know. The issue time is *inside* the signed text, so a stale copy cannot be passed off as current, and every client shows that age beside the number.
+
+Two limits, both stated in the document itself so a client knows what it is holding: at most `max` wallets, and the snapshot rates from balance and proven double-spends alone — the per-wallet endpoint knows about purchases, calls and counterparties, and rates the same wallet higher. A snapshot rating is a floor.
+
 ### Additional proxy-side endpoints
 - `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"half_life_days":110}` computed directly from the ledger — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life. Always includes `Access-Control-Allow-Origin: *` — this is public, read-only data fetched cross-origin by the landing page at aicoin.oeaio.com (a separate origin from the proxy).
 - `GET /free-coins/available` → `{"available": N}` — the real, live remaining count in the shared Redis-backed pool (`AicoinLedger.getFreeCoinsRemaining`), the same counter `POST /wallet/api/claim` atomically decrements. Not a static admin-managed file — this number is authoritative and changes in real time as wallets claim. A ledger-lookup failure resolves to `{"available": 0}`.
