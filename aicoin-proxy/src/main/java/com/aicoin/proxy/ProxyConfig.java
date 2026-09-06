@@ -445,11 +445,16 @@ public final class ProxyConfig {
                             .put(capability.path(), rating);
                 }
             }
-            for (String subject : SubjectTagger.subjects()) {
-                Integer rating = ratingFor(yaml, env, provider, subject,
-                        subjectRatings.getOrDefault(provider, Map.of()).get(subject));
-                if (rating != null) {
-                    subjectRatings.computeIfAbsent(provider, p -> new LinkedHashMap<>()).put(subject, rating);
+            for (Capability capability : Capability.values()) {
+                for (String subject : SubjectTagger.subjects()) {
+                    // Bare for text ("code"), prefixed for media ("image-creative"): a rating for
+                    // writing code is not a rating for reading it aloud.
+                    String key = ProviderSkills.key(capability, subject);
+                    Integer rating = ratingFor(yaml, env, provider, key,
+                            subjectRatings.getOrDefault(provider, Map.of()).get(key));
+                    if (rating != null) {
+                        subjectRatings.computeIfAbsent(provider, p -> new LinkedHashMap<>()).put(key, rating);
+                    }
                 }
             }
         }
@@ -489,7 +494,7 @@ public final class ProxyConfig {
         int fallback = shipped == null ? -1 : shipped;
         int fromYaml = getInt(yaml, "capabilities.skills." + provider + "." + key, fallback);
         int rating = envInt(env, "AICOIN_PROXY_SKILL_" + provider.toUpperCase(Locale.ROOT) + "_"
-                + key.toUpperCase(Locale.ROOT), fromYaml);
+                + key.toUpperCase(Locale.ROOT).replace('-', '_'), fromYaml);
         return rating < 0 ? null : rating;
     }
 

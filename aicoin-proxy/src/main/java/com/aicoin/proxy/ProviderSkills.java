@@ -20,6 +20,12 @@ import java.util.Map;
  * thing at all is expressed — ElevenLabs writes no prose, and Anthropic returns no images. Between
  * providers that can, the subject rating decides, and a provider with no rating for that subject
  * falls back to its capability rating: no entry means no opinion, not a bad score.
+ *
+ * <p>A bare subject key ({@code code}) rates the provider's <em>text</em>; a media capability takes
+ * a prefixed one ({@code image-creative}, {@code audio-creative}). Being good at code says nothing
+ * about who should read a sentence about code out loud, and before the prefix existed it decided
+ * exactly that — {@code /audio} on a code-tagged request ranked OpenAI over ElevenLabs on the
+ * strength of OpenAI's rating for writing code.
  */
 final class ProviderSkills {
 
@@ -64,18 +70,35 @@ final class ProviderSkills {
         if (base == 0) {
             return 0;
         }
-        Map<String, Integer> subjects = subjectRatings.get(provider);
-        if (subjects == null || subject == null) {
-            return base;
-        }
-        Integer rating = subjects.get(subject);
+        Integer rating = subjectRating(provider, capability, subject);
         return rating == null ? base : clamp(rating);
     }
 
-    /** @return true when this provider has an explicit rating for the subject, rather than a fallback. */
-    boolean hasSubjectRating(String provider, String subject) {
+    /** @return the rating for this subject <em>under this capability</em>, or null if there is none. */
+    private Integer subjectRating(String provider, Capability capability, String subject) {
         Map<String, Integer> subjects = subjectRatings.get(provider);
-        return subject != null && subjects != null && subjects.containsKey(subject);
+        if (subjects == null || subject == null) {
+            return null;
+        }
+        Integer scoped = subjects.get(key(capability, subject));
+        if (scoped != null) {
+            return scoped;
+        }
+        // A bare key is a rating for text, and applies to nothing else.
+        return capability == Capability.TEXT ? subjects.get(subject) : null;
+    }
+
+    /** The config key a subject rating is written under for this capability. */
+    static String key(Capability capability, String subject) {
+        // Hyphen, not a dot: config paths are dotted, and "image.creative" under a provider would
+        // have to be a nested map — which collides with `image` already being that provider's
+        // capability rating.
+        return capability == Capability.TEXT ? subject : capability.path() + "-" + subject;
+    }
+
+    /** @return true when this provider has an explicit rating for the subject, rather than a fallback. */
+    boolean hasSubjectRating(String provider, Capability capability, String subject) {
+        return subjectRating(provider, capability, subject) != null;
     }
 
     /**
@@ -113,7 +136,7 @@ final class ProviderSkills {
     Comparator<String> ranking(Capability capability, String subject, List<String> canonicalOrder) {
         return Comparator
                 .comparingInt((String provider) -> score(provider, capability, subject))
-                .thenComparingInt(provider -> hasSubjectRating(provider, subject) ? 1 : 0)
+                .thenComparingInt(provider -> hasSubjectRating(provider, capability, subject) ? 1 : 0)
                 .reversed()
                 .thenComparingInt(canonicalOrder::indexOf);
     }
@@ -146,9 +169,10 @@ final class ProviderSkills {
         subjects.put("mistral", ratings("translation", 4, "code", 3, "writing", 3));
         subjects.put("kimi", ratings("translation", 5, "analysis", 4, "code", 4, "writing", 4));
         // For a media provider the subject barely moves the choice — there are two candidates — but
-        // an illustration is what Stability is for, and a spoken narration is what ElevenLabs is for.
-        subjects.put("stability", ratings("creative", 5));
-        subjects.put("elevenlabs", ratings("creative", 5));
+        // an illustration is what Stability is for, and a spoken narration is what ElevenLabs is
+        // for. Prefixed, because these are ratings for drawing and speaking, not for writing.
+        subjects.put("stability", ratings("image-creative", 5));
+        subjects.put("elevenlabs", ratings("audio-creative", 5));
         return new ProviderSkills(capabilities, subjects);
     }
 

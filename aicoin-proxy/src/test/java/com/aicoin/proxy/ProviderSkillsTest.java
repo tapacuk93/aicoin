@@ -72,9 +72,33 @@ class ProviderSkillsTest {
         // specifically. Same number, but one of them is an opinion about the question asked.
         assertEquals(5, SKILLS.score("anthropic", Capability.TEXT, "science"));
         assertEquals(5, SKILLS.score("google", Capability.TEXT, "science"));
-        assertFalse(SKILLS.hasSubjectRating("anthropic", "science"));
-        assertTrue(SKILLS.hasSubjectRating("google", "science"));
+        assertFalse(SKILLS.hasSubjectRating("anthropic", Capability.TEXT, "science"));
+        assertTrue(SKILLS.hasSubjectRating("google", Capability.TEXT, "science"));
         assertEquals("google", SKILLS.rank(Capability.TEXT, "science", null).get(0));
+    }
+
+    @Test
+    void aTextSubjectRatingDoesNotDecideWhoSpeaksOrDraws() {
+        // OpenAI is rated 5 at code and 4 at speech; ElevenLabs is 5 at speech and says nothing
+        // about code. Reading a sentence about code aloud is a speech job, so ElevenLabs takes it
+        // — being good at writing code is not a qualification for narrating it.
+        assertEquals(0, SKILLS.score("elevenlabs", Capability.TEXT, "code"));
+        assertEquals(4, SKILLS.score("openai", Capability.AUDIO, "code"));
+        assertEquals(5, SKILLS.score("elevenlabs", Capability.AUDIO, "code"));
+        assertEquals("elevenlabs", SKILLS.rank(Capability.AUDIO, "code", null).get(0));
+        assertEquals("openai", SKILLS.rank(Capability.IMAGE, "code", null).get(0));
+    }
+
+    @Test
+    void aMediaSubjectRatingIsWrittenUnderItsCapability() {
+        assertEquals("code", ProviderSkills.key(Capability.TEXT, "code"));
+        assertEquals("image-creative", ProviderSkills.key(Capability.IMAGE, "creative"));
+        // An illustration is what Stability is for; a narration is what ElevenLabs is for.
+        assertEquals("stability", SKILLS.rank(Capability.IMAGE, "creative", null).get(0));
+        assertEquals("elevenlabs", SKILLS.rank(Capability.AUDIO, "creative", null).get(0));
+        // ...and neither claim leaks into the other's capability.
+        assertEquals(5, SKILLS.capabilityRating("openai", Capability.IMAGE));
+        assertEquals(5, SKILLS.score("openai", Capability.IMAGE, "writing"));
     }
 
     @Test
