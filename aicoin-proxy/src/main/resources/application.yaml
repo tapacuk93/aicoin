@@ -229,16 +229,20 @@ capabilities:
   # traffic — they are one reading of which model to reach for, and they will be wrong for
   # somebody's workload. Edit them; a caller who disagrees names a provider explicitly and is not
   # routed at all. Subjects: code, math, translation, writing, creative, analysis, science, legal,
-  # general. Env: AICOIN_PROXY_SKILL_<PROVIDER>_<CAPABILITY-OR-SUBJECT>, e.g.
-  # AICOIN_PROXY_SKILL_OPENAI_CODE=4.
+  # general. A bare subject key rates the provider's text; a media capability takes a prefixed one
+  # (image-creative, audio-creative). Env: AICOIN_PROXY_SKILL_<PROVIDER>_<KEY>, e.g.
+  # AICOIN_PROXY_SKILL_OPENAI_CODE=4 or AICOIN_PROXY_SKILL_STABILITY_IMAGE_CREATIVE=3.
   skills:
     anthropic: { text: 5, code: 5, writing: 5, analysis: 5, legal: 4, creative: 4 }
     openai:    { text: 5, image: 5, audio: 4, code: 5, math: 5, science: 4, analysis: 4, creative: 4 }
     google:    { text: 4, science: 5, translation: 5, math: 4, analysis: 4, code: 3 }
     mistral:   { text: 3, translation: 4, code: 3, writing: 3 }
     kimi:      { text: 4, translation: 5, analysis: 4, code: 4, writing: 4 }
-    elevenlabs: { audio: 5, creative: 5 }
-    stability:  { image: 4, creative: 5 }
+    # A media provider's subject rating is prefixed with the capability: being rated for writing
+    # code says nothing about who should read a sentence about code aloud, and an unprefixed
+    # rating decided exactly that.
+    elevenlabs: { audio: 5, audio-creative: 5 }
+    stability:  { image: 4, image-creative: 5 }
 health:
   windowSize: 50
   # Liveness probing: one GET per provider per interval, to that provider's `probePath` above,

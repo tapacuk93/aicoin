@@ -153,8 +153,8 @@ capabilities:                      # POST /text, /image, /audio — see their ow
     google:    { text: 4, science: 5, translation: 5, math: 4, analysis: 4, code: 3 }
     mistral:   { text: 3, translation: 4, code: 3, writing: 3 }
     kimi:      { text: 4, translation: 5, analysis: 4, code: 4, writing: 4 }
-    elevenlabs: { audio: 5, creative: 5 }        # AICOIN_PROXY_SKILL_ELEVENLABS_AUDIO
-    stability:  { image: 4, creative: 5 }
+    elevenlabs: { audio: 5, audio-creative: 5 }  # AICOIN_PROXY_SKILL_ELEVENLABS_AUDIO
+    stability:  { image: 4, image-creative: 5 }
 pricing:
   costPerTokenUsd: 0.000002       # AICOIN_PROXY_COST_PER_TOKEN_USD
   defaultCostUsdPerCall: 0.001    # AICOIN_PROXY_DEFAULT_COST_USD
@@ -586,8 +586,10 @@ a call.
 
 **The ratings are opinions.** Nothing in the skills table is benchmarked or
 learned from traffic. That is why they are config, why each is overridable with
-`AICOIN_PROXY_SKILL_<PROVIDER>_<CAPABILITY-OR-SUBJECT>`, and why naming a
-`provider` in the request skips routing entirely.
+`AICOIN_PROXY_SKILL_<PROVIDER>_<KEY>`, and why naming a `provider` in the
+request skips routing entirely. A bare subject key rates that provider's text;
+a media capability takes a prefixed one (`image-creative`, `audio-creative`),
+because being rated for writing code is not a rating for narrating it.
 
 **Escalation.** A model answering `/text` alone may reply with exactly
 `NEEDS CONSORTIUM`, and the same request goes to the panel below — drafted,
