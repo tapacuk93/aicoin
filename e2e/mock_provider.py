@@ -33,6 +33,12 @@ import json
 import sys
 from urllib.parse import urlparse, parse_qs
 
+# A 1x1 PNG, and five bytes that are not JSON. Both stand in for media this suite never looks at
+# beyond checking that what arrived is what the provider sent.
+MOCK_IMAGE_BASE64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmM"
+                     "IQAAAABJRU5ErkJggg==")
+MOCK_AUDIO_BYTES = bytes([0xFF, 0xFB, 0x10, 0x00, 0x42])
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def _respond(self):
@@ -64,6 +70,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            return
+
+        # The media endpoints POST /image and POST /audio reach a provider on its own image or
+        # speech path. Each provider answers in its own shape, and MediaAdapter's whole job is to
+        # read all three, so the mock has to speak all three too.
+        path_only = urlparse(self.path).path
+        if path_only == "/v1/images/generations":
+            self._respond_json({"created": 1, "data": [{"b64_json": MOCK_IMAGE_BASE64}],
+                                "usage": {"total_tokens": 0}})
+            return
+        if path_only.startswith("/v1/generation/") and path_only.endswith("/text-to-image"):
+            self._respond_json({"artifacts": [{"base64": MOCK_IMAGE_BASE64, "finishReason": "SUCCESS"}]})
+            return
+        if path_only.startswith("/v1/text-to-speech/") or path_only == "/v1/audio/speech":
+            # Raw bytes, as both speech APIs answer. Deliberately not JSON: reading these as text
+            # is the bug the audio path has to not have.
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", str(len(MOCK_AUDIO_BYTES)))
+            self.end_headers()
+            self.wfile.write(MOCK_AUDIO_BYTES)
             return
 
         # A consortium turn: the proxy composed this request itself, so it wants a
@@ -103,6 +130,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return (isinstance(messages, list) and messages
                 and isinstance(messages[0], dict) and messages[0].get("role") == "system")
 
+    def _respond_json(self, body):
+        payload = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _respond_chat(self, raw_body):
         text = self._chat_text(raw_body.decode("utf-8", "replace"))
         path = urlparse(self.path).path
@@ -128,6 +163,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _chat_text(body_text):
         reviewing = "reviewing a candidate answer" in body_text
         editing = "editor of a panel" in body_text
+        # POST /text: one model answering alone, with the escape hatch. It takes it only when the
+        # request carries the marker, so escalation is exercised without being unavoidable.
+        if "answering a request on your own" in body_text:
+            return "NEEDS CONSORTIUM" if "ESCALATE_ME" in body_text else "SINGLE ANSWER from mock"
         if reviewing:
             if "ALWAYS_COMMENTS" in body_text:
                 return "The answer still does not say what was asked."

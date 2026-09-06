@@ -123,6 +123,13 @@ pricing:
         # is dearer on input than GPT-5 actually is, and a rate this proxy gets wrong in either
         # direction ends up in GET /price.
         gpt-5: { inputUsdPerMillionTokens: 1.25, outputUsdPerMillionTokens: 10.00 }
+        # Billed per image and per clip. Both are reached through POST /image and POST /audio,
+        # whose responses report either no usage at all or a token count that has nothing to do
+        # with the price — so a flat figure is the only honest one. Check and correct these when
+        # OpenAI reprices; an image recorded at a tenth of its cost is published as the coin price.
+        gpt-image-1:      { usdPerCall: 0.042 }
+        gpt-image-1-mini: { usdPerCall: 0.015 }
+        gpt-4o-mini-tts:  { usdPerCall: 0.015 }
     google:
       inputUsdPerMillionTokens: 0.30
       outputUsdPerMillionTokens: 2.50
@@ -191,6 +198,47 @@ consortium:
     google: gemini-3.5-flash
     mistral: mistral-large-latest
     kimi: kimi-k2.6
+# The consolidated endpoints: POST /text, POST /image, POST /audio. One shape in, one shape out,
+# with the provider chosen here from the ratings below rather than named by the caller. See
+# CONTRACT.md's "Capability endpoints" section.
+capabilities:
+  text:
+    # Whether a single model answering POST /text may hand the request to the whole panel by
+    # replying with NEEDS CONSORTIUM. It costs the caller several times one call, so a deployment
+    # that wants a predictable per-request price turns this off and every /text call is exactly
+    # one call. Env: AICOIN_PROXY_CAPABILITIES_ESCALATION_ENABLED.
+    escalation: true
+  image:
+    models:
+      openai: gpt-image-1                            # AICOIN_PROXY_OPENAI_IMAGE_MODEL
+      stability: stable-diffusion-xl-1024-v1-0       # AICOIN_PROXY_STABILITY_IMAGE_MODEL
+  audio:
+    models:
+      elevenlabs: eleven_multilingual_v2             # AICOIN_PROXY_ELEVENLABS_AUDIO_MODEL
+      openai: gpt-4o-mini-tts                        # AICOIN_PROXY_OPENAI_AUDIO_MODEL
+    voices:
+      # A stock ElevenLabs voice every account has, and OpenAI's default. Either can be overridden
+      # per request with "voice". Env: AICOIN_PROXY_<PROVIDER>_VOICE.
+      elevenlabs: EXAVITQu4vr4xnSDxMaL
+      openai: alloy
+  # What each provider is rated at, 0-5. A capability rating of 0 means never route: it is how
+  # "this provider does not do that" is said. Subject ratings override the capability rating for
+  # requests tagged with that subject; a subject with no entry means no opinion, not a bad score.
+  #
+  # These are the operator's opinion. Nothing here is benchmarked and nothing is learned from
+  # traffic — they are one reading of which model to reach for, and they will be wrong for
+  # somebody's workload. Edit them; a caller who disagrees names a provider explicitly and is not
+  # routed at all. Subjects: code, math, translation, writing, creative, analysis, science, legal,
+  # general. Env: AICOIN_PROXY_SKILL_<PROVIDER>_<CAPABILITY-OR-SUBJECT>, e.g.
+  # AICOIN_PROXY_SKILL_OPENAI_CODE=4.
+  skills:
+    anthropic: { text: 5, code: 5, writing: 5, analysis: 5, legal: 4, creative: 4 }
+    openai:    { text: 5, image: 5, audio: 4, code: 5, math: 5, science: 4, analysis: 4, creative: 4 }
+    google:    { text: 4, science: 5, translation: 5, math: 4, analysis: 4, code: 3 }
+    mistral:   { text: 3, translation: 4, code: 3, writing: 3 }
+    kimi:      { text: 4, translation: 5, analysis: 4, code: 4, writing: 4 }
+    elevenlabs: { audio: 5, creative: 5 }
+    stability:  { image: 4, creative: 5 }
 health:
   windowSize: 50
   # Liveness probing: one GET per provider per interval, to that provider's `probePath` above,

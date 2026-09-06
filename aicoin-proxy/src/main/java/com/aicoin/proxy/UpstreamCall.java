@@ -100,6 +100,14 @@ final class UpstreamCall {
             return new String(body, CharsetUtil.UTF_8);
         }
 
+        /**
+         * The response bytes as they arrived. Speech comes back as MP3 and some image APIs as raw
+         * PNG, neither of which survives being read as UTF-8 text.
+         */
+        byte[] body() {
+            return body;
+        }
+
         /** Why no response arrived, or — for a non-2xx — a short description of the status. */
         String getError() {
             if (error != null) {

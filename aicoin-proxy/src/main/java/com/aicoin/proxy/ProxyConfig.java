@@ -54,6 +54,7 @@ public final class ProxyConfig {
     private final int upstreamReadTimeoutSeconds;
     private final ConsortiumConfig consortium;
     private final HealthProbeConfig healthProbe;
+    private final CapabilityConfig capabilities;
 
     private ProxyConfig(int port, String redisHost, int redisPort, String redisUsername, String redisPassword, boolean redisSsl,
                          double decayHalflifeDays, int freeClaimCooldownSeconds, int signatureSkewSeconds,
@@ -64,7 +65,7 @@ public final class ProxyConfig {
                          boolean acceptSandboxPurchases,
                          String accessLogPath, int accessLogMaxBytes, int accessLogCount,
                          int upstreamReadTimeoutSeconds, ConsortiumConfig consortium,
-                         HealthProbeConfig healthProbe) {
+                         HealthProbeConfig healthProbe, CapabilityConfig capabilities) {
         this.port = port;
         this.redisHost = redisHost;
         this.redisPort = redisPort;
@@ -91,6 +92,7 @@ public final class ProxyConfig {
         this.upstreamReadTimeoutSeconds = upstreamReadTimeoutSeconds;
         this.consortium = consortium;
         this.healthProbe = healthProbe;
+        this.capabilities = capabilities;
     }
 
     /**
@@ -196,6 +198,11 @@ public final class ProxyConfig {
 
     public double getDefaultCostUsdPerCall() {
         return defaultCostUsdPerCall;
+    }
+
+    /** @return the {@code capabilities} block behind {@code POST /text}, {@code /image} and {@code /audio}. */
+    CapabilityConfig getCapabilities() {
+        return capabilities;
     }
 
     /** @return whether {@link ProviderLiveness} probes providers at all ({@code health.probe.enabled}). */
@@ -406,13 +413,84 @@ public final class ProxyConfig {
         ModelPricing modelPricing = parseModelPricing(yaml, costPerTokenUsd, defaultCostUsdPerCall);
         ConsortiumConfig consortium = parseConsortium(yaml, env);
         HealthProbeConfig healthProbe = parseHealthProbe(yaml, env);
+        CapabilityConfig capabilities = parseCapabilities(yaml, env);
 
         return new ProxyConfig(port, redisHost, redisPort, redisUsername, redisPassword, redisSsl,
                 decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
                 costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages, modelPricing,
                 coinValueUsd, meteredBilling, acceptSandboxPurchases,
                 accessLogPath, accessLogMaxBytes, accessLogCount, upstreamReadTimeoutSeconds, consortium,
-                healthProbe);
+                healthProbe, capabilities);
+    }
+
+    /**
+     * Reads the {@code capabilities} block: the skill ratings the consolidated endpoints route on,
+     * the image/audio models and voices, and whether a single model may escalate to the panel.
+     *
+     * <p>Ratings are config rather than code because they are opinions with a shelf life — a
+     * provider ships a better model and last month's ranking is wrong. Any one of them can be
+     * corrected with a YAML edit or {@code AICOIN_PROXY_SKILL_<PROVIDER>_<KEY>}, where the key is
+     * a capability ({@code TEXT}) or a subject ({@code CODE}).
+     */
+    private static CapabilityConfig parseCapabilities(Map<String, Object> yaml, Map<String, String> env) {
+        ProviderSkills shipped = ProviderSkills.defaults();
+        Map<String, Map<String, Integer>> capabilityRatings = shipped.capabilities();
+        Map<String, Map<String, Integer>> subjectRatings = shipped.subjects();
+        for (String provider : PROVIDER_NAMES) {
+            for (Capability capability : Capability.values()) {
+                Integer rating = ratingFor(yaml, env, provider, capability.path(),
+                        capabilityRatings.getOrDefault(provider, Map.of()).get(capability.path()));
+                if (rating != null) {
+                    capabilityRatings.computeIfAbsent(provider, p -> new LinkedHashMap<>())
+                            .put(capability.path(), rating);
+                }
+            }
+            for (String subject : SubjectTagger.subjects()) {
+                Integer rating = ratingFor(yaml, env, provider, subject,
+                        subjectRatings.getOrDefault(provider, Map.of()).get(subject));
+                if (rating != null) {
+                    subjectRatings.computeIfAbsent(provider, p -> new LinkedHashMap<>()).put(subject, rating);
+                }
+            }
+        }
+
+        Map<String, String> imageModels = new LinkedHashMap<>();
+        imageModels.put("openai", "gpt-image-1");
+        imageModels.put("stability", "stable-diffusion-xl-1024-v1-0");
+        Map<String, String> audioModels = new LinkedHashMap<>();
+        audioModels.put("elevenlabs", "eleven_multilingual_v2");
+        audioModels.put("openai", "gpt-4o-mini-tts");
+        Map<String, String> voices = new LinkedHashMap<>();
+        // A stock ElevenLabs voice every account has, and OpenAI's default. Both are overridable
+        // per request, so this is only what an unspecified request gets.
+        voices.put("elevenlabs", "EXAVITQu4vr4xnSDxMaL");
+        voices.put("openai", "alloy");
+        for (String provider : PROVIDER_NAMES) {
+            imageModels.computeIfPresent(provider, (p, model) ->
+                    envStr(env, "AICOIN_PROXY_" + p.toUpperCase(Locale.ROOT) + "_IMAGE_MODEL",
+                            getString(yaml, "capabilities.image.models." + p, model)));
+            audioModels.computeIfPresent(provider, (p, model) ->
+                    envStr(env, "AICOIN_PROXY_" + p.toUpperCase(Locale.ROOT) + "_AUDIO_MODEL",
+                            getString(yaml, "capabilities.audio.models." + p, model)));
+            voices.computeIfPresent(provider, (p, voice) ->
+                    envStr(env, "AICOIN_PROXY_" + p.toUpperCase(Locale.ROOT) + "_VOICE",
+                            getString(yaml, "capabilities.audio.voices." + p, voice)));
+        }
+
+        boolean escalation = envBool(env, "AICOIN_PROXY_CAPABILITIES_ESCALATION_ENABLED",
+                getBoolean(yaml, "capabilities.text.escalation", true));
+        return new CapabilityConfig(new ProviderSkills(capabilityRatings, subjectRatings),
+                imageModels, audioModels, voices, escalation);
+    }
+
+    /** One rating from {@code capabilities.skills.<provider>.<key>} or its env override, or null. */
+    private static Integer ratingFor(Map<String, Object> yaml, Map<String, String> env, String provider,
+                                      String key, Integer shipped) {
+        int fallback = shipped == null ? -1 : shipped;
+        int fromYaml = getInt(yaml, "capabilities.skills." + provider + "." + key, fallback);
+        int rating = envInt(env, "AICOIN_PROXY_SKILL_" + provider.toUpperCase(Locale.ROOT) + "_"
+                + key.toUpperCase(Locale.ROOT), fromYaml);
+        return rating < 0 ? null : rating;
     }
 
     /**

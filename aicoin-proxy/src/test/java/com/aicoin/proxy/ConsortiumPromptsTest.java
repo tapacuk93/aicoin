@@ -83,4 +83,31 @@ class ConsortiumPromptsTest {
         assertTrue(system.contains("earlier round"));
         assertTrue(system.contains("do not repeat"));
     }
+
+    @Test
+    void escalationCountsOnlyAsTheWholeReply() {
+        assertTrue(ConsortiumPrompts.isEscalation("NEEDS CONSORTIUM"));
+        assertTrue(ConsortiumPrompts.isEscalation("  needs consortium  "));
+        assertTrue(ConsortiumPrompts.isEscalation("**NEEDS CONSORTIUM.**"));
+    }
+
+    @Test
+    void aReplyThatMentionsThePanelWhileAnsweringIsAnAnswer() {
+        // The failure this guards is expensive in a way the review marker's is not: throwing away
+        // a finished answer and spending a whole consortium on a question that was already done.
+        assertFalse(ConsortiumPrompts.isEscalation(
+                "This needs consortium-level review, but here is the answer: 42."));
+        assertFalse(ConsortiumPrompts.isEscalation("NEEDS CONSORTIUM because the spec is ambiguous."));
+        assertFalse(ConsortiumPrompts.isEscalation(""));
+        assertFalse(ConsortiumPrompts.isEscalation(null));
+    }
+
+    @Test
+    void theSingleModelIsToldWhatEscalatingCosts() {
+        // A model given an escape hatch and no sense of its price takes it whenever the question
+        // is interesting, and interesting is not the bar.
+        String system = ConsortiumPrompts.singleSystem();
+        assertTrue(system.contains(ConsortiumPrompts.ESCALATE));
+        assertTrue(system.contains("costs"));
+    }
 }

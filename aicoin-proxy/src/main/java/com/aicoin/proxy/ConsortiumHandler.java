@@ -72,6 +72,27 @@ final class ConsortiumHandler {
      * editor — are the same from one call to the next.
      */
     static List<String> panel(ProxyConfig config, Set<String> requested) {
+        return panel(config, requested, null, null);
+    }
+
+    /**
+     * The panel, ordered by what each member is rated at for this request's subject.
+     *
+     * <p>Order is not cosmetic here: the first panelist is the default editor, which is the model
+     * that merges every draft and writes every revision, and in lead mode it is the model that
+     * writes the answer at all. Ranking by {@link ProviderSkills} for the tagged subject is what
+     * puts the strongest model for the question in that seat rather than whichever provider
+     * happens to come first in the configuration.
+     *
+     * <p>Nobody is dropped for a low rating. A panel is worth having because its members disagree,
+     * and a weaker model that spots something the editor missed has earned its turn — the rating
+     * decides who writes, not who is allowed to speak.
+     *
+     * @param subject  the tagged subject, or null to keep the configured order
+     * @param liveness used to skip a provider last seen down; null to skip that check
+     */
+    static List<String> panel(ProxyConfig config, Set<String> requested, String subject,
+                               ProviderLiveness liveness) {
         List<String> panel = new ArrayList<>();
         for (String provider : ChatAdapter.CHAT_PROVIDERS) {
             if (requested != null && !requested.contains(provider)) {
@@ -85,7 +106,15 @@ final class ConsortiumHandler {
             if (model == null || model.trim().isEmpty()) {
                 continue;
             }
+            if (liveness != null
+                    && ProviderLiveness.STATE_DOWN.equals(liveness.probeFor(provider).getState())) {
+                continue;
+            }
             panel.add(provider);
+        }
+        if (subject != null) {
+            panel.sort(config.getCapabilities().getSkills()
+                    .ranking(Capability.TEXT, subject, ChatAdapter.CHAT_PROVIDERS));
         }
         return panel;
     }
@@ -160,7 +189,13 @@ final class ConsortiumHandler {
             }
         }
 
-        List<String> panel = panel(config, requested);
+        // The subject the panel is ranked on. A caller who names one is taken at their word.
+        String subject = body.get("subject") instanceof String
+                && SubjectTagger.isKnown((String) body.get("subject"))
+                ? ((String) body.get("subject")).trim().toLowerCase(Locale.ROOT)
+                : SubjectTagger.tag(prompt, body.get("context") instanceof String
+                        ? (String) body.get("context") : null);
+        List<String> panel = panel(config, requested, subject, null);
         if (panel.isEmpty()) {
             sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE,
                     "no consortium providers are configured (need a key and a model for one of "
@@ -219,7 +254,30 @@ final class ConsortiumHandler {
 
         new Session(ctx, config, clientGroup, healthTracker, ledger, walletAddress,
                 prompt, background, panel, editor, maxRounds, includeTranscript, lead,
-                poll).start();
+                poll, subject, null, 0, 0, java.util.Map.of()).start();
+    }
+
+    /**
+     * Runs a consortium for a request that arrived somewhere else — {@code POST /text}, where the
+     * model that read it asked for the panel rather than answering alone.
+     *
+     * <p>The call that did the asking is carried in rather than forgotten: it was a real paid call,
+     * and a response that reported one fewer call than the wallet was charged for would be a
+     * receipt that does not add up.
+     *
+     * @param from        the endpoint that escalated, named in the response
+     * @param priorCalls  calls already made and charged for this request
+     * @param priorCoins  coins already charged for it
+     * @param priorSpend  those coins, by provider
+     */
+    static void escalate(ChannelHandlerContext ctx, ProxyConfig config, EventLoopGroup clientGroup,
+                          ProviderHealthTracker healthTracker, AicoinLedger ledger, String wallet,
+                          String prompt, String background, List<String> panel, String editor,
+                          String subject, String from, int priorCalls, long priorCoins,
+                          Map<String, Long> priorSpend) {
+        new Session(ctx, config, clientGroup, healthTracker, ledger, wallet, prompt, background,
+                panel, editor, config.getConsortium().getMaxRounds(), false, false, false,
+                subject, from, priorCalls, priorCoins, priorSpend).start();
     }
 
     private static Map<?, ?> parseBody(byte[] bytes) {
@@ -256,6 +314,10 @@ final class ConsortiumHandler {
         private final boolean poll;
         /** True when one model drafts and the rest improve it — see the note at the call site. */
         private final boolean lead;
+        /** What the request was tagged as, and what the panel was ranked on. */
+        private final String subject;
+        /** The endpoint that escalated to this panel, or null for a call that came in as one. */
+        private final String escalatedFrom;
 
         private final SharedContext context;
 
@@ -290,7 +352,8 @@ final class ConsortiumHandler {
         Session(ChannelHandlerContext ctx, ProxyConfig config, EventLoopGroup group,
                  ProviderHealthTracker healthTracker, AicoinLedger ledger, String wallet, String prompt,
                  String background, List<String> panel, String editor, int maxRounds,
-                 boolean includeTranscript, boolean lead, boolean poll) {
+                 boolean includeTranscript, boolean lead, boolean poll, String subject,
+                 String escalatedFrom, int priorCalls, long priorCoins, Map<String, Long> priorSpend) {
             this.ctx = ctx;
             this.config = config;
             this.group = group;
@@ -304,6 +367,11 @@ final class ConsortiumHandler {
             this.includeTranscript = includeTranscript;
             this.poll = poll;
             this.lead = lead;
+            this.subject = subject;
+            this.escalatedFrom = escalatedFrom;
+            this.calls = priorCalls;
+            this.coinsCharged = priorCoins;
+            this.coinsByProvider.putAll(priorSpend);
             this.context = new SharedContext(prompt, background, config.getConsortium().getMaxContextChars());
             // A consortium runs for minutes. A client that gave up in the middle is nobody to
             // spend the next round's coins for, so the rounds stop at the next boundary — the
@@ -608,6 +676,10 @@ final class ConsortiumHandler {
             StringBuilder json = new StringBuilder();
             synchronized (this) {
                 json.append("{\"answer\":").append(Json.string(answer))
+                        .append(",\"subject\":").append(Json.string(subject))
+                        .append(",\"escalated\":").append(escalatedFrom != null)
+                        .append(escalatedFrom == null ? ""
+                                : ",\"escalated_from\":" + Json.string(escalatedFrom))
                         .append(",\"settled\":").append("clean".equals(stoppedReason))
                         .append(",\"stopped_reason\":").append(Json.string(stoppedReason))
                         .append(",\"rounds\":").append(round)

@@ -198,6 +198,21 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
 
+        // The consolidated endpoints: one shape in, one shape out, provider chosen here rather
+        // than named by the caller. See CapabilityHandler.
+        Optional<Capability> capability = Capability.fromPath(path);
+        if (capability.isPresent() && request.method() == HttpMethod.POST) {
+            byte[] capabilityBody = ByteBufUtil.getBytes(request.content());
+            requireApiToken(ctx, request, walletAddress -> CapabilityHandler.serve(
+                    ctx, capability.get(), capabilityBody, config, clientGroup, healthTracker,
+                    liveness, ledger, walletAddress));
+            return;
+        }
+        if (request.method() == HttpMethod.GET && "/skills".equals(path)) {
+            SkillsHandler.respond(ctx, config, liveness);
+            return;
+        }
+
         if (request.method() == HttpMethod.POST && "/consortium".equals(path)) {
             if (!config.getConsortium().isEnabled()) {
                 sendJsonError(ctx, HttpResponseStatus.NOT_FOUND, "consortium is not enabled");
