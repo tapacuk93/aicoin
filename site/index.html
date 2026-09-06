@@ -201,11 +201,12 @@
 
   <div class="card">
     <h2>Supported AI providers &mdash; live connection health</h2>
-    <p class="price-meta">Live status of the relay's own connection to each provider, from its rolling window of recent forwarded calls. <strong>Live</strong> = the relay holds a paid key and recent calls came back clean. <strong>Rate limited</strong> = the upstream has been returning 429s. <strong>Over budget</strong> = the upstream has been rejecting calls for billing/permission reasons (402/403). <strong>Not configured</strong> = no key for this provider yet.</p>
+    <p class="price-meta">The relay asks each provider directly, about once a minute, whether it is there. <strong>Live</strong> = it answered the last check. <strong>Degraded</strong> = it is answering but throttling us, or recent real calls came back rate limited or rejected for billing. <strong>Down</strong> = no answer, an error of its own, or the relay's key refused. <strong>Not configured</strong> = no key for this provider yet.</p>
     <div class="backends" id="backendsList">
       <span class="backend-pill"><span class="dot"></span>Loading&hellip;</span>
     </div>
     <p class="price-meta" id="backendsMeta">Checking&hellip;</p>
+    <p class="price-meta"><a href="/health">full status page &rarr;</a></p>
   </div>
 
   <div class="card">
@@ -265,13 +266,15 @@
   };
   var backendsMeta = document.getElementById("backendsMeta");
 
-  // Mirrors the proxy's own health semantics: healthy == !rateLimited && !overBudget,
-  // and a provider with no key configured is reported but never routed to.
+  // The state field is the provider's own answer to the relay's liveness probe; rateLimited and
+  // overBudget are what recent real calls came back as. A provider nobody has called lately has
+  // nothing to say in those two, which is why "live" is never inferred from them alone.
   function statusOf(p) {
-    if (!p.enabled) return { cls: "", text: "not configured" };
-    if (p.overBudget && p.rateLimited) return { cls: "bad", text: "over budget · rate limited" };
-    if (p.overBudget) return { cls: "bad", text: "over budget" };
-    if (p.rateLimited) return { cls: "warn", text: "rate limited" };
+    if (p.state === "unconfigured" || !p.enabled) return { cls: "", text: "not configured" };
+    if (p.state === "unknown") return { cls: "", text: "checking" };
+    if (p.state === "down") return { cls: "bad", text: "down" };
+    if (p.overBudget) return { cls: "warn", text: "live · calls rejected" };
+    if (p.rateLimited || p.detail === "rate limited") return { cls: "warn", text: "live · rate limited" };
     return { cls: "live", text: "live" };
   }
 
@@ -292,12 +295,13 @@
       pill.appendChild(state);
       backendsList.appendChild(pill);
     });
-    var live = providers.filter(function (p) { return statusOf(p).cls === "live"; }).length;
+    var live = providers.filter(function (p) { return p.state === "alive"; }).length;
     var degraded = providers.filter(function (p) {
       var cls = statusOf(p).cls;
       return cls === "warn" || cls === "bad";
     }).length;
-    var summary = live + " of " + providers.length + " provider connections live";
+    var configured = providers.filter(function (p) { return p.state !== "unconfigured"; }).length;
+    var summary = live + " of " + configured + " configured backends alive";
     if (degraded) summary += ", " + degraded + " degraded";
     backendsMeta.textContent = summary + " — checked " +
       new Date().toLocaleTimeString() + ", refreshes every 30s.";

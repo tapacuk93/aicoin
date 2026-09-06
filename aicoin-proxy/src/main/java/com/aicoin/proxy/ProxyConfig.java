@@ -8,6 +8,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.yaml.snakeyaml.Yaml;
 
@@ -52,6 +53,7 @@ public final class ProxyConfig {
     private final int accessLogCount;
     private final int upstreamReadTimeoutSeconds;
     private final ConsortiumConfig consortium;
+    private final HealthProbeConfig healthProbe;
 
     private ProxyConfig(int port, String redisHost, int redisPort, String redisUsername, String redisPassword, boolean redisSsl,
                          double decayHalflifeDays, int freeClaimCooldownSeconds, int signatureSkewSeconds,
@@ -61,7 +63,8 @@ public final class ProxyConfig {
                          ModelPricing modelPricing, double coinValueUsd, boolean meteredBilling,
                          boolean acceptSandboxPurchases,
                          String accessLogPath, int accessLogMaxBytes, int accessLogCount,
-                         int upstreamReadTimeoutSeconds, ConsortiumConfig consortium) {
+                         int upstreamReadTimeoutSeconds, ConsortiumConfig consortium,
+                         HealthProbeConfig healthProbe) {
         this.port = port;
         this.redisHost = redisHost;
         this.redisPort = redisPort;
@@ -87,6 +90,7 @@ public final class ProxyConfig {
         this.accessLogCount = accessLogCount;
         this.upstreamReadTimeoutSeconds = upstreamReadTimeoutSeconds;
         this.consortium = consortium;
+        this.healthProbe = healthProbe;
     }
 
     /**
@@ -192,6 +196,26 @@ public final class ProxyConfig {
 
     public double getDefaultCostUsdPerCall() {
         return defaultCostUsdPerCall;
+    }
+
+    /** @return whether {@link ProviderLiveness} probes providers at all ({@code health.probe.enabled}). */
+    public boolean isHealthProbeEnabled() {
+        return healthProbe.isEnabled();
+    }
+
+    /** @return {@code health.probe.intervalSeconds}: how often every provider is asked whether it is alive. */
+    public int getHealthProbeIntervalSeconds() {
+        return healthProbe.getIntervalSeconds();
+    }
+
+    /** @return {@code health.probe.timeoutSeconds}: how long one liveness probe may take before it counts as no answer. */
+    public int getHealthProbeTimeoutSeconds() {
+        return healthProbe.getTimeoutSeconds();
+    }
+
+    /** @return the free path this provider is probed on ({@code providers.<name>.probePath}), or "" if it has none. */
+    public String getHealthProbePath(String provider) {
+        return healthProbe.pathFor(provider);
     }
 
     /** @return {@code health.windowSize}: how many of a provider's most recent forwarded calls to track for {@code GET /health}. */
@@ -381,12 +405,49 @@ public final class ProxyConfig {
 
         ModelPricing modelPricing = parseModelPricing(yaml, costPerTokenUsd, defaultCostUsdPerCall);
         ConsortiumConfig consortium = parseConsortium(yaml, env);
+        HealthProbeConfig healthProbe = parseHealthProbe(yaml, env);
 
         return new ProxyConfig(port, redisHost, redisPort, redisUsername, redisPassword, redisSsl,
                 decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
                 costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages, modelPricing,
                 coinValueUsd, meteredBilling, acceptSandboxPurchases,
-                accessLogPath, accessLogMaxBytes, accessLogCount, upstreamReadTimeoutSeconds, consortium);
+                accessLogPath, accessLogMaxBytes, accessLogCount, upstreamReadTimeoutSeconds, consortium,
+                healthProbe);
+    }
+
+    /**
+     * Reads the {@code health.probe} block plus each provider's {@code probePath}.
+     *
+     * <p>The default path per provider is a listing endpoint the provider does not bill for; the
+     * same paths appear in that provider's {@code freePaths}, which is what makes running one
+     * every minute forever a free thing to do. A provider whose path is set to "" is not probed
+     * and reports {@code unknown} — the escape hatch for a provider that has no free endpoint, or
+     * one whose listing endpoint starts costing money.
+     */
+    private static HealthProbeConfig parseHealthProbe(Map<String, Object> yaml, Map<String, String> env) {
+        boolean enabled = envBool(env, "AICOIN_PROXY_HEALTH_PROBE_ENABLED",
+                getBoolean(yaml, "health.probe.enabled", true));
+        int intervalSeconds = envInt(env, "AICOIN_PROXY_HEALTH_PROBE_INTERVAL_SECONDS",
+                getInt(yaml, "health.probe.intervalSeconds", 60));
+        int timeoutSeconds = envInt(env, "AICOIN_PROXY_HEALTH_PROBE_TIMEOUT_SECONDS",
+                getInt(yaml, "health.probe.timeoutSeconds", 10));
+        Map<String, String> defaults = new LinkedHashMap<>();
+        defaults.put("openai", "/v1/models");
+        defaults.put("anthropic", "/v1/models");
+        defaults.put("google", "/v1/models");
+        defaults.put("mistral", "/v1/models");
+        defaults.put("cohere", "/v1/models");
+        // Not /v1/models: an ElevenLabs key scoped without models_read gets a 401 there while
+        // being perfectly able to synthesize speech. /v1/voices answers for any usable key.
+        defaults.put("elevenlabs", "/v1/voices");
+        defaults.put("stability", "/v1/engines/list");
+        defaults.put("kimi", "/v1/models");
+        Map<String, String> paths = new LinkedHashMap<>();
+        for (String provider : PROVIDER_NAMES) {
+            String path = getString(yaml, "providers." + provider + ".probePath", defaults.getOrDefault(provider, ""));
+            paths.put(provider, envStr(env, "AICOIN_PROXY_" + provider.toUpperCase(Locale.ROOT) + "_PROBE_PATH", path));
+        }
+        return new HealthProbeConfig(enabled, intervalSeconds, timeoutSeconds, paths);
     }
 
     /**

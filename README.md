@@ -62,8 +62,9 @@ Or without Docker: a GraalVM JDK (25, pinned in `.java-version`) and a Redis on 
 `cd aicoin-proxy && ./gradlew run`.
 
 Provider keys are empty until you set them, one env var each — `AICOIN_PROXY_OPENAI_APIKEY`,
-`AICOIN_PROXY_ANTHROPIC_APIKEY`, and so on. `GET /health` reports which ones are configured, which
-is what the landing page reads.
+`AICOIN_PROXY_ANTHROPIC_APIKEY`, and so on. `GET /health` reports which ones are configured and,
+once a minute, whether each one actually answers — that is what the status page at
+[aicoin.oeaio.com/health](https://aicoin.oeaio.com/health) reads.
 
 ## What the proxy does
 

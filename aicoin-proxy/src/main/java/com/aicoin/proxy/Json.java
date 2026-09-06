@@ -1,9 +1,11 @@
 package com.aicoin.proxy;
 
 /**
- * The one string-to-JSON escape used by the consortium path, which is the only place in this proxy
- * that both <em>builds</em> request bodies for providers and echoes free-form model output back to
- * a client. Everywhere else hand-builds JSON out of numbers and addresses it already controls.
+ * The string-to-JSON escape used wherever this proxy puts text it did not author into a JSON body:
+ * the consortium path, which both <em>builds</em> request bodies for providers and echoes free-form
+ * model output back to a client, and {@link HealthHandler}, which reports whatever a provider or a
+ * failed connection had to say for itself. Everywhere else hand-builds JSON out of numbers and
+ * addresses it already controls.
  *
  * <p>Model output is exactly the kind of text that breaks naive quoting: it arrives with quotes,
  * backslashes, newlines and the occasional control character, and it is written into both an

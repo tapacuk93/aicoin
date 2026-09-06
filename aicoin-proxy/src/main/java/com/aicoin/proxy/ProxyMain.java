@@ -22,6 +22,10 @@ public final class ProxyMain {
     public static void main(String[] args) throws InterruptedException {
         ProxyConfig config = ProxyConfig.load();
         ProviderHealthTracker healthTracker = new ProviderHealthTracker(config.getHealthWindowSize());
+        // Asks each provider directly whether it is there, on a timer, so /health can answer for a
+        // provider nobody has called — see ProviderLiveness.
+        ProviderLiveness liveness = new ProviderLiveness(config);
+        liveness.start();
         AicoinLedger ledger = new AicoinLedger(config.getRedisHost(), config.getRedisPort(),
                 config.getRedisUsername(), config.getRedisPassword(), config.isRedisSsl());
         // Null when accessLog.path is empty, or when the file couldn't be opened — an unwritable
@@ -34,7 +38,7 @@ public final class ProxyMain {
             ServerBootstrap bootstrap = new ServerBootstrap();
             bootstrap.group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
-                    .childHandler(new ProxyServerInitializer(config, workerGroup, healthTracker, ledger, accessLog))
+                    .childHandler(new ProxyServerInitializer(config, workerGroup, healthTracker, liveness, ledger, accessLog))
                     .childOption(ChannelOption.AUTO_READ, true)
                     .option(ChannelOption.SO_BACKLOG, 1024);
 
@@ -42,6 +46,7 @@ public final class ProxyMain {
             LOG.info("aicoin-proxy listening on port " + config.getPort());
             channel.closeFuture().sync();
         } finally {
+            liveness.stop();
             bossGroup.shutdownGracefully();
             workerGroup.shutdownGracefully();
             ledger.close();

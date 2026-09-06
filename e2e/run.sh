@@ -211,6 +211,9 @@ AICOIN_PROXY_REDIS_HOST="127.0.0.1" \
 AICOIN_PROXY_REDIS_PORT="$REDIS_PORT" \
 AICOIN_PROXY_FREE_COINS_POOL_SIZE="$FREE_COINS_POOL_SIZE" \
 AICOIN_PROXY_ADMIN_TOKEN="$ADMIN_TOKEN" \
+AICOIN_PROXY_HEALTH_PROBE_INTERVAL_SECONDS="5" \
+AICOIN_PROXY_HEALTH_PROBE_TIMEOUT_SECONDS="3" \
+AICOIN_PROXY_COHERE_PROBE_PATH="/unavailable/models" \
 AICOIN_PROXY_OPENAI_BASEURL="http://127.0.0.1:$MOCK_PORT" \
 AICOIN_PROXY_OPENAI_APIKEY="${TEST_KEYS[0]}" \
 AICOIN_PROXY_ANTHROPIC_BASEURL="http://127.0.0.1:$MOCK_PORT" \
@@ -268,10 +271,31 @@ fi
 bal_carol_after_call=$(balance_of "$ADDR_CAROL")
 [ "$bal_carol_after_call" = "$((CLAIM_AMOUNT - 1))" ] && pass "carol's paid call debited exactly 1 aicoin (balance $CLAIM_AMOUNT -> $((CLAIM_AMOUNT - 1)))" || fail "expected carol balance $((CLAIM_AMOUNT - 1)) after the call, got $bal_carol_after_call"
 
-log "--- test 4: proxy /health lists every configured provider ---"
+log "--- test 4: proxy /health lists every configured provider, and says which are alive ---"
 health=$(curl -s "http://127.0.0.1:$PROXY_PORT/health")
 count=$(echo "$health" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['providers']))")
 [ "$count" = "${#PROVIDERS[@]}" ] && pass "${#PROVIDERS[@]} providers listed" || fail "expected ${#PROVIDERS[@]} providers, got: $health"
+
+# The liveness prober asks each provider directly rather than inferring from traffic, so every
+# provider pointed at the running mock must report alive — including the six no test has called.
+alive=$(echo "$health" | python3 -c "
+import json,sys
+providers = json.load(sys.stdin)['providers']
+print(' '.join(sorted(p['name'] for p in providers if p['state'] == 'alive')))")
+expected_alive=$(printf '%s\n' "${PROVIDERS[@]}" | grep -v '^cohere$' | sort | tr '\n' ' ' | sed 's/ $//')
+[ "$alive" = "$expected_alive" ] && pass "every reachable provider probed alive ($alive)" || fail "expected alive: $expected_alive, got: $alive"
+
+# cohere is probed on the mock's always-503 path, while still serving forwarded calls
+# normally. Its rolling call window is clean and therefore "healthy" — which is exactly the
+# claim the probe exists to be able to contradict.
+cohere_state=$(echo "$health" | python3 -c "
+import json,sys
+p = next(p for p in json.load(sys.stdin)['providers'] if p['name'] == 'cohere')
+print(p['state'], p['healthy'], p['checkedAt'] > 0, p['detail'], sep='|')")
+case "$cohere_state" in
+  "down|True|True|provider error 503") pass "failing provider reported down despite a clean call window" ;;
+  *) fail "expected cohere down with a timestamp and a 503 detail, got: $cohere_state" ;;
+esac
 
 log "--- test 5: proxy /price reflects the paid call (and only the paid call — not the free claim) ---"
 sleep 1
