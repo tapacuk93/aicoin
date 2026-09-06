@@ -28,19 +28,22 @@ final class Reputation {
     private Reputation() {
     }
 
-    /**
-     * @param balance      what the wallet holds; negative means it owes
-     * @param doubleSpends how many double-spends have been proven against it
-     * @param summary      counts from its transaction log — see {@link AicoinLedger#walletSummary}
-     * @param nowMillis    the clock, passed in so this stays a pure function
-     */
-    static int score(double balance, long doubleSpends, Map<String, Long> summary, long nowMillis) {
-        // A proven double-spend is not a deduction, it is the answer. Somebody signed the same
-        // money over to two people; nothing else in the record argues with that.
-        if (doubleSpends > 0) {
-            return 0;
+    /** Whole coins as whole numbers, so a debt of three reads as 3 rather than 3.0. */
+    private static String formatAmount(double value) {
+        if (value == Math.rint(value) && !Double.isInfinite(value)) {
+            return String.valueOf((long) value);
         }
-        // Owing is the other end of the same thing: this wallet has spent money it did not have.
+        return java.math.BigDecimal.valueOf(value).stripTrailingZeros().toPlainString();
+    }
+
+    /**
+     * @param balance   what the wallet holds; negative means it owes
+     * @param summary   counts from its transaction log — see {@link AicoinLedger#walletSummary}
+     * @param nowMillis the clock, passed in so this stays a pure function
+     */
+    static int score(double balance, Map<String, Long> summary, long nowMillis) {
+        // Owing is the one hard mark against a wallet: it has spent money it did not have, and
+        // until it is paid the ledger will not let it spend more.
         if (balance < 0) {
             return 1;
         }
@@ -50,7 +53,7 @@ final class Reputation {
             // answer and must not be dressed up as a clean record.
             return 0;
         }
-        int points = 1; // has a history, owes nothing, has never been caught
+        int points = 1; // has a history and owes nothing
         if (summary.getOrDefault("calls", 0L) > 0) {
             points++;
         }
@@ -74,13 +77,10 @@ final class Reputation {
     }
 
     /** The reasons, in the order they matter, so the number is never the whole of what is shown. */
-    static List<String> reasons(double balance, long doubleSpends, Map<String, Long> summary, long nowMillis) {
+    static List<String> reasons(double balance, Map<String, Long> summary, long nowMillis) {
         List<String> reasons = new ArrayList<>();
-        if (doubleSpends > 0) {
-            reasons.add(doubleSpends + " proven double-spend" + (doubleSpends == 1 ? "" : "s"));
-        }
         if (balance < 0) {
-            reasons.add("owes " + Note.formatAmount(-balance) + " aicoin");
+            reasons.add("owes " + formatAmount(-balance) + " aicoin");
         }
         if (summary.getOrDefault("entries", 0L) == 0) {
             reasons.add("no history at all — this wallet has never done anything");

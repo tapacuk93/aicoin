@@ -115,146 +115,10 @@ final class AicoinLedger implements AutoCloseable {
             + "redis.call('LTRIM', KEYS[5], -" + TX_LOG_CAP + ", -1) "
             + "return 1";
 
-    /**
-     * Turns balance into a bearer note, per CONTRACT.md's "Offline notes": the coins leave the
-     * issuer's balance <em>now</em>, at issue, and sit against the note until somebody redeems it.
-     *
-     * <p>That ordering is the whole design. A note handed over offline cannot be checked against
-     * the ledger at the moment it changes hands, so the one thing that must not be possible is the
-     * issuer spending those coins again while the note is in someone's pocket — and it isn't,
-     * because the issuer no longer has them.
-     */
-    private static final String ISSUE_NOTE_SCRIPT =
-            "local amount = tonumber(ARGV[1]) "
-            + "if amount <= 0 then return {0, '0', 'amount'} end "
-            + "local balance = tonumber(redis.call('GET', KEYS[1]) or '0') "
-            + "if balance < amount then return {0, tostring(balance), 'insufficient'} end "
-            + "if redis.call('EXISTS', KEYS[2]) == 1 then return {0, tostring(balance), 'duplicate'} end "
-            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], '-' .. ARGV[1]) "
-            + "redis.call('HSET', KEYS[2], 'amount', ARGV[1], 'issuer', ARGV[2], 'state', 'open', "
-            + "  'issued_at', ARGV[3], 'expires_at', ARGV[4], 'payee', ARGV[6], 'require_claim', ARGV[7]) "
-            + "redis.call('EXPIREAT', KEYS[2], tonumber(ARGV[5])) "
-            + "redis.call('SADD', KEYS[3], ARGV[2]) "
-            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='note_issued', amount=amount, "
-            + "  balance_after=tonumber(newBalance), at=tonumber(ARGV[3])})) "
-            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
-            + "return {1, tostring(newBalance), 'issued'}";
 
-    /**
-     * Redeems a note into the holder's wallet. First caller wins, atomically: the state flips from
-     * open to redeemed inside the same script that credits the balance, so two people racing the
-     * same note produce exactly one credit and one "already redeemed".
-     */
-    private static final String REDEEM_NOTE_SCRIPT =
-            "if redis.call('EXISTS', KEYS[1]) == 0 then return {0, '0', 'unknown'} end "
-            + "local state = redis.call('HGET', KEYS[1], 'state') "
-            + "if state ~= 'open' then return {0, '0', state} end "
-            + "local expires = tonumber(redis.call('HGET', KEYS[1], 'expires_at')) "
-            + "if expires and tonumber(ARGV[2]) > expires then return {0, '0', 'expired'} end "
-            // A note issued claim-required cannot be redeemed by whoever merely holds the string:
-            // it takes the issuer's signature naming this redeemer. Photographing somebody else's
-            // note gets you something that will not redeem.
-            + "if redis.call('HGET', KEYS[1], 'require_claim') == '1' and ARGV[3] == '' then "
-            + "  return {0, '0', 'claim_required'} "
-            + "end "
-            + "local payee = redis.call('HGET', KEYS[1], 'payee') "
-            // A note made out to somebody can only be redeemed by them. This is what makes it
-            // impossible — not merely detectable — to hand the same note to two people: the second
-            // one cannot use it.
-            + "if payee ~= nil and payee ~= false and payee ~= '' and payee ~= ARGV[1] then "
-            + "  return {0, '0', 'not_payee'} "
-            + "end "
-            + "local amount = tonumber(redis.call('HGET', KEYS[1], 'amount')) "
-            // The claim is kept, not just checked: a second one arriving later is only evidence if
-            // the first is still here to compare it with.
-            + "redis.call('HSET', KEYS[1], 'state', 'redeemed', 'redeemed_by', ARGV[1], 'redeemed_at', ARGV[2], "
-            + "  'claim', ARGV[3]) "
-            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[2], tostring(amount)) "
-            + "redis.call('SADD', KEYS[3], ARGV[1]) "
-            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='note_redeemed', amount=amount, "
-            + "  counterparty=redis.call('HGET', KEYS[1], 'issuer'), balance_after=tonumber(newBalance), "
-            + "  at=tonumber(ARGV[2])})) "
-            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
-            + "return {1, tostring(newBalance), tostring(amount)}";
 
-    /**
-     * Takes an unredeemed note back. Without this, a note that is lost — a phone dropped in a
-     * river, a QR nobody scanned — burns the coins it holds, and the issuer paid for them.
-     */
-    private static final String RECLAIM_NOTE_SCRIPT =
-            "if redis.call('EXISTS', KEYS[1]) == 0 then return {0, '0', 'unknown'} end "
-            + "local state = redis.call('HGET', KEYS[1], 'state') "
-            + "if state ~= 'open' then return {0, '0', state} end "
-            + "if redis.call('HGET', KEYS[1], 'issuer') ~= ARGV[1] then return {0, '0', 'not_issuer'} end "
-            + "local amount = tonumber(redis.call('HGET', KEYS[1], 'amount')) "
-            + "redis.call('HSET', KEYS[1], 'state', 'reclaimed', 'redeemed_at', ARGV[2]) "
-            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[2], tostring(amount)) "
-            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='note_reclaimed', amount=amount, "
-            + "  balance_after=tonumber(newBalance), at=tonumber(ARGV[2])})) "
-            + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
-            + "return {1, tostring(newBalance), tostring(amount)}";
 
-    /**
-     * Opens a hash chain, per CONTRACT.md's "Chains": one 32-byte secret in the wallet stands in
-     * for a whole purse of notes.
-     *
-     * <p>The wallet picks a seed and hashes it {@code links} times; only the tip — the last hash —
-     * is sent here, and the coins for the whole chain leave the balance now. Nothing about the
-     * seed can be worked back from the tip, and finding a second seed that hashes to the same tip
-     * is a preimage search nobody is going to win.
-     */
-    private static final String OPEN_CHAIN_SCRIPT =
-            "local links = tonumber(ARGV[1]) "
-            + "local perLink = tonumber(ARGV[2]) "
-            + "local total = links * perLink "
-            + "if links <= 0 or perLink <= 0 then return {0, '0', 'amount'} end "
-            + "local balance = tonumber(redis.call('GET', KEYS[1]) or '0') "
-            + "if balance < total then return {0, tostring(balance), 'insufficient'} end "
-            + "if redis.call('EXISTS', KEYS[2]) == 1 then return {0, tostring(balance), 'duplicate'} end "
-            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], '-' .. tostring(total)) "
-            + "redis.call('HSET', KEYS[2], 'tip', ARGV[3], 'issuer', ARGV[4], 'per_link', ARGV[2], "
-            + "  'remaining', ARGV[1], 'payee', ARGV[7], 'opened_at', ARGV[5], 'expires_at', ARGV[6]) "
-            + "redis.call('EXPIREAT', KEYS[2], tonumber(ARGV[6])) "
-            + "redis.call('SADD', KEYS[3], ARGV[4]) "
-            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='chain_opened', amount=total, "
-            + "  balance_after=tonumber(newBalance), at=tonumber(ARGV[5])})) "
-            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
-            + "return {1, tostring(newBalance), tostring(total)}";
 
-    /**
-     * Redeems {@code steps} links of a chain. The caller proves it by handing over a preimage that
-     * hashes to the current tip in {@code steps} hops — which only somebody the payer gave it to
-     * can do — and the tip then advances to that preimage.
-     *
-     * <p>Advancing is what makes a chain safe to spend a piece at a time: every redemption moves
-     * the tip <em>down</em>, so the same link cannot be presented twice, and a chain can never pay
-     * out more than the links it was opened with.
-     */
-    private static final String REDEEM_CHAIN_SCRIPT =
-            "if redis.call('EXISTS', KEYS[1]) == 0 then return {0, '0', 'unknown'} end "
-            + "local steps = tonumber(ARGV[2]) "
-            + "local remaining = tonumber(redis.call('HGET', KEYS[1], 'remaining')) "
-            + "if steps <= 0 or steps > remaining then return {0, '0', 'exhausted'} end "
-            + "local payee = redis.call('HGET', KEYS[1], 'payee') "
-            + "if payee ~= nil and payee ~= false and payee ~= '' and payee ~= ARGV[3] then "
-            + "  return {0, '0', 'not_payee'} "
-            + "end "
-            // The hash walk happens in Java, on SHA-256: Redis's Lua offers only sha1hex, and a
-            // ledger is no place to introduce a hash whose collision resistance is already gone.
-            // What stays here is the part that must be atomic — the tip is only advanced if it is
-            // still the one that was verified against, so two redemptions racing cannot both win.
-            + "local tip = redis.call('HGET', KEYS[1], 'tip') "
-            + "if tip ~= ARGV[5] then return {0, '0', 'conflict'} end "
-            + "local perLink = tonumber(redis.call('HGET', KEYS[1], 'per_link')) "
-            + "local amount = steps * perLink "
-            + "redis.call('HSET', KEYS[1], 'tip', ARGV[1], 'remaining', remaining - steps) "
-            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[2], tostring(amount)) "
-            + "redis.call('SADD', KEYS[3], ARGV[3]) "
-            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='chain_redeemed', amount=amount, "
-            + "  counterparty=redis.call('HGET', KEYS[1], 'issuer'), balance_after=tonumber(newBalance), "
-            + "  at=tonumber(ARGV[4])})) "
-            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
-            + "return {1, tostring(newBalance), tostring(amount)}";
 
     private static final String DEBIT_SCRIPT =
             "local amount = tonumber(ARGV[1]) "
@@ -451,136 +315,12 @@ final class AicoinLedger implements AutoCloseable {
         });
     }
 
-    /**
-     * The ledger's note-signing keypair, generated on first use and kept from then on. Created with
-     * SETNX so two proxies starting at once end up with the same key rather than one overwriting
-     * the other's notes.
-     */
-    void noteSigningKey(Consumer<Optional<String>> onResult) {
-        String key = "aicoin:" + TAG + ":note-signing-key";
-        commands.get(key).whenComplete((existing, err) -> {
-            if (err != null) {
-                LOG.log(Level.WARNING, "note key lookup failed", err);
-                onResult.accept(Optional.empty());
-                return;
-            }
-            if (existing != null && !existing.isEmpty()) {
-                onResult.accept(Optional.of(existing));
-                return;
-            }
-            String generated;
-            try {
-                generated = NoteSigner.generateStored();
-            } catch (Exception e) {
-                LOG.log(Level.WARNING, "could not generate a note signing key", e);
-                onResult.accept(Optional.empty());
-                return;
-            }
-            commands.setnx(key, generated).whenComplete((won, setErr) -> {
-                if (setErr != null) {
-                    LOG.log(Level.WARNING, "note key store failed", setErr);
-                    onResult.accept(Optional.empty());
-                    return;
-                }
-                if (Boolean.TRUE.equals(won)) {
-                    LOG.info("generated the ledger's note-signing key");
-                    onResult.accept(Optional.of(generated));
-                    return;
-                }
-                // Somebody else got there first; theirs is the one notes are signed with.
-                commands.get(key).whenComplete((theirs, getErr) ->
-                        onResult.accept(getErr == null && theirs != null && !theirs.isEmpty()
-                                ? Optional.of(theirs) : Optional.empty()));
-            });
-        });
-    }
 
-    /** Moves {@code amount} out of {@code issuer}'s balance and into a note. */
-    void issueNote(String issuer, double amount, String noteHash, long expiresAtSeconds, String payee,
-                    boolean requireClaim, Consumer<NoteResult> onResult) {
-        long nowMillis = Instant.now().toEpochMilli();
-        RedisFuture<List<Object>> future = commands.eval(ISSUE_NOTE_SCRIPT, ScriptOutputType.MULTI,
-                new String[] {balanceKey(issuer), noteKey(noteHash), KNOWN_WALLETS_KEY, txKey(issuer)},
-                String.valueOf(amount), issuer, String.valueOf(nowMillis),
-                String.valueOf(expiresAtSeconds * 1000), String.valueOf(expiresAtSeconds),
-                payee == null ? "" : payee, requireClaim ? "1" : "");
-        complete(future, "note issue", onResult);
-    }
 
-    /** Credits an open note to {@code holder}. First caller wins. */
-    void redeemNote(String holder, String noteHash, String claim, Consumer<NoteResult> onResult) {
-        long nowMillis = Instant.now().toEpochMilli();
-        RedisFuture<List<Object>> future = commands.eval(REDEEM_NOTE_SCRIPT, ScriptOutputType.MULTI,
-                new String[] {noteKey(noteHash), balanceKey(holder), KNOWN_WALLETS_KEY, txKey(holder)},
-                holder, String.valueOf(nowMillis), claim == null ? "" : claim);
-        complete(future, "note redeem", onResult);
-    }
 
-    /** Returns an unredeemed note's value to the wallet that issued it. */
-    void reclaimNote(String issuer, String noteHash, Consumer<NoteResult> onResult) {
-        long nowMillis = Instant.now().toEpochMilli();
-        RedisFuture<List<Object>> future = commands.eval(RECLAIM_NOTE_SCRIPT, ScriptOutputType.MULTI,
-                new String[] {noteKey(noteHash), balanceKey(issuer), txKey(issuer)},
-                issuer, String.valueOf(nowMillis));
-        complete(future, "note reclaim", onResult);
-    }
 
-    /** Reserves {@code links} × {@code perLink} coins against a hash chain the wallet holds the seed for. */
-    void openChain(String issuer, String tip, int links, double perLink, long expiresAtSeconds, String payee,
-                    Consumer<NoteResult> onResult) {
-        long nowMillis = Instant.now().toEpochMilli();
-        RedisFuture<List<Object>> future = commands.eval(OPEN_CHAIN_SCRIPT, ScriptOutputType.MULTI,
-                new String[] {balanceKey(issuer), chainKey(tip), KNOWN_WALLETS_KEY, txKey(issuer)},
-                String.valueOf(links), String.valueOf(perLink), tip, issuer,
-                String.valueOf(nowMillis), String.valueOf(expiresAtSeconds), payee == null ? "" : payee);
-        complete(future, "chain open", onResult);
-    }
 
-    /**
-     * Credits {@code steps} links to {@code holder}, who proved the claim with a preimage that
-     * hashes to the chain's current tip in that many hops.
-     *
-     * <p>The walk is verified here rather than in the script, so it can use SHA-256; the script
-     * then advances the tip only if nothing moved it in between.
-     */
-    void redeemChain(String holder, String chainId, String preimage, int steps, Consumer<NoteResult> onResult) {
-        chainState(chainId, state -> {
-            if (!state.isPresent()) {
-                onResult.accept(NoteResult.unreachable());
-                return;
-            }
-            Map<String, String> chain = state.get();
-            if (chain.isEmpty()) {
-                onResult.accept(NoteResult.of(false, 0, "unknown"));
-                return;
-            }
-            String tip = chain.getOrDefault("tip", "");
-            if (!HashChain.walksTo(preimage, steps, tip)) {
-                onResult.accept(NoteResult.of(false, 0, "bad_preimage"));
-                return;
-            }
-            long nowMillis = Instant.now().toEpochMilli();
-            RedisFuture<List<Object>> future = commands.eval(REDEEM_CHAIN_SCRIPT, ScriptOutputType.MULTI,
-                    new String[] {chainKey(chainId), balanceKey(holder), KNOWN_WALLETS_KEY, txKey(holder)},
-                    preimage, String.valueOf(steps), holder, String.valueOf(nowMillis), tip);
-            complete(future, "chain redeem", onResult);
-        });
-    }
 
-    /**
-     * Records a proven double-spend: two claims on one note, signed by the same payer over two
-     * different payees. Counted against the issuer, and written into the losing wallet's own
-     * transaction log — the person who was defrauded should be able to see it in their history
-     * rather than only in the moment the sync happened to print it.
-     */
-    void recordDoubleSpend(String issuer, String victim, String noteId, double amount) {
-        long nowMillis = Instant.now().toEpochMilli();
-        commands.incr("aicoin:" + TAG + ":double-spends:" + issuer);
-        commands.rpush(txKey(victim), "{\"type\":\"double_spend\",\"amount\":" + Note.formatAmount(amount)
-                + ",\"counterparty\":\"" + issuer + "\",\"note_id\":\"" + noteId + "\""
-                + ",\"at\":" + nowMillis + "}");
-        commands.ltrim(txKey(victim), -TX_LOG_CAP, -1);
-    }
 
     /**
      * What a wallet's own transaction log says about it, in aggregate: how it came by its coins,
@@ -589,6 +329,53 @@ final class AicoinLedger implements AutoCloseable {
      * <p>Kinds and counts only. Who it paid and who paid it stays where it belongs — the point is
      * to tell a wallet with a history from a wallet with none, not to publish anybody's dealings.
      */
+    /**
+     * How many of {@code addresses} are wallets with something to lose: not in debt, and having
+     * actually used the thing — bought coins or paid for calls.
+     *
+     * <p>This is what stops "dealt with three different wallets" being worth a point for three
+     * throwaways made in a minute. Bounded by {@code limit}, because it walks other wallets'
+     * records and a rating is looked up in front of somebody deciding whether to press send.
+     */
+    void solidCounterparties(List<String> addresses, int limit, Consumer<Long> onResult) {
+        List<String> sample = addresses.size() > limit ? addresses.subList(0, limit) : addresses;
+        if (sample.isEmpty()) {
+            onResult.accept(0L);
+            return;
+        }
+        List<CompletableFuture<Boolean>> pending = new ArrayList<>();
+        for (String address : sample) {
+            pending.add(commands.get(balanceKey(address)).toCompletableFuture()
+                    .thenCombine(commands.lrange(txKey(address), 0, -1).toCompletableFuture(),
+                            (held, entries) -> {
+                                double balance = held == null ? 0 : Double.parseDouble(held);
+                                if (balance < 0 || entries == null) {
+                                    return false;
+                                }
+                                for (String entry : entries) {
+                                    if (entry.contains("\"type\":\"iap\"") || entry.contains("\"type\":\"debit\"")) {
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            }));
+        }
+        CompletableFuture.allOf(pending.toArray(new CompletableFuture[0])).whenComplete((ignored, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "counterparty weighing failed", err);
+                onResult.accept(0L);
+                return;
+            }
+            long solid = 0;
+            for (CompletableFuture<Boolean> future : pending) {
+                if (Boolean.TRUE.equals(future.join())) {
+                    solid++;
+                }
+            }
+            onResult.accept(solid);
+        });
+    }
+
     void walletSummary(String address, Consumer<Optional<Map<String, Long>>> onResult) {
         walletSummary(address, new java.util.ArrayList<>(), onResult);
     }
@@ -646,254 +433,10 @@ final class AicoinLedger implements AutoCloseable {
         });
     }
 
-    /**
-     * Every known wallet's balance and double-spend count, for the signed snapshot wallets carry
-     * so a rating can be checked with no network — see {@link RatingsSnapshot}.
-     *
-     * <p>Bounded: past {@code limit} wallets this stops, and the snapshot says how many it holds.
-     * A list that grows without limit is a list that eventually cannot be downloaded by the phone
-     * that needs it most.
-     */
-    void allWalletStandings(int limit, Consumer<Optional<List<String[]>>> onResult) {
-        commands.smembers(KNOWN_WALLETS_KEY).whenComplete((addresses, err) -> {
-            if (err != null || addresses == null) {
-                LOG.log(Level.WARNING, "known-wallet listing failed", err);
-                onResult.accept(Optional.empty());
-                return;
-            }
-            List<String> wallets = new ArrayList<>(addresses);
-            Collections.sort(wallets);
-            if (wallets.size() > limit) {
-                wallets = wallets.subList(0, limit);
-            }
-            List<CompletableFuture<String[]>> pending = new ArrayList<>();
-            for (String address : wallets) {
-                CompletableFuture<String> balance = commands.get(balanceKey(address)).toCompletableFuture();
-                CompletableFuture<String> doubleSpends =
-                        commands.get("aicoin:" + TAG + ":double-spends:" + address).toCompletableFuture();
-                pending.add(balance.thenCombine(doubleSpends, (held, spends) ->
-                        new String[] {address, held == null ? "0" : held, spends == null ? "0" : spends}));
-            }
-            CompletableFuture.allOf(pending.toArray(new CompletableFuture[0])).whenComplete((ignored, allErr) -> {
-                if (allErr != null) {
-                    LOG.log(Level.WARNING, "wallet standings failed", allErr);
-                    onResult.accept(Optional.empty());
-                    return;
-                }
-                List<String[]> rows = new ArrayList<>();
-                for (CompletableFuture<String[]> future : pending) {
-                    rows.add(future.join());
-                }
-                onResult.accept(Optional.of(rows));
-            });
-        });
-    }
 
-    /**
-     * Makes the loser of a double-spend whole, out of the wallet that did it.
-     *
-     * <p>The victim is credited what they were handed and the double-spender is debited the same,
-     * in one script — a compensation, not a clawback. Nobody else's settled payment is touched;
-     * the money comes from the party who signed the same note over to two people, whose balance
-     * goes negative if it has to. Owing blocks them from spending until it is paid, and their
-     * rating is nought until then either.
-     *
-     * <p>Both sides of it land in both wallets' transaction logs, because a compensation nobody
-     * can see is indistinguishable from nothing happening.
-     */
-    private static final String COMPENSATE_SCRIPT =
-            "local wanted = tonumber(ARGV[1]) "
-            // Only ever out of what the double-spender actually has. Paying the victim from a
-            // balance that goes negative and is never repaid is not a compensation, it is minting:
-            // two wallets end up richer, one owes a debt nobody can collect, and anybody who
-            // controls all three can run it in a loop. What cannot be recovered from the payer is
-            // not paid — it is a debt on their record and a loss the price absorbs, which is where
-            // an uncollectable cost has to sit.
-            + "local available = tonumber(redis.call('GET', KEYS[2]) or '0') "
-            + "local amount = wanted "
-            + "if available < amount then amount = available end "
-            + "if amount <= 0 then return '0' end "
-            + "local victimBalance = tonumber(redis.call('INCRBYFLOAT', KEYS[1], tostring(amount))) "
-            + "local payerBalance = tonumber(redis.call('INCRBYFLOAT', KEYS[2], '-' .. tostring(amount))) "
-            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='double_spend_compensation', amount=amount, "
-            + "  counterparty=ARGV[3], balance_after=victimBalance, at=tonumber(ARGV[2])})) "
-            + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
-            + "redis.call('RPUSH', KEYS[4], cjson.encode({type='double_spend_penalty', amount=amount, "
-            + "  counterparty=ARGV[4], balance_after=payerBalance, at=tonumber(ARGV[2])})) "
-            + "redis.call('LTRIM', KEYS[4], -" + TX_LOG_CAP + ", -1) "
-            + "return tostring(amount)";
 
-    /**
-     * Credits the victim out of the double-spender, atomically, and only as far as that wallet can
-     * actually cover. Reports what was recovered — which may be nothing.
-     */
-    void compensateDoubleSpend(String victim, String payer, double amount, Consumer<Double> onResult) {
-        long nowMillis = Instant.now().toEpochMilli();
-        commands.eval(COMPENSATE_SCRIPT, ScriptOutputType.VALUE,
-                new String[] {balanceKey(victim), balanceKey(payer), txKey(victim), txKey(payer)},
-                String.valueOf(amount), String.valueOf(nowMillis), payer, victim)
-                .whenComplete((result, err) -> {
-                    if (err != null) {
-                        LOG.log(Level.WARNING, "double-spend compensation failed", err);
-                        onResult.accept(0.0);
-                        return;
-                    }
-                    try {
-                        onResult.accept(Double.parseDouble(String.valueOf(result)));
-                    } catch (NumberFormatException e) {
-                        onResult.accept(0.0);
-                    }
-                });
-    }
 
-    /**
-     * How many of {@code addresses} are wallets with something to lose: no proven double-spend, not
-     * in debt, and having actually used the thing — bought coins or paid for calls.
-     *
-     * <p>This is what stops "dealt with three different wallets" being worth a point for three
-     * throwaways made in a minute. Bounded by {@code limit}, because it walks other wallets'
-     * records and a rating is looked up in front of somebody waiting to be paid.
-     */
-    void solidCounterparties(List<String> addresses, int limit, Consumer<Long> onResult) {
-        List<String> sample = addresses.size() > limit ? addresses.subList(0, limit) : addresses;
-        if (sample.isEmpty()) {
-            onResult.accept(0L);
-            return;
-        }
-        List<CompletableFuture<Boolean>> pending = new ArrayList<>();
-        for (String address : sample) {
-            CompletableFuture<Boolean> solid = commands.get(balanceKey(address)).toCompletableFuture()
-                    .thenCombine(commands.get("aicoin:" + TAG + ":double-spends:" + address).toCompletableFuture(),
-                            (held, spends) -> {
-                                double balance = held == null ? 0 : Double.parseDouble(held);
-                                return balance >= 0 && (spends == null || "0".equals(spends));
-                            })
-                    .thenCombine(commands.lrange(txKey(address), 0, -1).toCompletableFuture(),
-                            (clean, entries) -> {
-                                if (!clean || entries == null) {
-                                    return false;
-                                }
-                                for (String entry : entries) {
-                                    if (entry.contains("\"type\":\"iap\"") || entry.contains("\"type\":\"debit\"")) {
-                                        return true;
-                                    }
-                                }
-                                return false;
-                            });
-            pending.add(solid);
-        }
-        CompletableFuture.allOf(pending.toArray(new CompletableFuture[0])).whenComplete((ignored, err) -> {
-            if (err != null) {
-                LOG.log(Level.WARNING, "counterparty weighing failed", err);
-                onResult.accept(0L);
-                return;
-            }
-            long solid = 0;
-            for (CompletableFuture<Boolean> future : pending) {
-                if (Boolean.TRUE.equals(future.join())) {
-                    solid++;
-                }
-            }
-            onResult.accept(solid);
-        });
-    }
 
-    /** How many proven double-spends stand against a wallet. Public: it is what a rating is made of. */
-    void doubleSpendCount(String address, Consumer<Long> onResult) {
-        commands.get("aicoin:" + TAG + ":double-spends:" + address).whenComplete((value, err) -> {
-            if (err != null || value == null) {
-                onResult.accept(0L);
-                return;
-            }
-            try {
-                onResult.accept(Long.parseLong(value));
-            } catch (NumberFormatException e) {
-                onResult.accept(0L);
-            }
-        });
-    }
-
-    /** What the ledger knows about a chain: how much of it is left, and what it is worth a link. */
-    void chainState(String chainId, Consumer<Optional<Map<String, String>>> onResult) {
-        commands.hgetall(chainKey(chainId)).whenComplete((values, err) -> {
-            if (err != null) {
-                LOG.log(Level.WARNING, "chain lookup failed", err);
-                onResult.accept(Optional.empty());
-                return;
-            }
-            onResult.accept(Optional.of(values == null ? Map.of() : values));
-        });
-    }
-
-    /** What the ledger knows about a note: its state, and — for an open one — what it is worth. */
-    void noteState(String noteHash, Consumer<Optional<Map<String, String>>> onResult) {
-        commands.hgetall(noteKey(noteHash)).whenComplete((values, err) -> {
-            if (err != null) {
-                LOG.log(Level.WARNING, "note lookup failed", err);
-                onResult.accept(Optional.empty());
-                return;
-            }
-            onResult.accept(Optional.of(values == null ? Map.of() : values));
-        });
-    }
-
-    private void complete(RedisFuture<List<Object>> future, String what, Consumer<NoteResult> onResult) {
-        future.whenComplete((raw, err) -> {
-            if (err != null) {
-                LOG.log(Level.WARNING, "ledger " + what + " failed", err);
-                onResult.accept(NoteResult.unreachable());
-                return;
-            }
-            boolean ok = ((Number) raw.get(0)).longValue() == 1L;
-            double value = Double.parseDouble(String.valueOf(raw.get(1)));
-            String detail = String.valueOf(raw.get(2));
-            onResult.accept(NoteResult.of(ok, value, detail));
-        });
-    }
-
-    /**
-     * Outcome of a note operation: unreachable, or a decided yes/no with the resulting balance and
-     * a one-word reason ({@code insufficient}, {@code redeemed}, {@code expired}, {@code unknown},
-     * {@code not_issuer}) that the handler turns into a status code.
-     */
-    static final class NoteResult {
-        private final boolean reachable;
-        private final boolean ok;
-        private final double value;
-        private final String detail;
-
-        private NoteResult(boolean reachable, boolean ok, double value, String detail) {
-            this.reachable = reachable;
-            this.ok = ok;
-            this.value = value;
-            this.detail = detail;
-        }
-
-        static NoteResult unreachable() {
-            return new NoteResult(false, false, 0, "unreachable");
-        }
-
-        static NoteResult of(boolean ok, double value, String detail) {
-            return new NoteResult(true, ok, value, detail);
-        }
-
-        boolean isReachable() {
-            return reachable;
-        }
-
-        boolean isOk() {
-            return ok;
-        }
-
-        /** The balance after the operation, or — on redeem and reclaim — the note's face value. */
-        double getValue() {
-            return value;
-        }
-
-        String getDetail() {
-            return detail;
-        }
-    }
 
     /**
      * Credits {@code amount} aicoin to {@code address} on the operator's say-so, once per
@@ -1586,22 +1129,7 @@ final class AicoinLedger implements AutoCloseable {
         return "aicoin:" + TAG + ":tx:" + address;
     }
 
-    /**
-     * A note is keyed by the <em>hash</em> of its secret, so the ledger can tell you whether a note
-     * you hold is still open without the ledger itself holding anything that could be spent. A
-     * dump of this database redeems nothing.
-     */
-    private static String noteKey(String noteHash) {
-        return "aicoin:" + TAG + ":note:" + noteHash;
-    }
 
-    /**
-     * A chain is keyed by the tip it was opened with — a hash, and therefore already safe to hold:
-     * it says nothing about the seed and cannot be walked backwards.
-     */
-    private static String chainKey(String openingTip) {
-        return "aicoin:" + TAG + ":chain:" + openingTip;
-    }
 
     private static String adminCreditKey(String reference) {
         return "aicoin:" + TAG + ":admin-credit:" + reference;

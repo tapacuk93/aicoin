@@ -63,8 +63,14 @@ const (
 
 // statsPath keeps the record beside the wallet it belongs to and named after it, so a second wallet
 // — a test one, a separate proxy — keeps its own history rather than polluting the first's.
+// statsPath names the record after the wallet it belongs to, not after the directory it sits in:
+// two wallets in one folder would otherwise share one.
 func statsPath(walletPath string) string {
-	return sidecarPath(walletPath, "stats")
+	base := strings.TrimSuffix(filepath.Base(walletPath), filepath.Ext(walletPath))
+	if base == "" {
+		base = "wallet"
+	}
+	return filepath.Join(filepath.Dir(walletPath), base+".stats.json")
 }
 
 // legacyStatsPath is where the record lived when it was named after the directory rather than the
