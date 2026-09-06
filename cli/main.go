@@ -59,10 +59,6 @@ const usage = `aicoin — command-line wallet and AI client for an aicoin-proxy
     aicoin multi                     back to the panel
     aicoin ais                       which models have been used, what they cost, what they failed
 
-  Offline
-    aicoin note load <amount>        turn balance into notes you can hand over with no network
-    aicoin note pay <amount>         hand some over · note accept <note> · note sync
-
   Proxy
     aicoin price                     what one aicoin currently costs
     aicoin health                    which providers are configured and healthy
@@ -120,8 +116,6 @@ func main() {
 		err = cmdMulti(args)
 	case "ais", "stats":
 		err = cmdAis(args)
-	case "note", "notes":
-		err = cmdNote(args)
 	default:
 		if looksLikeDir(command) {
 			// `aicoin .` — open a session on that directory rather than asking a question whose
@@ -223,13 +217,6 @@ func cmdNew(args []string) error {
 	}
 	if err := wallet.save(*walletPath); err != nil {
 		return err
-	}
-	// Cache the ledger's note key now, while there is probably a network: a new wallet's first act
-	// can be accepting a note from somebody, and that has to work offline.
-	if fetched := fetchLedgerKey(newClient(*url, 10*time.Second)); fetched != "" {
-		p := loadPurse(*walletPath)
-		p.LedgerKey = fetched
-		_ = p.save()
 	}
 	fmt.Println(wallet.Address)
 	fmt.Fprintf(os.Stderr, "wallet written to %s (keep it: it is the only copy of the key)\n", *walletPath)

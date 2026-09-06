@@ -99,24 +99,6 @@ disagreement *is* the product: three models saying yes and one saying no is a di
 a paragraph that reads as though they agreed, and a caller that needs to tell "everyone refused"
 from "the panel was split" cannot get that out of a merged answer.
 
-## Paying offline
-
-A wallet can turn balance into **bearer notes** — signed strings it preloads while it has a network,
-and hands over later with no network on either side:
-
-```bash
-aicoin note load 50     # online, once
-aicoin note pay 15      # offline: prints notes and their fingerprints
-aicoin note accept ...  # offline: "✓ genuine · 10 aicoin · from 00c0759c…"
-aicoin note sync        # online again: credited
-```
-
-The coins leave the issuer's balance at load time, so they cannot be spent twice. A **bearer** note
-carries the property its name implies: nobody can tell at hand-off whether it was also given to
-somebody else, so redemption is first-come and the loser is told plainly. A note **made out to one
-wallet** (`note load -for <address>`) has no such gap — only the named payee can redeem it, so a
-second copy is worthless rather than a race. Foreknowledge of the payee is what that costs.
-
 ## Where coins come from
 
 - **The faucet** — `POST /wallet/api/claim`, a fixed grant per wallet per hour, from a shared pool
@@ -127,7 +109,7 @@ second copy is worthless rather than a race. Foreknowledge of the payee is what 
 - **The operator** — `POST /admin/credit`, admin-token only. Nothing backs these coins beyond a
   willingness to pay for the calls they buy, which is why each one is written into the wallet's
   transaction log as what it is.
-- **Another wallet** — a signed transfer, or a bearer note handed over offline.
+- **Another wallet** — a signed transfer, settled by the ledger.
 
 A spend ceiling (`POST /admin/budget`) bounds what the operator can be billed upstream: when
 production spend reaches it the paywall goes empty, while calls for coins already sold keep working

@@ -403,84 +403,26 @@ Response `{"address":..,"amount":1000,"credited":true,"balance":1004,"reason":".
 
 Before this existed, the only ways coins entered the ledger were the faucet, a redeemed purchase, and a transfer from a wallet that already had some — so an operator topping up their own wallet had to write to Redis by hand.
 
-### Offline notes (bearer instruments)
-A wallet can turn balance into **notes**: signed strings that change hands with no network on either side. The wallet preloads them while it has one; the payment itself is one person showing a string and the other reading it.
+### Transfers are online
+Coins move one way: `POST /wallet/api/transfer`, live-signed, settled by the ledger before it is a transfer at all. There is no offline instrument — no bearer note, no hash chain, nothing that changes hands and is reconciled later.
 
-A note is `base64url(payload).base64url(signature)`, the same shape as an API token. Payload: `{"v":1,"id":"<64 hex>","amt":N,"iss":"<issuer address>","exp":<epochSeconds>}`. The `id` is 32 bytes from a CSPRNG and **is** the secret — whoever has the string can redeem it. The signature is the ledger's own Ed25519 key over the encoded payload, so a receiver holding that public key can verify the note offline.
-
-**The ledger stores only `sha256(id)`.** A dump of the database redeems nothing, and a holder can ask after a note's state by hash without handing the secret to anybody, including this server.
-
-- `GET /wallet/api/notes/key` → `{"public_key":"<64 hex>","algorithm":"ed25519"}`. Generated once and kept in the ledger (SETNX, so two proxies starting together agree). Rotating it invalidates *offline verification* of outstanding notes; they still redeem, because redemption asks the ledger what it issued rather than trusting the note.
-- `POST /wallet/api/notes/issue` — live-signed. Body `{"amounts":[25,10,10,5]}` (or `{"amount":25}`), optional `"ttl_seconds"` (default 30 days, max a year, min a minute). Mints up to 50 notes, **debiting each amount as it goes**, and returns each note's string, amount, fingerprint and hash — once. The server cannot return them again. A failure part-way through returns what was minted plus an `error`: those notes are real and reclaimable, and pretending otherwise would lose them.
-- `POST /wallet/api/notes/redeem` — live-signed. Body `{"note":"<string>"}`. Credits the note's amount to the signer. `{"credited":true,"amount":N,"balance":N}`, or `{"credited":false,"reason":"redeemed|expired|unknown|reclaimed"}`.
-- `POST /wallet/api/notes/reclaim` — live-signed **by the issuer**, for a note nobody took. Without it a lost note burns coins the issuer paid for. Refused with `not_issuer` for anyone else: a holder can redeem a note, never reclaim one.
-- `GET /wallet/api/notes/status/{sha256(id)}` → `{"state":"open|redeemed|reclaimed|unknown","amount":N,"expires_at":N}`.
-
-**A note can be made out to one wallet.** `POST /wallet/api/notes/issue` accepts `"payee":"<64 hex>"`, which goes into the payload as `pay` and into the ledger entry. Redemption by anybody else is refused with `not_payee`. This is the one shape of offline payment that **cannot be double-spent at all** rather than merely detected afterwards: hand the same note to two people and only the named one can ever redeem it, so the second is holding something worthless rather than losing a race. The cost is foreknowledge — the payer must know who they are paying before they go offline, and must be carrying a note in the right denomination for them. A wallet in practice carries both: bound notes for the people it expects to pay, bearer notes for strangers, and the receiver is told which they were handed.
-
-**A note can require a claim.** `"claimed":true` at issue means holding the string is *not* enough to redeem it: the redeemer must also present a **claim** — the issuer's Ed25519 signature over `aicoin-claim\n<note id>\n<redeemer address>\n<nonce>`, where the nonce is one the redeemer chose and gave the payer at hand-off. Redemption without one is refused with `claim_required`; with one that names anybody else, `bad_claim`.
-
-Neither side can produce a claim alone, which is the point: the receiver has a nonce and an address and no way to make the issuer's signature; the payer has the key and cannot guess a nonce they were never given. So a payer cannot prepare a payment for somebody they have not met, and — the practical gain — **a note copied off somebody's screen is worthless to whoever copied it**, because the claim names the person it was handed to.
-
-The claim is stored on redemption, so a second one arriving later is evidence rather than an assertion: two valid claims on one note, signed by the same payer over two different payees, cannot both be honest. The ledger returns both to the loser as `double_spend`, and anybody can check them against the issuer's address. That is attribution nobody has to be trusted for.
-
-**The coins leave the issuer at issue, not at hand-off.** That ordering is the design: the issuer cannot spend them again while the note is in someone's pocket, because they no longer have them.
-
-**What offline hand-off cannot establish is that a note is unspent.** That is a fact about the ledger and the ledger is not there. Redemption is therefore first-come and atomic — the state flips inside the same script that credits the balance — so a note handed to two people credits exactly one of them, and the other is told `already redeemed` rather than left to wonder. This is a bearer instrument with the properties of one: possession is the claim, and a holder who passes the same note twice has defrauded somebody. Each note names its issuer, and every step is in both wallets' transaction logs (`note_issued`, `note_redeemed`, `note_reclaimed`), so it is attributable after the fact — not preventable before it.
-
-Notes expire (`EXPIREAT` on the ledger key), which bounds how long an unredeemed note can sit against the balance it took.
-
-### Chains (one secret instead of a purse of notes)
-A note costs a ledger entry, a signature and a preloaded string *per coin*. A **chain** costs one 32-byte secret for the lot.
-
-The wallet picks a seed and hashes it `n` times with SHA-256. Only the tip — the last hash — is sent to the ledger, which reserves `n × per_link` coins against it. Paying `k` coins is revealing the link `k` steps back from the current tip; anyone can check it by hashing forward `k` times and arriving at the tip they already have.
-
-- `POST /wallet/api/chains/open` — live-signed. `{"tip":"<64 hex>","links":20,"per_link":1}`, optional `"payee"` and `"ttl_seconds"`. Debits the whole reservation immediately, exactly as issuing notes does.
-- `POST /wallet/api/chains/redeem` — live-signed. `{"chain":"<opening tip>","preimage":"<64 hex>","steps":k}`. Verifies the walk, credits `k × per_link`, and **advances the stored tip to the preimage**.
-- `GET /wallet/api/chains/status/{opening tip}` — `{"state":"open","remaining":N,"per_link":N,...}`.
-
-Two properties of a hash carry the design, and neither needs anything else to be true:
-
-- **You cannot walk backwards.** A receiver paid three links holds one hash; the links still unspent behind it are preimages, and there is no reaching them. Being paid does not let you take the rest.
-- **You cannot find a second seed landing on the same tip.** That is a preimage search against SHA-256. However many chains exist, no two wallets can end up holding chains that are interchangeable — which is what makes the tip safe to use as the ledger's key for one.
-
-**Advancing the tip is what makes a chain spendable a piece at a time.** Every redemption moves it down, so a link is spendable exactly once — a replay of the same link fails as `bad_preimage`, for everybody, without any list of spent things being kept. A chain can never pay out more than it reserved, which bounds what one goes wrong can cost to the chain's own size rather than to the wallet's balance.
-
-The hash walk is verified in Java, not in the Lua script: Redis's Lua offers only `sha1hex`, and a ledger is no place to introduce a hash whose collision resistance is already gone. The script keeps the part that must be atomic — the tip is advanced only if it is still the one that was verified against, so two redemptions racing cannot both win. `steps` is bounded (10,000) because it arrives in a request, and an unbounded walk is a way to ask the server to hash for as long as somebody likes.
-
-*The CLI does not drive chains yet — `aicoin note` uses individual notes. The endpoints above are complete and covered end-to-end.*
+That is a deliberate narrowing. An offline instrument cannot be checked against the ledger at the moment it changes hands, so a receiver cannot know it is unspent; the best any design achieves is detecting the double-spend afterwards, proving who did it, and recovering what the payer still has — which is nothing, in the case that matters. Requiring the ledger for every transfer removes that whole class of problem rather than managing it.
 
 ### Reputation
 `GET /wallet/api/reputation/{address}` → `{"address":..,"balance":N,"owed":N,"double_spends":N}`. Public, like a balance.
 
-Returns `rating` (0–5) and the `reasons` behind it, alongside the facts it is made of: what the wallet owes, how many double-spends have been **proven** against it — a proven one being two claims on one note, signed by that wallet over two different payees — how many purchases it has made, how many paid calls, and how many **distinct** wallets it has dealt with.
+Returns `rating` (0–5) and the `reasons` behind it, alongside the facts it is made of: what the wallet owes, how many purchases it has made, how many paid calls, and how many **distinct** wallets it has dealt with.
 
-The rating measures **exposure, not honesty**: how much a wallet has to lose. A proven double-spend is 0 — not a deduction, an answer. Owing caps it at 1. Otherwise: one point for having any history at all, and one each for having made calls, having bought coins with real money, having dealt with at least two wallets **that themselves have something to lose**, and having been around longer than a week. Counting distinct counterparties alone would hand a point to anybody who made three wallets in a minute, so what is counted is counterparties that are clean, solvent and have actually used the thing — which somebody else had to build first. At most ten are weighed, since a rating is looked up in front of somebody waiting to be paid.
+Nobody needs this to know whether they have been paid — a transfer is settled by the ledger or it did not happen. It is for the decision *around* a payment: whether to send a large amount to a wallet nobody has ever dealt with, and whether an address just read out belongs to an account with anything behind it.
+
+The rating measures **exposure, not honesty**: how much a wallet has to lose. Owing caps it at 1 — that wallet has spent money it did not have, and the ledger will not let it spend more until it pays. Otherwise: one point for having any history at all, and one each for having made calls, having bought coins with real money, having dealt with at least two wallets **that themselves have something to lose**, and having been around longer than a week. Counting distinct counterparties alone would hand a point to anybody who made three wallets in a minute, so what is counted is counterparties that are clean, solvent and have actually used the thing — which somebody else had to build first. At most ten are weighed, since a rating is looked up in front of somebody waiting to be paid.
 
 The distinction it exists to draw is that **no history is not a clean history**. A wallet made an hour ago to take one payment and vanish has never done anything wrong, and neither has one that has paid for a year; they score 0 and 5. Paying yourself in a circle earns nothing, because what is counted is distinct counterparties rather than volume.
 
 The reasons are published beside the number, and clients are expected to show them: a bare score reads as a verdict on somebody's character, which is not what any of this can support. Counts only — who a wallet dealt with is never exposed, just how many.
 
-**The loser is compensated out of the wallet that did it — as far as that wallet can cover.** On a proven double-spend the second redeemer is credited from the double-spender's balance, in one script. A compensation, not a clawback: nobody else's settled payment is touched.
-
 It stops at what the payer actually holds, and that limit is load-bearing. Paying a victim out of a balance that goes negative and is never repaid does not move money, it **mints** it: two wallets end up richer, one owes a debt nobody can collect, and anybody controlling all three can run that in a loop. So the response says what was recovered and what is still `owed_to_you`; the shortfall stays a debt on the payer's record and a loss the price absorbs, which is where an uncollectable cost has to sit. Both halves land in both wallets' logs as `double_spend_compensation` and `double_spend_penalty`.
 
-A proven double-spend is also written into the **victim's** own transaction log as a `double_spend` entry. Being told once, in the moment a sync happened to print it, is not the same as having a record of it.
-
-### Ratings snapshot
-`GET /wallet/api/ratings` → `{"issued_at":<epochMillis>,"count":N,"max":5000,"ratings":{"<address>":<0-5>,...},"signature":"<hex>"}`, signed with the same key notes are (`GET /wallet/api/notes/key`).
-
-A rating is only useful at the moment somebody is deciding whether to accept a payment, and that moment is exactly when there is no network — that is what offline payment means. So the ledger signs the whole list, wallets download it while they can, and the confirmation shows it from disk.
-
-The signed text is canonical and dull on purpose, because two implementations have to hash the same bytes:
-
-```
-aicoin-ratings\n<issued_at>\n<address>:<rating>\n...      (sorted by address)
-```
-
-**A snapshot cannot be fresh, and must not pretend to be.** A rating drops to zero the instant a double-spend is proven, and this morning's copy will not know. The issue time is *inside* the signed text, so a stale copy cannot be passed off as current, and every client shows that age beside the number.
-
-Two limits, both stated in the document itself so a client knows what it is holding: at most `max` wallets, and the snapshot rates from balance and proven double-spends alone — the per-wallet endpoint knows about purchases, calls and counterparties, and rates the same wallet higher. A snapshot rating is a floor.
 
 ### Additional proxy-side endpoints
 - `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"half_life_days":110}` computed directly from the ledger — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life. Always includes `Access-Control-Allow-Origin: *` — this is public, read-only data fetched cross-origin by the landing page at aicoin.oeaio.com (a separate origin from the proxy).
@@ -524,7 +466,6 @@ history, so it needs its own, separate auth.
 
 ### Tests to include
 - JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs), and the admin token's constant-time comparison + address-format validation — no network/Redis needed.
-- `NoteTest` — the bearer note's format: ids that do not repeat, the ledger key being the *hash* of the secret, the payload surviving the round trip it will really make, rubbish rejected rather than guessed at, and a fingerprint that comes from the hash so reading it aloud gives nothing away. The lifecycle — issue debiting immediately, first-come redemption, reclaim refused to anyone but the issuer, and verification against the published key with no ledger lookup — is covered end-to-end in `e2e/run.sh`.
 - For the consortium: each provider's chat request shape and the extraction of assistant text from each provider's response shape (including a 2xx that carries none), the strict reading of `NO COMMENTS`, that a polled panelist is briefed to stand alone rather than towards a merge, that a poll is never turned into a lead by a large context, and panel/editor selection from config — all pure, no network. The rounds themselves, their billing and the partial-result paths are covered end-to-end in `e2e/run.sh` against the mock provider, which plays drafter, editor and reviewer.
 
 ## Docker / docker-compose
