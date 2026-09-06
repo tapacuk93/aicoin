@@ -68,13 +68,15 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
     private final ProxyConfig config;
     private final EventLoopGroup clientGroup;
     private final ProviderHealthTracker healthTracker;
+    private final ProviderLiveness liveness;
     private final AicoinLedger ledger;
 
     public ProxyFrontendHandler(ProxyConfig config, EventLoopGroup clientGroup, ProviderHealthTracker healthTracker,
-                                 AicoinLedger ledger) {
+                                 ProviderLiveness liveness, AicoinLedger ledger) {
         this.config = config;
         this.clientGroup = clientGroup;
         this.healthTracker = healthTracker;
+        this.liveness = liveness;
         this.ledger = ledger;
     }
 
@@ -131,7 +133,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
         if (request.method() == HttpMethod.GET && "/health".equals(path)) {
-            HealthHandler.respond(ctx, healthTracker, config);
+            HealthHandler.respond(ctx, healthTracker, liveness, config);
             return;
         }
         if (request.method() == HttpMethod.GET && "/wallet".equals(path)) {

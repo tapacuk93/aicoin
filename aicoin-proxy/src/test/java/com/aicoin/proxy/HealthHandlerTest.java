@@ -35,11 +35,20 @@ class HealthHandlerTest {
         return ProxyConfig.load(new HashMap<>());
     }
 
+    /**
+     * Builds the body with a liveness prober that has never been started, so every provider carries
+     * whichever state it has before any probe has happened: {@code unconfigured} without a key,
+     * {@code unknown} with one.
+     */
+    private static String json(ProviderHealthTracker tracker, ProxyConfig config) {
+        return HealthHandler.buildJson(tracker, new ProviderLiveness(config), config);
+    }
+
     @Test
     void listsEveryProviderEvenWithZeroTraffic() {
         ProviderHealthTracker tracker = new ProviderHealthTracker(50);
 
-        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker, configWithNoKeys()));
+        List<Map<String, Object>> providers = providersOf(json(tracker, configWithNoKeys()));
 
         assertEquals(8, providers.size());
         assertEquals(
@@ -58,7 +67,7 @@ class HealthHandlerTest {
         ProviderHealthTracker tracker = new ProviderHealthTracker(50);
         tracker.record("openai", 429);
 
-        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker, configWithNoKeys()));
+        List<Map<String, Object>> providers = providersOf(json(tracker, configWithNoKeys()));
         assertEquals(8, providers.size());
 
         Map<String, Object> openai = findByName(providers, "openai");
@@ -76,7 +85,7 @@ class HealthHandlerTest {
         ProviderHealthTracker tracker = new ProviderHealthTracker(50);
         tracker.record("cohere", 403);
 
-        Map<String, Object> cohere = findByName(providersOf(HealthHandler.buildJson(tracker, configWithNoKeys())), "cohere");
+        Map<String, Object> cohere = findByName(providersOf(json(tracker, configWithNoKeys())), "cohere");
         assertFalse((Boolean) cohere.get("healthy"));
         assertTrue((Boolean) cohere.get("overBudget"));
         assertFalse((Boolean) cohere.get("rateLimited"));
@@ -88,7 +97,7 @@ class HealthHandlerTest {
         tracker.record("elevenlabs", 429);
         tracker.record("stability", 402);
 
-        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker, configWithNoKeys()));
+        List<Map<String, Object>> providers = providersOf(json(tracker, configWithNoKeys()));
 
         Map<String, Object> elevenlabs = findByName(providers, "elevenlabs");
         assertFalse((Boolean) elevenlabs.get("healthy"));
@@ -109,7 +118,7 @@ class HealthHandlerTest {
         ProxyConfig config = ProxyConfig.load(env);
         ProviderHealthTracker tracker = new ProviderHealthTracker(50);
 
-        List<Map<String, Object>> providers = providersOf(HealthHandler.buildJson(tracker, config));
+        List<Map<String, Object>> providers = providersOf(json(tracker, config));
 
         assertEquals(Boolean.TRUE, findByName(providers, "openai").get("enabled"));
         assertEquals(Boolean.TRUE, findByName(providers, "anthropic").get("enabled"));
@@ -120,10 +129,38 @@ class HealthHandlerTest {
     @Test
     void noConfiguredKeysMeansNoProviderIsEnabled() {
         List<Map<String, Object>> providers = providersOf(
-                HealthHandler.buildJson(new ProviderHealthTracker(50), configWithNoKeys()));
+                json(new ProviderHealthTracker(50), configWithNoKeys()));
         for (Map<String, Object> p : providers) {
             assertEquals(Boolean.FALSE, p.get("enabled"), p.get("name") + " should default to disabled with no apiKey");
         }
+    }
+
+    @Test
+    void unprobedProviderReportsUnconfiguredWithoutAKeyAndUnknownWithOne() {
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_OPENAI_APIKEY", "sk-test-123");
+        List<Map<String, Object>> providers = providersOf(json(new ProviderHealthTracker(50), ProxyConfig.load(env)));
+
+        // A key is configured but nobody has asked the provider anything yet. That is not the same
+        // as knowing it is up, and /health must not say it is.
+        Map<String, Object> openai = findByName(providers, "openai");
+        assertEquals("unknown", openai.get("state"));
+        assertEquals("not checked yet", openai.get("detail"));
+        assertEquals(0, openai.get("checkedAt"));
+
+        Map<String, Object> google = findByName(providers, "google");
+        assertEquals("unconfigured", google.get("state"));
+        assertEquals("no key configured", google.get("detail"));
+    }
+
+    @Test
+    void aProviderWithNoRecentFailuresIsStillNotReportedAlive() {
+        // The distinction the state field exists for: healthy is "nothing we sent it came back
+        // 429 or 402", which a provider with a revoked key and no traffic also satisfies.
+        Map<String, Object> openai = findByName(
+                providersOf(json(new ProviderHealthTracker(50), configWithNoKeys())), "openai");
+        assertEquals(Boolean.TRUE, openai.get("healthy"));
+        assertFalse("alive".equals(openai.get("state")));
     }
 
     private static Map<String, Object> findByName(List<Map<String, Object>> providers, String name) {

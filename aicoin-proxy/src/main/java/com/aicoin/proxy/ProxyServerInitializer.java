@@ -17,14 +17,16 @@ public class ProxyServerInitializer extends ChannelInitializer<SocketChannel> {
     private final ProxyConfig config;
     private final EventLoopGroup clientGroup;
     private final ProviderHealthTracker healthTracker;
+    private final ProviderLiveness liveness;
     private final AicoinLedger ledger;
     private final AccessLog accessLog;
 
     public ProxyServerInitializer(ProxyConfig config, EventLoopGroup clientGroup, ProviderHealthTracker healthTracker,
-                                   AicoinLedger ledger, AccessLog accessLog) {
+                                   ProviderLiveness liveness, AicoinLedger ledger, AccessLog accessLog) {
         this.config = config;
         this.clientGroup = clientGroup;
         this.healthTracker = healthTracker;
+        this.liveness = liveness;
         this.ledger = ledger;
         this.accessLog = accessLog;
     }
@@ -36,6 +38,6 @@ public class ProxyServerInitializer extends ChannelInitializer<SocketChannel> {
         // Before the routing handler so it sees every request, and — being a duplex handler —
         // every response on its way back out, whichever code path produced it.
         ch.pipeline().addLast(new AccessLogHandler(accessLog));
-        ch.pipeline().addLast(new ProxyFrontendHandler(config, clientGroup, healthTracker, ledger));
+        ch.pipeline().addLast(new ProxyFrontendHandler(config, clientGroup, healthTracker, liveness, ledger));
     }
 }

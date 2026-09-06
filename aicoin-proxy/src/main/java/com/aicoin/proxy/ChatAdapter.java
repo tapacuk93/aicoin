@@ -32,7 +32,7 @@ final class ChatAdapter {
     static final List<String> CHAT_PROVIDERS = List.of("anthropic", "openai", "google", "mistral", "kimi");
 
     /** Anthropic requires this header on every Messages API call; it is not a config knob. */
-    private static final String ANTHROPIC_VERSION = "2023-06-01";
+    static final String ANTHROPIC_VERSION = "2023-06-01";
 
     private ChatAdapter() {
     }

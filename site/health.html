@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AICoin status — are the AI backends alive?</title>
+<meta name="description" content="Live status of the AICoin relay and every AI provider behind it: which backends answered their last liveness check, which are rate limited, and which have no key configured.">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0b0d10;
+    --fg: #e8eaed;
+    --muted: #9aa0a6;
+    --accent: #6ee7b7;
+    --warn: #fbbf24;
+    --bad: #f87171;
+    --card: #14171c;
+    --border: #23262b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 4rem 1.5rem 5rem; }
+  h1 { font-size: 2rem; margin: 0 0 0.25rem; letter-spacing: -0.02em; }
+  .tagline { color: var(--muted); font-size: 1.02rem; margin: 0 0 2rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: rgba(255,255,255,0.06); padding: 0.15em 0.4em; border-radius: 6px; font-size: 0.9em; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+  }
+  .card h2 { font-size: 1.05rem; margin: 0 0 0.4rem; color: var(--accent); }
+  .meta { color: var(--muted); font-size: 0.85rem; margin: 0.3rem 0 0; }
+  .headline {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .headline-value { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.01em; }
+  .rows { margin-top: 0.9rem; }
+  .row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.7rem;
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .row:first-child { border-top: none; }
+  .dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .name { font-weight: 600; min-width: 7rem; }
+  .state { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+  .detail { color: var(--muted); font-size: 0.85rem; flex: 1 1 12rem; }
+  .when { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+  .alive .dot { background: var(--accent); }
+  .alive .state { color: var(--accent); }
+  .warn .dot { background: var(--warn); }
+  .warn .state { color: var(--warn); }
+  .down .dot { background: var(--bad); }
+  .down .state { color: var(--bad); }
+  footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>AICoin status</h1>
+  <p class="tagline">Whether the relay is up, and whether each AI provider behind it is answering right now.</p>
+
+  <div class="card">
+    <div class="headline">
+      <div>
+        <h2>Relay</h2>
+        <p class="headline-value" id="relayState">Checking&hellip;</p>
+      </div>
+    </div>
+    <p class="meta" id="relayMeta">Asking <code>proxy.aicoin.oeaio.com/health</code>&hellip;</p>
+  </div>
+
+  <div class="card">
+    <h2>AI backends</h2>
+    <p class="meta">The relay asks each provider directly, about once a minute, on an endpoint that provider does not charge for. This is a real answer from the provider, not a guess from traffic: a backend reads <strong>alive</strong> only if it responded.</p>
+    <div class="rows" id="backendRows">
+      <div class="row"><span class="dot"></span><span class="name">Loading&hellip;</span></div>
+    </div>
+    <p class="meta" id="backendMeta"></p>
+  </div>
+
+  <div class="card">
+    <h2>What the states mean</h2>
+    <p class="meta"><strong>Alive</strong> — the provider answered the last check. A provider that is answering but throttling us (429) is still alive; it is marked <strong>rate limited</strong>, and calls to it may be slow or refused for a while.</p>
+    <p class="meta"><strong>Down</strong> — it did not answer, answered with an error of its own, or rejected the relay's key. No call can be served on it until that changes.</p>
+    <p class="meta"><strong>Not configured</strong> — the relay holds no key for this provider, so it is never routed to. Nothing is broken; it is simply not one of the backends today.</p>
+    <p class="meta"><strong>Not checked yet</strong> — the relay restarted less than a minute ago and has not asked yet. It is not a claim that anything is wrong, and not a claim that anything is fine.</p>
+    <p class="meta">Rate limits and billing rejections seen on <em>real</em> forwarded calls are shown too, from the relay's rolling window of recent calls. Those say what customers actually hit, which a probe on a free listing endpoint cannot see.</p>
+  </div>
+
+  <footer>
+    <a href="/">&larr; AICoin</a> &middot;
+    <a href="https://proxy.aicoin.oeaio.com/health">raw JSON</a> &middot;
+    <a href="https://github.com/tapacuk93/aicoin">source</a>
+  </footer>
+</main>
+
+<script>
+(function () {
+  var API = "https://proxy.aicoin.oeaio.com";
+  var LABELS = {
+    openai: "OpenAI",
+    anthropic: "Anthropic",
+    google: "Google",
+    mistral: "Mistral",
+    cohere: "Cohere",
+    elevenlabs: "ElevenLabs",
+    stability: "Stability",
+    kimi: "Kimi"
+  };
+
+  var relayState = document.getElementById("relayState");
+  var relayMeta = document.getElementById("relayMeta");
+  var backendRows = document.getElementById("backendRows");
+  var backendMeta = document.getElementById("backendMeta");
+
+  // The relay's own liveness state, plus what its recent real traffic says on top of it. The two
+  // are separate questions: a provider can answer a probe fine while the calls customers actually
+  // make are coming back 429.
+  function view(p) {
+    if (p.state === "unconfigured") return { cls: "", label: "not configured", detail: "no key held for this provider" };
+    if (p.state === "unknown") return { cls: "", label: "not checked yet", detail: p.detail || "" };
+    if (p.state === "down") return { cls: "down", label: "down", detail: p.detail || "" };
+    var notes = [];
+    if (p.rateLimited) notes.push("recent calls rate limited");
+    if (p.overBudget) notes.push("recent calls rejected for billing");
+    if (p.detail === "rate limited") notes.unshift("throttling us");
+    var cls = notes.length ? "warn" : "alive";
+    var label = notes.length ? "alive · degraded" : "alive";
+    var detail = notes.length ? notes.join(", ") : (p.detail || "responded");
+    return { cls: cls, label: label, detail: detail };
+  }
+
+  function ago(millis) {
+    if (!millis) return "";
+    var seconds = Math.max(0, Math.round((Date.now() - millis) / 1000));
+    if (seconds < 60) return "checked " + seconds + "s ago";
+    var minutes = Math.round(seconds / 60);
+    if (minutes < 60) return "checked " + minutes + "m ago";
+    return "checked " + Math.round(minutes / 60) + "h ago";
+  }
+
+  function render(body) {
+    var providers = body.providers || [];
+    backendRows.innerHTML = "";
+    providers.forEach(function (p) {
+      var v = view(p);
+      var row = document.createElement("div");
+      row.className = "row " + v.cls;
+
+      var dot = document.createElement("span");
+      dot.className = "dot";
+      row.appendChild(dot);
+
+      var name = document.createElement("span");
+      name.className = "name";
+      name.textContent = LABELS[p.name] || p.name;
+      row.appendChild(name);
+
+      var state = document.createElement("span");
+      state.className = "state";
+      state.textContent = v.label;
+      row.appendChild(state);
+
+      var detail = document.createElement("span");
+      detail.className = "detail";
+      detail.textContent = v.detail;
+      row.appendChild(detail);
+
+      var when = document.createElement("span");
+      when.className = "when";
+      when.textContent = p.latencyMs ? ago(p.checkedAt) + " · " + p.latencyMs + "ms" : ago(p.checkedAt);
+      row.appendChild(when);
+
+      backendRows.appendChild(row);
+    });
+
+    var alive = providers.filter(function (p) { return p.state === "alive"; }).length;
+    var configured = providers.filter(function (p) { return p.state !== "unconfigured"; }).length;
+    relayState.textContent = "Up";
+    relayMeta.textContent = "Answered at " + new Date().toLocaleTimeString() + ". This page refreshes every 15s.";
+    backendMeta.textContent = alive + " of " + configured + " configured backends alive"
+      + (providers.length - configured ? ", " + (providers.length - configured) + " not configured" : "") + ".";
+  }
+
+  function failed() {
+    relayState.textContent = "Unreachable";
+    relayMeta.textContent = "Could not reach " + API + " at " + new Date().toLocaleTimeString()
+      + ". Nothing can be said about the backends while the relay itself is not answering.";
+    backendRows.innerHTML = '<div class="row down"><span class="dot"></span><span class="name">Unknown</span>'
+      + '<span class="state">relay unreachable</span></div>';
+    backendMeta.textContent = "";
+  }
+
+  function load() {
+    fetch(API + "/health")
+      .then(function (res) { return res.json(); })
+      .then(render)
+      .catch(failed);
+  }
+
+  load();
+  setInterval(load, 15000);
+})();
+</script>
+</body>
+</html>

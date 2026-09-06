@@ -138,6 +138,10 @@ pricing:
   defaultCostUsdPerCall: 0.001    # AICOIN_PROXY_DEFAULT_COST_USD
 health:
   windowSize: 50                  # AICOIN_PROXY_HEALTH_WINDOW_SIZE — how many of each provider's most recent forwarded calls GET /health tracks
+  probe:
+    enabled: true                 # AICOIN_PROXY_HEALTH_PROBE_ENABLED — ask each provider directly whether it is alive
+    intervalSeconds: 60           # AICOIN_PROXY_HEALTH_PROBE_INTERVAL_SECONDS
+    timeoutSeconds: 10            # AICOIN_PROXY_HEALTH_PROBE_TIMEOUT_SECONDS
 ```
 
 `baseUrl` may be `http://` (plain — used by tests/mock servers) or
@@ -673,18 +677,36 @@ back would be a debit with no call behind it.
   (recorded regardless of whether the call was 2xx or not): `rateLimited`
   is `true` if any status in the window was `429`; `overBudget` is `true`
   if any was `402` or `403`; `healthy` is `!rateLimited && !overBudget`.
+
+  Those three are all read off traffic that happened to be sent, so they are
+  silent about a provider nobody has called lately — a revoked key looks
+  exactly like a healthy backend until the first customer call fails on it.
+  `state` is the field that is not: `ProviderLiveness` asks each provider
+  directly, once every `health.probe.intervalSeconds`, on that provider's
+  `probePath` (one of its own `freePaths`, so it costs nothing), and reports
+  `alive`, `down`, `unconfigured` (no key) or `unknown` (not asked yet — never
+  reported as alive). `429` is alive: the provider is up and throttling us.
+  `401`/`403`/`402`/`5xx`/no answer are down. `detail`, `checkedAt` and
+  `latencyMs` say what produced the state and when.
   Always includes `Access-Control-Allow-Origin: *`, same as `/price`.
   Response:
 
   ```json
   {"providers":[
-    {"name":"openai","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"anthropic","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"google","enabled":false,"healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"mistral","enabled":false,"healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"cohere","enabled":false,"healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"elevenlabs","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false},
-    {"name":"stability","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false}
+    {"name":"openai","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false,
+     "state":"alive","detail":"responded 200","checkedAt":1757183940000,"latencyMs":181},
+    {"name":"anthropic","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false,
+     "state":"alive","detail":"responded 200","checkedAt":1757183940000,"latencyMs":233},
+    {"name":"google","enabled":false,"healthy":true,"rateLimited":false,"overBudget":false,
+     "state":"unconfigured","detail":"no key configured","checkedAt":0,"latencyMs":0},
+    {"name":"mistral","enabled":false,"healthy":true,"rateLimited":false,"overBudget":false,
+     "state":"unconfigured","detail":"no key configured","checkedAt":0,"latencyMs":0},
+    {"name":"cohere","enabled":false,"healthy":true,"rateLimited":false,"overBudget":false,
+     "state":"unconfigured","detail":"no key configured","checkedAt":0,"latencyMs":0},
+    {"name":"elevenlabs","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false,
+     "state":"down","detail":"key rejected (401)","checkedAt":1757183940000,"latencyMs":97},
+    {"name":"stability","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false,
+     "state":"alive","detail":"responded 200","checkedAt":1757183940000,"latencyMs":152}
   ]}
   ```
 
@@ -967,7 +989,13 @@ JUnit5 pure-function tests, with no network/Redis dependency required:
   providers, in the stable `openai, anthropic, google, mistral, cohere,
   elevenlabs, stability, kimi` order, defaulting to the all-clear state for
   providers with zero recorded calls, and reflecting recorded
-  rate-limit/budget statuses for others.
+  rate-limit/budget statuses for others. Also that an unprobed provider is
+  `unconfigured` or `unknown` but never `alive`, however clean its window is.
+- `ProviderLivenessTest` — the status-to-state mapping (2xx and 429 alive;
+  401/403/402/5xx down; an unexpected 404 still an answer), that every
+  provider's default `probePath` is one of that provider's own `freePaths`
+  (probing runs forever, so it has to be free), and that probing can be
+  disabled and retimed by env.
 - `WalletPageHandlerTest` — `GET /wallet` serves the bundled HTML page
   verbatim.
 
@@ -1016,6 +1044,18 @@ against real claim/debit/refund activity.
 - **The `balance` field in a `402` response body** is rendered without a
   trailing `.0` when it's a whole number (e.g. `0`, not `0.0`), matching
   how a whole-number balance would typically be expected to render.
+- **A provider is probed on a free path, not a real call.** Liveness could be
+  measured by sending a real inference request, which is what a customer
+  actually does — but that would spend money on every provider every minute
+  forever, so the probe uses each provider's listing endpoint instead. The gap
+  is real and worth naming: a provider can list models fine while inference is
+  broken or out of credit. That case shows up in `rateLimited`/`overBudget`,
+  which come from real forwarded calls; the two fields together are the honest
+  picture, which is why both are reported rather than collapsed into one.
+- **ElevenLabs is probed on `/v1/voices`, not `/v1/models`.** An ElevenLabs key
+  scoped without `models_read` is refused at `/v1/models` (`401`) while being
+  perfectly able to synthesize speech — the production key is exactly that. On
+  the models path the probe would report a working backend as down.
 - **`GET /health` only records real upstream responses.** The contract says
   to record "every forwarded call" into a provider's rolling window; a
   connect/write failure to the upstream never produces a real HTTP status

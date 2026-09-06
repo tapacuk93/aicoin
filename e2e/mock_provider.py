@@ -6,7 +6,8 @@ auth mechanisms — and stripped X-AI) alongside a canned OpenAI-style usage
 body. If the request body is JSON with `"simulate_failure": true`, responds
 500 instead, so tests can exercise the proxy's debit-refund-on-failure path
 deterministically without depending on a real upstream's real failure
-modes.
+modes. A GET to a path under /unavailable always answers 503, which is what the
+liveness prober is pointed at when a test needs a provider to look down.
 
 It also stands in for a chat API when the request is a consortium turn (the
 proxy writes those itself rather than forwarding a client's body — see
@@ -44,6 +45,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             simulate_failure = bool(parsed_body.get("simulate_failure"))
         except Exception:
             pass
+
+        # A path reserved for the liveness probe to fail on, so the suite can watch a provider
+        # be reported down without taking the whole mock away from the other seven.
+        if urlparse(self.path).path.startswith("/unavailable"):
+            payload = json.dumps({"error": "provider unavailable"}).encode()
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
 
         if simulate_failure:
             payload = json.dumps({"error": "simulated upstream failure"}).encode()
