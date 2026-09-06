@@ -133,6 +133,28 @@ consortium:                        # POST /consortium — see its own section be
     google: gemini-3.5-flash
     mistral: mistral-large-latest
     kimi: kimi-k2.6
+capabilities:                      # POST /text, /image, /audio — see their own section below
+  text:
+    escalation: true               # AICOIN_PROXY_CAPABILITIES_ESCALATION_ENABLED (false: /text is always one call)
+  image:
+    models:
+      openai: gpt-image-1                        # AICOIN_PROXY_OPENAI_IMAGE_MODEL
+      stability: stable-diffusion-xl-1024-v1-0   # AICOIN_PROXY_STABILITY_IMAGE_MODEL
+  audio:
+    models:
+      elevenlabs: eleven_multilingual_v2         # AICOIN_PROXY_ELEVENLABS_AUDIO_MODEL
+      openai: gpt-4o-mini-tts                    # AICOIN_PROXY_OPENAI_AUDIO_MODEL
+    voices:
+      elevenlabs: EXAVITQu4vr4xnSDxMaL           # AICOIN_PROXY_ELEVENLABS_VOICE
+      openai: alloy                              # AICOIN_PROXY_OPENAI_VOICE
+  skills:                          # 0-5 per capability and per subject; 0 = never route
+    anthropic: { text: 5, code: 5, writing: 5, analysis: 5, legal: 4, creative: 4 }
+    openai:    { text: 5, image: 5, audio: 4, code: 5, math: 5, science: 4, analysis: 4, creative: 4 }
+    google:    { text: 4, science: 5, translation: 5, math: 4, analysis: 4, code: 3 }
+    mistral:   { text: 3, translation: 4, code: 3, writing: 3 }
+    kimi:      { text: 4, translation: 5, analysis: 4, code: 4, writing: 4 }
+    elevenlabs: { audio: 5, creative: 5 }        # AICOIN_PROXY_SKILL_ELEVENLABS_AUDIO
+    stability:  { image: 4, creative: 5 }
 pricing:
   costPerTokenUsd: 0.000002       # AICOIN_PROXY_COST_PER_TOKEN_USD
   defaultCostUsdPerCall: 0.001    # AICOIN_PROXY_DEFAULT_COST_USD
@@ -538,6 +560,53 @@ All operations are async (Lettuce's `RedisFuture`/`CompletableFuture`
 API), matching the rest of this codebase's non-blocking Netty style — none
 of them block an event-loop thread.
 
+## Capability endpoints — `/text`, `/image`, `/audio`
+
+`POST /text`, `POST /image` and `POST /audio` take a prompt and choose the
+provider themselves. Everywhere else this proxy is provider-shaped on purpose —
+you send OpenAI's request to OpenAI's path — which is right for a client that
+has already chosen one, and wrong for a client that just wants a paragraph
+written.
+
+**How the provider is chosen.** `SubjectTagger` tags the request as one of
+`code`, `math`, `translation`, `legal`, `science`, `creative`, `analysis`,
+`writing`, `general`, from keywords in the prompt (and in the caller's
+`context`, but only when the prompt matched nothing — a licensing question
+asked about a codebase is a licensing question). `ProviderSkills` then ranks
+every provider rated above 0 for that capability that has a key here, has a
+model, has an adapter, and is not currently reported `down` by `GET /health`.
+A rating is an opinion; a dead provider is a fact, and the fact wins. The best
+one answers; if it fails outright the next takes it, up to three attempts, and
+a failed call is refunded so failover costs nothing but the wait.
+
+The tagger is deliberately not a model call: asking a model what a request is
+about before answering it doubles the price of every short question, to decide
+something that only *orders* a list. A wrong tag never refuses and never fails
+a call.
+
+**The ratings are opinions.** Nothing in the skills table is benchmarked or
+learned from traffic. That is why they are config, why each is overridable with
+`AICOIN_PROXY_SKILL_<PROVIDER>_<CAPABILITY-OR-SUBJECT>`, and why naming a
+`provider` in the request skips routing entirely.
+
+**Escalation.** A model answering `/text` alone may reply with exactly
+`NEEDS CONSORTIUM`, and the same request goes to the panel below — drafted,
+merged, reviewed to a clean round. That judgement belongs to something that has
+read the request, but it spends the caller's coins several times over, so the
+model is told the price, the phrase counts only as the whole reply, and the
+triage call is folded into the response's `calls` and `coins_charged`. Off per
+request with `escalate: false`, off per deployment with
+`capabilities.text.escalation: false`.
+
+**One response shape.** `/text` returns `answer` plus `capability`, `subject`,
+`provider`, `model`, `considered`, `calls`, `coins_charged` and `errors`.
+`/image` and `/audio` return the same routing fields with `media_base64` and
+`media_type`. Media is always base64 in JSON, including from ElevenLabs, which
+answers in raw MP3 bytes — a third larger, and worth it for one shape across
+providers.
+
+`GET /skills` publishes the table and the live ranking, unauthenticated.
+
 ## Consortium — one request, every AI, reviewed until nobody objects
 
 `POST /consortium` is the one endpoint where this proxy *writes* provider
@@ -896,6 +965,22 @@ JUnit5 pure-function tests, with no network/Redis dependency required:
 
 - `ProviderRoutingTest` — `X-AI` header → provider resolution, including
   case-insensitivity and the missing/unknown case, across every provider.
+- `SubjectTaggerTest` — what a request gets tagged as: the obvious cases, the
+  request outweighing the context, the context breaking a tie the request
+  cannot, and the same prompt tagging the same way every time (a router that
+  is unstable makes a failure impossible to reproduce).
+- `ProviderSkillsTest` — a capability rating of 0 meaning never route, a
+  subject rating overriding the capability rating, a missing subject rating
+  meaning no opinion rather than a bad score, an explicit rating outranking the
+  same score reached by fallback, and ties keeping canonical order.
+- `CapabilityRoutingTest` — which provider a consolidated endpoint would
+  actually call, given keys, adapters, models and liveness; and that ratings
+  can be corrected by env without a release.
+- `MediaAdapterTest` — the three image/speech request shapes and reading each
+  provider's own response, including that speech bytes survive the trip and
+  that a JSON body where audio was expected is not audio.
+- `SkillsHandlerTest` — `GET /skills` publishing the ranking that would be used
+  rather than the table it came from.
 - `ChatAdapterTest` — the consortium's per-provider chat shapes: Anthropic's
   top-level `system`, OpenAI's `max_completion_tokens` (its newer models
   reject `max_tokens` outright), Gemini's model-in-the-path and `parts[]`,

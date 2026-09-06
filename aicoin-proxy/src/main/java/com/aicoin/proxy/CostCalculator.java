@@ -94,6 +94,29 @@ public final class CostCalculator {
         return new Priced(computeCostUsd(provider, jsonBody, pricing), tokens, tokens > 0);
     }
 
+    /**
+     * The cost of a call whose model this proxy chose itself and whose response reports no usage —
+     * an image or a speech clip, which come back as pixels and MP3 frames and say nothing about
+     * tokens.
+     *
+     * <p>Without this such a call falls all the way to {@code defaultCostUsdPerCall}, which is
+     * fractions of a cent, and a four-cent image is then recorded as costing almost nothing —
+     * published straight into {@code GET /price} and charged to the wallet as one coin.
+     *
+     * @return the configured per-call rate for that model, or null when there is none and the
+     *         ordinary response-parsing path should be used instead
+     */
+    public static Priced priceKnownModel(String provider, String model, ModelPricing pricing) {
+        if (model == null || model.isEmpty()) {
+            return null;
+        }
+        Double perCall = pricing.modelPerCallUsd(provider, model);
+        if (perCall == null) {
+            perCall = pricing.perCallUsd(provider);
+        }
+        return perCall == null ? null : new Priced(perCall, 0, false);
+    }
+
     public static double computeCostUsd(String provider, String jsonBody, ModelPricing pricing) {
         Usage usage = extractUsage(jsonBody);
         if (usage != null) {

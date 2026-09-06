@@ -21,6 +21,17 @@ final class ConsortiumPrompts {
      */
     static final String CLEAN_REVIEW = "NO COMMENTS";
 
+    /**
+     * What a single model says instead of an answer when it judges the request too hard to answer
+     * alone — the signal {@code POST /text} reads to escalate the same request to the whole panel.
+     *
+     * <p>Strict for the same reason {@link #CLEAN_REVIEW} is, but the failure it guards runs the
+     * other way. A reviewer that hedges costs one more round; a model that mentions this phrase in
+     * passing while answering perfectly well would throw the answer away and spend a whole
+     * consortium on a question that was already done. So it counts only as the entire reply.
+     */
+    static final String ESCALATE = "NEEDS CONSORTIUM";
+
     private ConsortiumPrompts() {
     }
 
@@ -126,6 +137,52 @@ final class ConsortiumPrompts {
                 + " reach.\n\n"
                 + "Do not mention the reviews, the comments or the panel, and do not describe your"
                 + " changes. Output only the revised answer.";
+    }
+
+    /**
+     * The single model answering on its own at {@code POST /text}, with one way out.
+     *
+     * <p>It is told what escalation costs, in the only terms that matter to the person paying: a
+     * panel is several times the price of this call. A model given an escape hatch and no sense of
+     * its cost takes it whenever the question is interesting, and "interesting" is not the bar —
+     * the bar is that answering alone would produce a worse answer than a panel would, which is a
+     * judgement only the model reading the request can make.
+     */
+    static String singleSystem() {
+        return "You are answering a request on your own. Your answer is returned as it is, with no editor"
+                + " and no review, so it has to stand by itself.\n\n"
+                + "There is one exception. If answering this well genuinely needs several different models"
+                + " — because it turns on a judgement reasonable experts would disagree about, because it"
+                + " spans fields no single model is strong across, or because getting it wrong would be"
+                + " costly and the request is ambiguous enough that one reading of it could be the wrong"
+                + " one — then reply with exactly " + ESCALATE + " and nothing else. The same request will"
+                + " then be put to a panel of models, merged and reviewed until they have no comments left."
+                + "\n\n"
+                + "That costs the person asking several times what this call costs, so it is not the"
+                + " response to a question that is merely large, open-ended, or interesting. A long answer"
+                + " you can write correctly is an answer you should write. Use it when a second and third"
+                + " model would actually disagree with you, not when the work is simply substantial.\n\n"
+                + "Otherwise answer the request. If it specifies a format, follow it exactly. Output only"
+                + " the answer.";
+    }
+
+    static String singleTask() {
+        return "Answer the request above. Output only the answer — or exactly " + ESCALATE
+                + " if it needs the panel.";
+    }
+
+    /**
+     * Whether a single model asked for the panel. True only when the escalation phrase is the whole
+     * reply, allowing the punctuation and emphasis a model wraps such a line in — the same test
+     * {@link #isClean} applies, and for the same reason: a phrase inside an answer is part of the
+     * answer.
+     */
+    static boolean isEscalation(String reply) {
+        if (reply == null) {
+            return false;
+        }
+        String stripped = reply.trim().replaceAll("[*_`#.!\\s]+$", "").replaceAll("^[*_`#\\s]+", "");
+        return stripped.toUpperCase(Locale.ROOT).equals(ESCALATE);
     }
 
     static String draftTask() {

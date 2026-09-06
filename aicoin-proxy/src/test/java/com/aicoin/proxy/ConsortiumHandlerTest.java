@@ -126,4 +126,35 @@ class ConsortiumHandlerTest {
         assertTrue(ConsortiumHandler.panel(config, null).isEmpty());
         assertNull(ConsortiumHandler.editor(config, List.of(), null));
     }
+
+    @Test
+    void thePanelIsOrderedByWhatEachMemberIsRatedAtForTheSubject() {
+        // Order decides who edits: the first panelist merges every draft and writes every
+        // revision, so ranking it is the difference between the strongest model for the question
+        // holding the pen and whichever provider comes first in the config file.
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_ANTHROPIC_APIKEY", "a");
+        env.put("AICOIN_PROXY_GOOGLE_APIKEY", "g");
+        env.put("AICOIN_PROXY_MISTRAL_APIKEY", "m");
+        ProxyConfig config = ProxyConfig.load(env);
+
+        List<String> science = ConsortiumHandler.panel(config, null, "science", null);
+        assertEquals("google", science.get(0));
+        assertEquals("google", ConsortiumHandler.editor(config, science, null));
+
+        List<String> writing = ConsortiumHandler.panel(config, null, "writing", null);
+        assertEquals("anthropic", writing.get(0));
+        assertEquals("anthropic", ConsortiumHandler.editor(config, writing, null));
+    }
+
+    @Test
+    void aLowerRatedPanelistIsStillOnThePanel() {
+        // The rating decides who writes, not who is allowed to speak: a panel is worth having
+        // because its members disagree, and the weakest one still gets a review turn.
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_ANTHROPIC_APIKEY", "a");
+        env.put("AICOIN_PROXY_MISTRAL_APIKEY", "m");
+        List<String> panel = ConsortiumHandler.panel(ProxyConfig.load(env), null, "writing", null);
+        assertEquals(List.of("anthropic", "mistral"), panel);
+    }
 }

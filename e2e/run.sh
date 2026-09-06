@@ -152,6 +152,8 @@ REDIS_PORT=16379
 # + 4 consortium wallets (grace, heidi, ivan, and one more that claims only
 #   to fund grace): a consortium is several paid calls, and grace runs three
 #   of them
+# + 3 capability wallets (kate, and two that claim only to fund her): an image
+#   costs several coins and an escalated /text call is a whole consortium
 CLAIM_AMOUNT=10
 # (the size itself is computed below, once PROVIDERS is known)
 
@@ -159,7 +161,7 @@ PROVIDERS=(openai anthropic google mistral cohere elevenlabs stability kimi)
 AUTH_HEADERS=(Authorization x-api-key "" Authorization Authorization xi-api-key Authorization Authorization)
 AUTH_PREFIXES=("Bearer " "" "" "Bearer " "Bearer " "" "Bearer " "Bearer ")
 TEST_KEYS=(openai-test-key anthropic-test-key google-test-key mistral-test-key cohere-test-key elevenlabs-test-key stability-test-key kimi-test-key)
-FREE_COINS_POOL_SIZE=$(( CLAIM_AMOUNT * (3 + ${#PROVIDERS[@]} + 4) ))
+FREE_COINS_POOL_SIZE=$(( CLAIM_AMOUNT * (3 + ${#PROVIDERS[@]} + 4 + 3) ))
 
 PROXY_BIN="$REPO_ROOT/aicoin-proxy/build/install/aicoin-proxy/bin/aicoin-proxy"
 # Reuse the existing build only when nothing has been edited since it was made. Reusing it
@@ -369,6 +371,22 @@ done
 code=$(live_signed_request "$KEY_JACK" "$ADDR_JACK" "POST" "/wallet/api/transfer" \
   "{\"to_user_id\":\"$ADDR_GRACE\",\"amount\":$CLAIM_AMOUNT}" "$WORKDIR/jack-transfer.json")
 [ "$code" = "200" ] || fail "expected jack's transfer to grace to succeed, got $code"
+
+log "--- funding: kate claims for the capability tests, twice over (an image is several coins, an escalation is a consortium) ---"
+KEY_KATE="$WORKDIR/kate.pem"; gen_wallet "$KEY_KATE"; ADDR_KATE=$(wallet_address "$KEY_KATE")
+KEY_LEO="$WORKDIR/leo.pem"; gen_wallet "$KEY_LEO"; ADDR_LEO=$(wallet_address "$KEY_LEO")
+KEY_MIA="$WORKDIR/mia.pem"; gen_wallet "$KEY_MIA"; ADDR_MIA=$(wallet_address "$KEY_MIA")
+for pair in "$KEY_KATE:$ADDR_KATE" "$KEY_LEO:$ADDR_LEO" "$KEY_MIA:$ADDR_MIA"; do
+  ckey="${pair%%:*}"; caddr="${pair##*:}"
+  code=$(live_signed_request "$ckey" "$caddr" "POST" "/wallet/api/claim" "" "$WORKDIR/capability-claim.json")
+  [ "$code" = "200" ] || fail "expected a capability wallet's claim to succeed, got $code"
+done
+for funder in "$KEY_LEO:$ADDR_LEO" "$KEY_MIA:$ADDR_MIA"; do
+  fkey="${funder%%:*}"; faddr="${funder##*:}"
+  code=$(live_signed_request "$fkey" "$faddr" "POST" "/wallet/api/transfer" \
+    "{\"to_user_id\":\"$ADDR_KATE\",\"amount\":$CLAIM_AMOUNT}" "$WORKDIR/capability-transfer.json")
+  [ "$code" = "200" ] || fail "expected a transfer to kate to succeed, got $code"
+done
 
 log "--- test 11: the shared free-coins pool is now exhausted for a brand-new wallet ---"
 code=$(live_signed_request "$KEY_ERIN" "$ADDR_ERIN" "POST" "/wallet/api/claim" "" "$WORKDIR/t11.json")
@@ -836,6 +854,136 @@ print(d['rating'], any('never done anything' in r for r in d['reasons']))
 ")
 [ "$stranger" = "0 True" ] && pass "a wallet with no history rates 0 and says why" \
   || fail "expected 0 with a reason, got $stranger"
+
+log "--- test 34: GET /skills publishes the ranking a request would actually be routed by ---"
+curl -s "http://127.0.0.1:$PROXY_PORT/skills" > "$WORKDIR/t34.json"
+skills=$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t34.json'))
+r = d['routing']
+print(r['text']['code'][0], r['text']['science'][0], r['image']['creative'][0], r['audio']['creative'][0],
+      d['escalation'], len(d['subjects']))
+")
+# Every provider points at the mock and every key is set, so the ranking here is the rating table
+# with nothing filtered out of it: Google takes the science, Stability draws the picture, and
+# ElevenLabs speaks. Code is a tie between OpenAI and Anthropic, settled by canonical order.
+[ "$skills" = "openai google stability elevenlabs True 9" ] \
+  && pass "/skills ranks text/image/audio per subject and says escalation is on" \
+  || fail "unexpected /skills routing: $skills"
+
+log "--- test 35: POST /text answers with one call, and says who answered and why ---"
+NOW=$(epoch_seconds)
+KATE_TOKEN=$(build_token "$KEY_KATE" "$ADDR_KATE" "$NOW" "$((NOW + 86400))")
+bal_kate_before=$(balance_of "$ADDR_KATE")
+code=$(curl -s -o "$WORKDIR/t35.json" -D "$WORKDIR/t35.headers" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/text" \
+  -H "X-Api-Key: $KATE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"Why does this Java function throw a null pointer exception?"}')
+if [ "$code" = "200" ]; then
+  read -r answer provider subject escalated calls charged <<<"$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t35.json'))
+print(d['answer'].replace(' ', '_'), d['provider'], d['subject'], d['escalated'], d['calls'], d['coins_charged'])
+")"
+  [ "$answer" = "SINGLE_ANSWER_from_mock" ] && pass "the single model's answer is returned as it was given" \
+    || fail "expected the single answer, got $answer"
+  # The request tags as code and goes to the top-rated provider for code — which the response
+  # states, so the routing is explained by the answer itself rather than by reading the config.
+  [ "$subject" = "code" ] && [ "$provider" = "openai" ] \
+    && pass "tagged code and routed to the best-rated provider for it (openai)" \
+    || fail "expected subject=code provider=anthropic, got subject=$subject provider=$provider"
+  [ "$escalated" = "False" ] && [ "$calls" = "1" ] && [ "$charged" = "1" ] \
+    && pass "one call, one aicoin, no panel" || fail "expected 1 call/1 coin/no escalation, got calls=$calls charged=$charged escalated=$escalated"
+  grep -qi "^X-Aicoin-Charged: 1" "$WORKDIR/t35.headers" && pass "X-Aicoin-Charged: 1" \
+    || fail "missing/incorrect X-Aicoin-Charged: $(grep -i aicoin "$WORKDIR/t35.headers")"
+else
+  fail "expected 200 from /text, got $code: $(cat "$WORKDIR/t35.json")"
+fi
+
+log "--- test 36: the subject moves the routing, not just the capability ---"
+code=$(curl -s -o "$WORKDIR/t36.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/text" \
+  -H "X-Api-Key: $KATE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"Explain the chemistry of protein folding in one paragraph."}')
+routed=$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t36.json'))
+print(d['subject'], d['provider'], d['considered'][0])
+" 2>/dev/null || echo "parse-failed")
+[ "$routed" = "science google google" ] && pass "a science question goes to google, which is rated highest there" \
+  || fail "expected science->google, got: $routed (HTTP $code)"
+
+log "--- test 37: a single model can hand the request to the whole panel, and the first call is still on the bill ---"
+bal_kate_before_escalation=$(balance_of "$ADDR_KATE")
+code=$(curl -s -o "$WORKDIR/t37.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/text" \
+  -H "X-Api-Key: $KATE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"ESCALATE_ME: should we rewrite the ledger?"}')
+if [ "$code" = "200" ]; then
+  read -r answer escalated from calls charged panel_size <<<"$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t37.json'))
+print(d['answer'].replace(' ', '_'), d['escalated'], d.get('escalated_from'), d['calls'], d['coins_charged'], len(d['panel']))
+")"
+  [ "$escalated" = "True" ] && [ "$from" = "text" ] && pass "the request went to the panel, and the response says where it came from" \
+    || fail "expected escalated from text, got escalated=$escalated from=$from"
+  [ "$answer" = "MERGED_ANSWER" ] && pass "the panel's merged answer replaces the single model's refusal to answer alone" \
+    || fail "expected the merged answer, got $answer"
+  # The triage call was a real paid call. A receipt that forgot it would not add up.
+  expected_calls=$(( 1 + panel_size + 1 + panel_size ))
+  [ "$calls" = "$expected_calls" ] \
+    && pass "the escalating call is counted with the panel's ($calls calls: 1 + $panel_size drafts + merge + $panel_size reviews)" \
+    || fail "expected $expected_calls calls, got $calls"
+  bal_kate_after_escalation=$(balance_of "$ADDR_KATE")
+  spent=$(python3 -c "print(round(float('$bal_kate_before_escalation') - float('$bal_kate_after_escalation'), 6))")
+  [ "$spent" = "$charged.0" ] && pass "the wallet paid exactly what the response says ($charged aicoin)" \
+    || fail "wallet paid $spent but the response says $charged"
+else
+  fail "expected 200 from an escalated /text, got $code: $(cat "$WORKDIR/t37.json")"
+fi
+
+log "--- test 38: POST /image and POST /audio return one shape whatever the provider answered in ---"
+code=$(curl -s -o "$WORKDIR/t38.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/image" \
+  -H "X-Api-Key: $KATE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"a lighthouse at dusk","size":"512x512"}')
+image=$(python3 -c "
+import base64, json
+d = json.load(open('$WORKDIR/t38.json'))
+raw = base64.b64decode(d['media_base64'])
+print(d['media_type'], d['provider'], d['subject'], raw[:4] == b'\x89PNG')
+" 2>/dev/null || echo "parse-failed")
+[ "$image" = "image/png openai general True" ] && pass "/image returns decodable PNG bytes from the best-rated image provider" \
+  || fail "expected a PNG from openai, got: $image (HTTP $code)"
+
+code=$(curl -s -o "$WORKDIR/t38b.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/audio" \
+  -H "X-Api-Key: $KATE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"Read this sentence aloud."}')
+audio=$(python3 -c "
+import base64, json
+d = json.load(open('$WORKDIR/t38b.json'))
+raw = base64.b64decode(d['media_base64'])
+print(d['media_type'], d['provider'], raw.hex())
+" 2>/dev/null || echo "parse-failed")
+# Speech arrives as raw MP3 bytes, not JSON — the bytes must survive the trip byte for byte.
+[ "$audio" = "audio/mpeg elevenlabs fffb100042" ] && pass "/audio returns the provider's exact bytes, base64-encoded" \
+  || fail "expected elevenlabs mp3 bytes, got: $audio (HTTP $code)"
+
+log "--- test 40: the consolidated endpoints refuse what they should ---"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/text" -d '{"prompt":"hi"}')
+[ "$code" = "401" ] && pass "401 without an API token (it is a paid endpoint like any other)" \
+  || fail "expected 401 without a token, got $code"
+code=$(curl -s -o "$WORKDIR/t39.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/text" \
+  -H "X-Api-Key: $KATE_TOKEN" -d '{}')
+[ "$code" = "400" ] && pass "400 for a body with no prompt" || fail "expected 400 for an empty body, got $code"
+code=$(curl -s -o "$WORKDIR/t39b.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/text" \
+  -H "X-Api-Key: $KATE_TOKEN" -d '{"prompt":"hi","subject":"astrology"}')
+[ "$code" = "400" ] && pass "400 for a subject outside the taxonomy" || fail "expected 400 for an unknown subject, got $code"
+# Asking Anthropic for a picture: a caller who names a provider is not quietly moved to another.
+code=$(curl -s -o "$WORKDIR/t39c.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/image" \
+  -H "X-Api-Key: $KATE_TOKEN" -d '{"prompt":"a lighthouse","provider":"anthropic"}')
+[ "$code" = "400" ] && pass "400 when the named provider cannot serve the capability" \
+  || fail "expected 400 pinning anthropic for an image, got $code"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/video" \
+  -H "X-Api-Key: $KATE_TOKEN" -d '{"prompt":"hi"}')
+[ "$code" = "400" ] || [ "$code" = "404" ] && pass "a capability that does not exist is not an endpoint ($code)" \
+  || fail "expected 400/404 for /video, got $code"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

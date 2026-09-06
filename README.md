@@ -79,6 +79,32 @@ curl proxy.aicoin.oeaio.com/v1/chat/completions \
   -d '{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}'
 ```
 
+**Or say what you want, not who should do it.** `POST /text`, `POST /image` and `POST /audio` take
+a prompt and pick the provider themselves. The request is tagged by subject — code, legal, science,
+translation — and routed to whichever provider is rated highest at that, skipping any that has no
+key here or that the last liveness check found down. The answer says who wrote it, what the request
+was tagged as, and who else was in the running, because routing chosen for you is only acceptable
+if you can see what was chosen. `GET /skills` publishes the whole ranking.
+
+```bash
+curl proxy.aicoin.oeaio.com/text \
+  -H "X-Api-Key: <token from /wallet>" \
+  -d '{"prompt":"Why does this Java function throw a null pointer exception?"}'
+# -> {"answer":"...","subject":"code","provider":"openai","considered":["openai","anthropic",...]}
+```
+
+Images and speech come back the same way whatever the provider answered in — base64 in JSON, from
+the ones that return raw MP3 bytes as much as from the ones that return JSON. The ratings behind all
+of this are the operator's opinion rather than a benchmark, which is why they are config: edit them,
+or name a `provider` and skip routing entirely.
+
+**When one model is not enough.** A model answering `/text` alone can decline to answer alone. If it
+judges the request to genuinely need several models — a judgement that belongs to something that has
+read the request, not to a rule about its length — it says so and the same request goes to the whole
+panel below, merged and reviewed. It costs several times one call, so the model is told the price
+and told that "interesting" is not the bar, and a caller who wants a fixed price sends
+`escalate: false`.
+
 **Billing.** One coin is held before the call, so an empty wallet is refused before a provider is
 touched and one coin is always enough to make one call. When the response comes back, the rest of
 what it really cost is settled — even if that takes the balance below zero, because the provider

@@ -200,6 +200,22 @@
   </div>
 
   <div class="card">
+    <h2>Ask for what you want, not for a provider</h2>
+    <p>Three endpoints take a prompt and pick the model themselves: <code>POST /text</code>, <code>POST /image</code>, <code>POST /audio</code>. The relay tags what the request is <em>about</em> &mdash; code, legal, science, translation &mdash; and sends it to whichever provider is rated highest at that, skipping any it holds no key for or that failed its last liveness check.</p>
+    <pre><code>curl https://proxy.aicoin.oeaio.com/text \
+  -H "X-Api-Key: &lt;token from /wallet&gt;" \
+  -d '{"prompt":"Why does this Java function throw a null pointer exception?"}'
+
+{"answer":"...","subject":"code","provider":"openai",
+ "considered":["openai","anthropic","kimi","google","mistral"],
+ "calls":1,"coins_charged":1}</code></pre>
+    <p>Every answer names who wrote it and who else was in the running: routing chosen for you is only worth having if you can see what was chosen. Images and speech come back in one shape whatever the provider answered in. The ratings are our opinion rather than a benchmark &mdash; name a <code>provider</code> in the request and no routing happens at all.</p>
+    <h3>When one model isn't enough</h3>
+    <p>A model answering <code>/text</code> on its own can decline to answer on its own. If the request genuinely needs several &mdash; a judgement that belongs to something that has read it, not to a rule about its length &mdash; the same request goes to the full panel below, merged and reviewed. It costs several times one call, so the model is told the price, and <code>"escalate": false</code> keeps any request to exactly one call.</p>
+    <p class="price-meta"><a href="https://proxy.aicoin.oeaio.com/skills">see the whole ranking &rarr;</a></p>
+  </div>
+
+  <div class="card">
     <h2>Supported AI providers &mdash; live connection health</h2>
     <p class="price-meta">The relay asks each provider directly, about once a minute, whether it is there. <strong>Live</strong> = it answered the last check. <strong>Degraded</strong> = it is answering but throttling us, or recent real calls came back rate limited or rejected for billing. <strong>Down</strong> = no answer, an error of its own, or the relay's key refused. <strong>Not configured</strong> = no key for this provider yet.</p>
     <div class="backends" id="backendsList">
