@@ -39,9 +39,20 @@ enum WalletSigner {
     /// Builds a self-verifying API token: `base64url(payload).base64url(signature)`, signed once
     /// client-side. The signature covers the exact base64url payload string bytes (JWT-style),
     /// matching `WalletSignature.verifyToken`'s expectation server-side.
-    static func buildToken(keys: WalletKeys, expiresInSeconds: Int) throws -> String {
+    /// - Parameter grant: the authorisation this token is issued under, when it
+    ///   is issued by approving a service's request. A token naming a grant
+    ///   stops working the moment that grant is revoked, which is the only way
+    ///   one service can be cut off without cutting off every token this wallet
+    ///   ever issued — a token is self-verifying, so nothing about the token
+    ///   itself can be withdrawn. A token minted for a script names none, and
+    ///   behaves exactly as tokens always have.
+    static func buildToken(keys: WalletKeys, expiresInSeconds: Int, grant: String? = nil) throws -> String {
         let nowSeconds = Int(Date().timeIntervalSince1970)
-        let payload = "{\"addr\":\"\(keys.address)\",\"iat\":\(nowSeconds),\"exp\":\(nowSeconds + expiresInSeconds)}"
+        var payload = "{\"addr\":\"\(keys.address)\",\"iat\":\(nowSeconds),\"exp\":\(nowSeconds + expiresInSeconds)"
+        if let grant {
+            payload += ",\"grant\":\"\(grant)\""
+        }
+        payload += "}"
         let payloadB64 = Data(payload.utf8).base64URLEncodedString()
         let signature = try keys.privateKey.signature(for: Data(payloadB64.utf8))
         let signatureB64 = Data(signature).base64URLEncodedString()

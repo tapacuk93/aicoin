@@ -19,6 +19,7 @@ struct WalletView: View {
                 privateKeyCard
                 FaucetSectionView(keys: keys, freeCoinsRemaining: $freeCoinsRemaining, onClaimed: { refreshBalance() })
                 SendCoinsView(keys: keys, onSent: { refreshBalance() })
+                AuthorisedServicesView(keys: keys)
                 APITokensView(keys: keys)
             }
             .padding(20)

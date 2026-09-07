@@ -110,6 +110,74 @@ enum ProxyAPI {
         try requireOK(response, data)
     }
 
+    // ---- authorising a service, and taking it back ----
+
+    /// What a service is asking for, read from the request its code names.
+    ///
+    /// Fetched without the secret on purpose: the secret belongs to the
+    /// service that asked, and this side only needs to know who is asking and
+    /// why in order to show it to the person deciding.
+    struct Authorisation: Decodable {
+        let status: String
+        let service: String?
+        let note: String?
+    }
+
+    static func fetchAuthorisation(id: String) async throws -> Authorisation {
+        let url = baseURL.appendingPathComponent("wallet/api/authorize/\(id)")
+        let (data, response) = try await URLSession.shared.data(from: url)
+        try requireOK(response, data)
+        return try JSONDecoder().decode(Authorisation.self, from: data)
+    }
+
+    /// Say yes: mint a token naming this request and hand it over.
+    ///
+    /// The token is built here, with the private key, exactly as every other
+    /// token is - the proxy has never had an "issue token" endpoint and still
+    /// does not. What is new is the grant in its payload, which is what makes
+    /// this one service revocable later without touching any other.
+    static func approveAuthorisation(keys: WalletKeys, id: String, expiresInSeconds: Int) async throws {
+        let token = try WalletSigner.buildToken(keys: keys, expiresInSeconds: expiresInSeconds, grant: id)
+        let path = "/wallet/api/authorize/\(id)/approve"
+        let body = try JSONSerialization.data(withJSONObject: ["token": token])
+        let headers = try WalletSigner.signLiveRequest(keys: keys, method: "POST", path: path, body: body)
+        let (data, response) = try await send(method: "POST", path: path, body: body,
+                                              extraHeaders: headers.httpHeaders)
+        try requireOK(response, data)
+    }
+
+    /// One service's standing permission to spend from this wallet.
+    struct Grant: Decodable, Identifiable {
+        let id: String
+        let service: String
+        let granted: Int64
+    }
+
+    private struct GrantsResponse: Decodable {
+        let grants: [Grant]
+    }
+
+    static func fetchGrants(keys: WalletKeys) async throws -> [Grant] {
+        let path = "/wallet/api/grants"
+        let headers = try WalletSigner.signLiveRequest(keys: keys, method: "GET", path: path, body: Data())
+        let (data, response) = try await send(method: "GET", path: path, body: Data(),
+                                              extraHeaders: headers.httpHeaders)
+        try requireOK(response, data)
+        return try JSONDecoder().decode(GrantsResponse.self, from: data).grants
+    }
+
+    /// Take one back. Every token that service holds stops working at once -
+    /// which is the point, since the tokens it holds are not something this
+    /// wallet has a list of.
+    static func revokeGrant(keys: WalletKeys, id: String) async throws {
+        let path = "/wallet/api/grants/revoke"
+        let body = try JSONSerialization.data(withJSONObject: ["id": id])
+        let headers = try WalletSigner.signLiveRequest(keys: keys, method: "POST", path: path, body: body)
+        let (data, response) = try await send(method: "POST", path: path, body: body,
+                                              extraHeaders: headers.httpHeaders)
+        try requireOK(response, data)
+    }
+
     // ---- plumbing ----
 
     private static func send(method: String, path: String, body: Data, extraHeaders: [String: String]) async throws -> (Data, URLResponse) {
