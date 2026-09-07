@@ -18,7 +18,7 @@ final class AuthorisationScanTests: XCTestCase {
         // A code that is also a link is one a phone with no wallet installed
         // can still do something useful with.
         XCTAssertEqual(
-            AuthorisedServicesView.identifier(in: "https://armedit.oeaio.com/authorize/deadbeef00112233"),
+            AuthorisedServicesView.identifier(in: "https://sue.oeaio.com/authorize/deadbeef00112233"),
             "deadbeef00112233")
     }
 
