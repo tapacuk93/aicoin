@@ -163,6 +163,45 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             requireLiveSignature(ctx, request, body, address -> handleTransfer(ctx, address, body));
             return;
         }
+        /*
+         * Authorising a service by showing it a code.
+         *
+         * The service asks for a request and shows the id as a QR; the wallet
+         * scans it, sees who is asking, and if the owner agrees mints a token
+         * naming that grant and posts it here. Issuance stays where it has
+         * always been - in the wallet, with the private key - and what the
+         * proxy adds is a place for the two to meet and a record of what was
+         * agreed, so that it can later be taken back.
+         */
+        if (request.method() == HttpMethod.POST && "/wallet/api/authorize/new".equals(path)) {
+            handleAuthorizeNew(ctx, ByteBufUtil.getBytes(request.content()));
+            return;
+        }
+        if (request.method() == HttpMethod.GET && path.startsWith("/wallet/api/authorize/")) {
+            handleAuthorizePoll(ctx, path.substring("/wallet/api/authorize/".length()),
+                    request.uri());
+            return;
+        }
+        if (request.method() == HttpMethod.POST && path.startsWith("/wallet/api/authorize/")
+                && path.endsWith("/approve")) {
+            String id = path.substring("/wallet/api/authorize/".length(),
+                    path.length() - "/approve".length());
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body,
+                    address -> handleAuthorizeApprove(ctx, address, id, body));
+            return;
+        }
+        if (request.method() == HttpMethod.GET && "/wallet/api/grants".equals(path)) {
+            requireLiveSignature(ctx, request, ByteBufUtil.getBytes(request.content()),
+                    address -> handleGrantsList(ctx, address));
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/wallet/api/grants/revoke".equals(path)) {
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body,
+                    address -> handleGrantRevoke(ctx, address, body));
+            return;
+        }
         if (request.method() == HttpMethod.POST && "/wallet/api/revoke-tokens".equals(path)) {
             byte[] body = ByteBufUtil.getBytes(request.content());
             requireLiveSignature(ctx, request, body, address -> handleRevokeTokens(ctx, address));
@@ -285,23 +324,25 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, authResult.getFailureReason());
                 return;
             }
-            String walletAddress = authResult.getAddress();
-            if (freeTarget) {
-                UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, finalForwardUri,
-                        forwardHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
-                        walletAddress, FREE_TARGET_COST_AICOIN);
-                return;
-            }
-            ledger.debitForCall(walletAddress, CALL_COST_AICOIN, provider, debit -> {
-                if (!debit.isReachable()) {
-                    sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
-                } else if (!debit.isSuccess()) {
-                    sendInsufficientBalance(ctx, debit.getBalance());
-                } else {
+            withLiveGrant(ctx, authResult, () -> {
+                String walletAddress = authResult.getAddress();
+                if (freeTarget) {
                     UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, finalForwardUri,
                             forwardHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
-                            walletAddress, CALL_COST_AICOIN);
+                            walletAddress, FREE_TARGET_COST_AICOIN);
+                    return;
                 }
+                ledger.debitForCall(walletAddress, CALL_COST_AICOIN, provider, debit -> {
+                    if (!debit.isReachable()) {
+                        sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
+                    } else if (!debit.isSuccess()) {
+                        sendInsufficientBalance(ctx, debit.getBalance());
+                    } else {
+                        UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, finalForwardUri,
+                                forwardHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
+                                walletAddress, CALL_COST_AICOIN);
+                    }
+                });
             });
         });
     }
@@ -311,6 +352,37 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         LOG.log(Level.WARNING, "error handling inbound request", cause);
         ctx.close();
     }
+
+    /**
+     * A token that names a grant works only while the grant does.
+     *
+     * This is the whole of per-service revocation. The token is self-verifying
+     * and always will be - the address inside it is the key that checks it -
+     * so nothing about the token itself can be withdrawn. What can be
+     * withdrawn is the wallet's permission for the service holding it, and
+     * that is a key in the ledger the owner can delete.
+     *
+     * A token naming no grant is one minted before any of this existed and is
+     * left exactly as it was: the only thing that stops those is still the
+     * blanket revocation for the whole address.
+     */
+    private void withLiveGrant(ChannelHandlerContext ctx, WalletSignature.AuthResult auth,
+                               Runnable onLive) {
+        String grant = auth.grant();
+        if (grant == null) {
+            onLive.run();
+            return;
+        }
+        ledger.getGrant(auth.getAddress(), grant, detail -> {
+            if (!detail.isPresent()) {
+                sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED,
+                        "this authorisation has been revoked");
+                return;
+            }
+            onLive.run();
+        });
+    }
+
 
     /**
      * Verifies the three live-signature headers ({@code X-Api-Key},
@@ -634,6 +706,254 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return coins;
         }
     }
+
+    /*
+     * A service asks to be authorised. Anyone may ask - the asking commits
+     * nobody to anything, and a request nobody scans expires in ten minutes.
+     *
+     * Two identifiers come back and they are not interchangeable. The id goes
+     * in the QR and is the thing the wallet sees; the secret stays with the
+     * service and is what the token is later collected with. If both were in
+     * the code, anybody who photographed the screen over somebody's shoulder
+     * could collect the token instead of the service that asked for it.
+     */
+    private void handleAuthorizeNew(ChannelHandlerContext ctx, byte[] body) {
+        Map<?, ?> in = parseObject(body);
+        String service = in != null && in.get("service") instanceof String
+                ? ((String) in.get("service")).trim() : "";
+        if (service.isEmpty() || service.length() > 64) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "a service name is required");
+            return;
+        }
+        String note = in != null && in.get("note") instanceof String
+                ? ((String) in.get("note")).trim() : "";
+        if (note.length() > 200) {
+            note = note.substring(0, 200);
+        }
+
+        String id = randomId();
+        String secret = randomId();
+        /* Tab-separated, because a service name is arbitrary text and this is
+           the one place it is stored next to something that must not be
+           confused with it. Tabs are stripped from the name on the way in. */
+        String record = "pending\t" + secret + "\t" + service.replace('\t', ' ')
+                + "\t" + note.replace('\t', ' ') + "\t";
+        String finalNote = note;
+        ledger.putAuthorisation(id, record, AUTHORIZE_TTL_SECONDS, ok -> {
+            if (!ok) {
+                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE,
+                        "could not record the request");
+                return;
+            }
+            sendJsonText(ctx, HttpResponseStatus.OK, "{\"id\":" + Json.string(id)
+                    + ",\"secret\":" + Json.string(secret)
+                    + ",\"service\":" + Json.string(service)
+                    + ",\"note\":" + Json.string(finalNote)
+                    + ",\"expires_in\":" + AUTHORIZE_TTL_SECONDS + "}");
+        });
+    }
+
+    /*
+     * Who is asking, and - once, and only to whoever asked - the token.
+     *
+     * Without the secret this answers what the wallet needs to decide: the
+     * service's name and note. With it, the token, after which the request is
+     * dropped. One collection only: a request that could be collected twice is
+     * a token that can be taken by whoever asks second.
+     */
+    private void handleAuthorizePoll(ChannelHandlerContext ctx, String id, String uri) {
+        if (!isSafeId(id)) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "invalid request id");
+            return;
+        }
+        String secret = queryParam(uri, "secret");
+        ledger.getAuthorisation(id, value -> {
+            if (value.isEmpty()) {
+                sendJsonError(ctx, HttpResponseStatus.NOT_FOUND, "no such request");
+                return;
+            }
+            String[] f = value.get().split("\t", -1);
+            String status = f.length > 0 ? f[0] : "";
+            String want = f.length > 1 ? f[1] : "";
+            String service = f.length > 2 ? f[2] : "";
+            String note = f.length > 3 ? f[3] : "";
+            String token = f.length > 4 ? f[4] : "";
+
+            if (secret == null || !secret.equals(want)) {
+                sendJsonText(ctx, HttpResponseStatus.OK, "{\"status\":" + Json.string(status)
+                        + ",\"service\":" + Json.string(service)
+                        + ",\"note\":" + Json.string(note) + "}");
+                return;
+            }
+            if (!"granted".equals(status) || token.isEmpty()) {
+                sendJsonText(ctx, HttpResponseStatus.OK, "{\"status\":" + Json.string(status) + "}");
+                return;
+            }
+            ledger.dropAuthorisation(id);
+            sendJsonText(ctx, HttpResponseStatus.OK, "{\"status\":\"granted\",\"token\":"
+                    + Json.string(token) + "}");
+        });
+    }
+
+    /*
+     * The wallet says yes, and hands over a token it minted itself.
+     *
+     * Live-signed, so the proxy knows the wallet that approved is the wallet
+     * the token names - checked here rather than assumed, because a request id
+     * is a thing anybody who saw the screen has, and without this check any of
+     * them could bind their own token to somebody else's request.
+     */
+    private void handleAuthorizeApprove(ChannelHandlerContext ctx, String address,
+                                        String id, byte[] body) {
+        if (!isSafeId(id)) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "invalid request id");
+            return;
+        }
+        Map<?, ?> in = parseObject(body);
+        String token = in != null && in.get("token") instanceof String ? (String) in.get("token") : "";
+        if (token.isEmpty()) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "a token is required");
+            return;
+        }
+        WalletSignature.AuthResult minted =
+                WalletSignature.verifyToken(token, Instant.now().toEpochMilli(), null);
+        if (!minted.isValid()) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST,
+                    "that token does not verify: " + minted.getFailureReason());
+            return;
+        }
+        if (!address.equals(minted.getAddress())) {
+            sendJsonError(ctx, HttpResponseStatus.FORBIDDEN,
+                    "the token is for a different wallet than the one approving");
+            return;
+        }
+        if (!id.equals(minted.grant())) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST,
+                    "the token must name this request as its grant");
+            return;
+        }
+
+        ledger.getAuthorisation(id, value -> {
+            if (value.isEmpty()) {
+                sendJsonError(ctx, HttpResponseStatus.NOT_FOUND, "no such request");
+                return;
+            }
+            String[] f = value.get().split("\t", -1);
+            if (f.length < 4 || !"pending".equals(f[0])) {
+                sendJsonError(ctx, HttpResponseStatus.CONFLICT, "already answered");
+                return;
+            }
+            String detail = f[2] + "\t" + Instant.now().getEpochSecond();
+            ledger.addGrant(address, id, detail, recorded -> {
+                if (!recorded) {
+                    sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE,
+                            "could not record the grant");
+                    return;
+                }
+                String updated = "granted\t" + f[1] + "\t" + f[2] + "\t" + f[3] + "\t" + token;
+                ledger.putAuthorisation(id, updated, AUTHORIZE_TTL_SECONDS, ok ->
+                        sendJsonText(ctx, HttpResponseStatus.OK,
+                                "{\"granted\":true,\"id\":" + Json.string(id) + "}"));
+            });
+        });
+    }
+
+    /** What this wallet has authorised, so that it can be taken back. */
+    private void handleGrantsList(ChannelHandlerContext ctx, String address) {
+        ledger.listGrants(address, grants -> {
+            if (grants.isEmpty()) {
+                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not read grants");
+                return;
+            }
+            StringBuilder out = new StringBuilder("{\"grants\":[");
+            boolean first = true;
+            for (String row : grants.get()) {
+                String[] f = row.split("\t", -1);
+                out.append(first ? "" : ",").append("{\"id\":").append(Json.string(f[0]))
+                   .append(",\"service\":").append(Json.string(f.length > 1 ? f[1] : ""))
+                   .append(",\"granted\":").append(f.length > 2 ? f[2] : "0").append('}');
+                first = false;
+            }
+            sendJsonText(ctx, HttpResponseStatus.OK, out.append("]}").toString());
+        });
+    }
+
+    /** Take one back. Every token naming it stops working at once. */
+    private void handleGrantRevoke(ChannelHandlerContext ctx, String address, byte[] body) {
+        Map<?, ?> in = parseObject(body);
+        String id = in != null && in.get("id") instanceof String ? ((String) in.get("id")).trim() : "";
+        if (!isSafeId(id)) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "an id is required");
+            return;
+        }
+        ledger.revokeGrant(address, id, done ->
+                sendJsonText(ctx, HttpResponseStatus.OK,
+                        "{\"revoked\":" + done + ",\"id\":" + Json.string(id) + "}"));
+    }
+
+    /** The same as sendJson, for the places that build a string rather than bytes. */
+    private static void sendJsonText(ChannelHandlerContext ctx, HttpResponseStatus status,
+                                     String json) {
+        sendJson(ctx, status, json.getBytes(CharsetUtil.UTF_8));
+    }
+
+    /** A request body as a map, or null. The same reader the rest of this uses. */
+    private static Map<?, ?> parseObject(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return null;
+        }
+        try {
+            Object parsed = new org.yaml.snakeyaml.Yaml()
+                    .load(new String(bytes, CharsetUtil.UTF_8));
+            return parsed instanceof Map ? (Map<?, ?>) parsed : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Hex and dashes: these ids end up in ledger keys and in URLs. */
+    private static boolean isSafeId(String id) {
+        if (id == null || id.isEmpty() || id.length() > 64) {
+            return false;
+        }
+        for (int i = 0; i < id.length(); i++) {
+            char c = id.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == '-')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String randomId() {
+        byte[] bytes = new byte[16];
+        new java.security.SecureRandom().nextBytes(bytes);
+        StringBuilder out = new StringBuilder(32);
+        for (byte b : bytes) {
+            out.append(Character.forDigit((b >> 4) & 0xF, 16))
+               .append(Character.forDigit(b & 0xF, 16));
+        }
+        return out.toString();
+    }
+
+    private static String queryParam(String uri, String name) {
+        int q = uri.indexOf('?');
+        if (q < 0) {
+            return null;
+        }
+        for (String pair : uri.substring(q + 1).split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq > 0 && pair.substring(0, eq).equals(name)) {
+                return java.net.URLDecoder.decode(pair.substring(eq + 1),
+                        java.nio.charset.StandardCharsets.UTF_8);
+            }
+        }
+        return null;
+    }
+
+    /* Ten minutes: long enough to find your phone, short enough that a code
+       nobody scanned does not sit in the ledger for a day. */
+    private static final long AUTHORIZE_TTL_SECONDS = 600;
 
     private void handleRevokeTokens(ChannelHandlerContext ctx, String address) {
         ledger.revokeTokensBefore(address, Instant.now().toEpochMilli(), ok -> {

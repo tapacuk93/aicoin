@@ -168,6 +168,17 @@ final class WalletSignature {
         String address = (String) addr;
         long iatSeconds = ((Number) iat).longValue();
         long expSeconds = ((Number) exp).longValue();
+        /*
+         * A grant is optional. Tokens minted before grants existed name none
+         * and keep working exactly as they did - the only thing that revokes
+         * those is still the blanket revocation for the whole address.
+         */
+        Object grantField = payload.get("grant");
+        String grant = grantField instanceof String && !((String) grantField).isBlank()
+                ? (String) grantField : null;
+        if (grant != null && !isSafeId(grant)) {
+            return AuthResult.failure("invalid token grant");
+        }
 
         Optional<PublicKey> publicKey = parsePublicKey(address);
         if (!publicKey.isPresent()) {
@@ -191,7 +202,7 @@ final class WalletSignature {
         if (revokedBeforeMillis != null && iatSeconds * 1000L <= revokedBeforeMillis) {
             return AuthResult.failure("token revoked");
         }
-        return AuthResult.success(address);
+        return AuthResult.success(address, grant);
     }
 
     // ---- shared primitives ----
@@ -279,16 +290,57 @@ final class WalletSignature {
         return true;
     }
 
+    /**
+     * An identifier this proxy minted, and therefore one it can be strict
+     * about: hex and dashes and nothing else. It is put into Redis keys, and a
+     * key that can contain anything is a key somebody else can name.
+     */
+    private static boolean isSafeId(String id) {
+        if (id.isEmpty() || id.length() > 64) {
+            return false;
+        }
+        for (int i = 0; i < id.length(); i++) {
+            char c = id.charAt(i);
+            boolean ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == '-';
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /** Outcome of {@link #verifyLive} or {@link #verifyToken}: either a verified address, or a specific failure reason. */
     static final class AuthResult {
         private final boolean valid;
         private final String address;
         private final String failureReason;
+        /*
+         * Which grant this token was issued under, if it names one. Carried
+         * out of verification rather than parsed again by the caller: the
+         * payload has been decoded and checked here, and decoding it a second
+         * time somewhere else is a second place for the two to disagree about
+         * what a token says.
+         */
+        private final String grant;
 
         private AuthResult(boolean valid, String address, String failureReason) {
+            this(valid, address, failureReason, null);
+        }
+
+        private AuthResult(boolean valid, String address, String failureReason, String grant) {
             this.valid = valid;
             this.address = address;
             this.failureReason = failureReason;
+            this.grant = grant;
+        }
+
+        /** The grant named by the token, or null for one that names none. */
+        String grant() {
+            return grant;
+        }
+
+        static AuthResult success(String address, String grant) {
+            return new AuthResult(true, address, null, grant);
         }
 
         static AuthResult success(String address) {

@@ -819,6 +819,126 @@ final class AicoinLedger implements AutoCloseable {
         });
     }
 
+    /**
+     * Record a grant, and remember it against the wallet that made it.
+     *
+     * Both writes or neither would be better, and neither is what this needs:
+     * a grant present in the key but missing from the set is one that works
+     * and cannot be found to revoke, which is the wrong way round to fail. So
+     * the set is written first - a name in the list with no grant behind it
+     * lists something already dead, which is merely untidy.
+     */
+    void addGrant(String address, String id, String detail, Consumer<Boolean> onResult) {
+        commands.sadd(grantsKey(address), id).whenComplete((added, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger grant listing failed for " + address, err);
+                onResult.accept(false);
+                return;
+            }
+            commands.set(grantKey(address, id), detail).whenComplete((reply, err2) -> {
+                if (err2 != null) {
+                    LOG.log(Level.WARNING, "ledger grant write failed for " + address, err2);
+                    onResult.accept(false);
+                    return;
+                }
+                onResult.accept(true);
+            });
+        });
+    }
+
+    /** Is this grant still live? Absent means revoked, or never made. */
+    void getGrant(String address, String id, Consumer<Optional<String>> onResult) {
+        commands.get(grantKey(address, id)).whenComplete((value, err) -> {
+            if (err != null) {
+                /*
+                 * A ledger that cannot be reached must not turn every granted
+                 * token into a valid one. Unknown is treated as revoked, which
+                 * fails the call rather than the wallet.
+                 */
+                LOG.log(Level.WARNING, "ledger grant lookup failed for " + address, err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            onResult.accept(Optional.ofNullable(value));
+        });
+    }
+
+    /** Everything this wallet has authorised, as id and detail. */
+    void listGrants(String address, Consumer<Optional<List<String>>> onResult) {
+        commands.smembers(grantsKey(address)).whenComplete((ids, err) -> {
+            if (err != null || ids == null) {
+                LOG.log(Level.WARNING, "ledger grants listing failed for " + address, err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            if (ids.isEmpty()) {
+                onResult.accept(Optional.of(List.of()));
+                return;
+            }
+            var out = new java.util.ArrayList<String>();
+            var left = new java.util.concurrent.atomic.AtomicInteger(ids.size());
+            for (String id : ids) {
+                getGrant(address, id, detail -> {
+                    synchronized (out) {
+                        detail.ifPresent(d -> out.add(id + "\t" + d));
+                    }
+                    if (left.decrementAndGet() == 0) {
+                        onResult.accept(Optional.of(List.copyOf(out)));
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * Take a grant away. Every token naming it stops working at once, which is
+     * the point: revoking is about the service, and the tokens it holds are
+     * not something the owner has a list of.
+     */
+    void revokeGrant(String address, String id, Consumer<Boolean> onResult) {
+        commands.del(grantKey(address, id)).whenComplete((removed, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger grant removal failed for " + address, err);
+                onResult.accept(false);
+                return;
+            }
+            commands.srem(grantsKey(address), id).whenComplete((r2, e2) -> onResult.accept(true));
+        });
+    }
+
+    /**
+     * A pending authorisation, with a life measured in minutes.
+     *
+     * It expires on its own because an unanswered request is the ordinary
+     * outcome - somebody opened a page and walked away - and a store that kept
+     * them would fill with codes nobody ever scanned.
+     */
+    void putAuthorisation(String id, String value, long ttlSeconds, Consumer<Boolean> onResult) {
+        commands.setex(authKey(id), ttlSeconds, value).whenComplete((reply, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger authorisation write failed", err);
+                onResult.accept(false);
+                return;
+            }
+            onResult.accept(true);
+        });
+    }
+
+    void getAuthorisation(String id, Consumer<Optional<String>> onResult) {
+        commands.get(authKey(id)).whenComplete((value, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger authorisation lookup failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            onResult.accept(Optional.ofNullable(value));
+        });
+    }
+
+    void dropAuthorisation(String id) {
+        commands.del(authKey(id));
+    }
+
     /** {@link Optional#empty()} means either the lookup failed, or no revocation has ever been recorded for this address. */
     void getTokenRevokedBefore(String address, Consumer<Optional<Long>> onResult) {
         commands.get(tokenRevokedBeforeKey(address)).whenComplete((value, err) -> {
@@ -1123,6 +1243,31 @@ final class AicoinLedger implements AutoCloseable {
 
     private static String tokenRevokedBeforeKey(String address) {
         return "aicoin:" + TAG + ":token-revoked-before:" + address;
+    }
+
+    /*
+     * A grant is one service's permission to spend from one wallet, and it is
+     * a key that exists or does not. That is the whole mechanism: a token
+     * naming a grant works while the key is there and stops the moment it is
+     * gone, which is what makes revoking one service possible without
+     * revoking every token the wallet ever issued.
+     *
+     * The grants of one wallet are also held in a set, because "what have I
+     * authorised" is a question the owner will ask far more often than any
+     * single grant is checked, and answering it by scanning the keyspace is
+     * how a ledger becomes slow in exactly the wrong place.
+     */
+    private static String grantKey(String address, String id) {
+        return "aicoin:" + TAG + ":grant:" + address + ":" + id;
+    }
+
+    private static String grantsKey(String address) {
+        return "aicoin:" + TAG + ":grants:" + address;
+    }
+
+    /* A pending authorisation: created by a service, answered by a wallet. */
+    private static String authKey(String id) {
+        return "aicoin:" + TAG + ":authorize:" + id;
     }
 
     private static String txKey(String address) {

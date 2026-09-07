@@ -3,6 +3,7 @@ package com.aicoin.proxy;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
@@ -67,6 +68,16 @@ class WalletSignatureTest {
 
     private static String buildToken(KeyPair keyPair, String address, long iatSeconds, long expSeconds) {
         String payloadJson = "{\"addr\":\"" + address + "\",\"iat\":" + iatSeconds + ",\"exp\":" + expSeconds + "}";
+        String payloadB64 = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
+        String signatureB64 = signB64Url(keyPair, payloadB64.getBytes(StandardCharsets.US_ASCII));
+        return payloadB64 + "." + signatureB64;
+    }
+
+    private static String buildGrantToken(KeyPair keyPair, String address, long iatSeconds,
+                                          long expSeconds, String grant) {
+        String payloadJson = "{\"addr\":\"" + address + "\",\"iat\":" + iatSeconds
+                + ",\"exp\":" + expSeconds + ",\"grant\":\"" + grant + "\"}";
         String payloadB64 = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
         String signatureB64 = signB64Url(keyPair, payloadB64.getBytes(StandardCharsets.US_ASCII));
@@ -196,6 +207,55 @@ class WalletSignatureTest {
         WalletSignature.AuthResult result = WalletSignature.verifyToken(token, nowSeconds * 1000L, null);
         assertTrue(result.isValid());
         assertEquals(address, result.getAddress());
+    }
+
+    /*
+     * A grant is what makes one service revocable without revoking every token
+     * a wallet ever issued. It has to survive verification intact, because the
+     * thing that checks whether it is still live has only what verification
+     * hands it - and it has to be constrained, because it is put straight into
+     * a ledger key and a key that can hold anything is a key somebody else can
+     * name.
+     */
+    @Test
+    void aTokenCarriesTheGrantItWasIssuedUnder() {
+        KeyPair keyPair = generateKeyPair();
+        String address = addressOf(keyPair.getPublic());
+        long nowSeconds = 1_700_000_000L;
+        String token = buildGrantToken(keyPair, address, nowSeconds, nowSeconds + 86_400,
+                "a1b2c3d4e5f60718");
+
+        WalletSignature.AuthResult result = WalletSignature.verifyToken(token, nowSeconds * 1000L, null);
+        assertTrue(result.isValid());
+        assertEquals("a1b2c3d4e5f60718", result.grant());
+    }
+
+    @Test
+    void aTokenWithoutAGrantNamesNone() {
+        // Every token minted before grants existed. It must keep working
+        // exactly as it did, and say plainly that it names no grant.
+        KeyPair keyPair = generateKeyPair();
+        String address = addressOf(keyPair.getPublic());
+        long nowSeconds = 1_700_000_000L;
+        String token = buildToken(keyPair, address, nowSeconds, nowSeconds + 86_400);
+
+        WalletSignature.AuthResult result = WalletSignature.verifyToken(token, nowSeconds * 1000L, null);
+        assertTrue(result.isValid());
+        assertNull(result.grant());
+    }
+
+    @Test
+    void aGrantThatIsNotAnIdentifierIsRefused() {
+        KeyPair keyPair = generateKeyPair();
+        String address = addressOf(keyPair.getPublic());
+        long nowSeconds = 1_700_000_000L;
+        // A colon would end the key and begin another one.
+        String token = buildGrantToken(keyPair, address, nowSeconds, nowSeconds + 86_400,
+                "aaaa:bbbb");
+
+        WalletSignature.AuthResult result = WalletSignature.verifyToken(token, nowSeconds * 1000L, null);
+        assertFalse(result.isValid());
+        assertEquals("invalid token grant", result.getFailureReason());
     }
 
     @Test
