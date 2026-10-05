@@ -116,14 +116,73 @@ final class ProviderSkills {
      *                  answering.
      */
     List<String> rank(Capability capability, String subject, java.util.function.Predicate<String> available) {
+        return rank(capability, subject, null, available);
+    }
+
+    /**
+     * The same, with what each provider has been costing in wall-clock time taken into account.
+     *
+     * <p>Two providers rated 5 for code are not the same choice if one of them answers in two
+     * seconds and the other in forty. That difference was invisible here: the ratings are an
+     * opinion about quality written into config, and nothing measured what using a provider was
+     * actually like. So a request for code went to whichever equally-rated provider came first in
+     * the canonical order, which is alphabetical accident dressed as a decision.
+     *
+     * <p>{@link ProviderSpeed#penalty} is bounded under one rating point, so this reorders equals
+     * and never overrules a real gap in quality. A provider with too few measurements is not
+     * penalised: unmeasured is not slow.
+     */
+    List<String> rank(Capability capability, String subject, ProviderSpeed speed,
+                       java.util.function.Predicate<String> available) {
         List<String> candidates = new ArrayList<>();
         for (String provider : ProxyConfig.PROVIDER_NAMES) {
             if (score(provider, capability, subject) > 0 && (available == null || available.test(provider))) {
                 candidates.add(provider);
             }
         }
-        candidates.sort(ranking(capability, subject, ProxyConfig.PROVIDER_NAMES));
+        candidates.sort(ranking(capability, subject, ProxyConfig.PROVIDER_NAMES, speed, candidates));
         return candidates;
+    }
+
+    /**
+     * The same candidates, quickest first.
+     *
+     * <p>Not a better version of {@link #rank}: a different question, asked by a different kind of
+     * caller. Ranking answers "who should write this", where quality leads and speed only separates
+     * providers already called equal. This answers "who can tell me quickest", which is the right
+     * question when the work is a judgement rather than a composition - is this instruction the one
+     * we already have an answer for, is this text about code or about prose. Those have a right
+     * answer that a fast model finds as reliably as a slow one, and the caller is a person waiting
+     * with a cursor blinking at them.
+     *
+     * <p>Measured providers come first, in order of how long they have been taking. Unmeasured ones
+     * follow in ordinary ranking order, because unmeasured is not slow and an unranked list is no
+     * answer at all - somebody has to be tried before anything is known about anybody.
+     *
+     * <p>Rating is not consulted among the measured. That looks reckless and is the point: a caller
+     * asking for the quickest has decided that any provider rated for this capability will do, and
+     * a rating that could overrule the request would make the parameter a suggestion. The bound on
+     * what this may be used for lives at the call site, not here.
+     */
+    List<String> fastest(Capability capability, String subject, ProviderSpeed speed,
+                          java.util.function.Predicate<String> available) {
+        List<String> candidates = rank(capability, subject, available);
+        if (speed == null) {
+            return candidates;
+        }
+        List<String> measured = new ArrayList<>();
+        List<String> unmeasured = new ArrayList<>();
+        for (String provider : candidates) {
+            if (speed.medianMillis(provider, capability).isPresent()) {
+                measured.add(provider);
+            } else {
+                unmeasured.add(provider);
+            }
+        }
+        measured.sort(Comparator.comparingDouble(
+                provider -> speed.medianMillis(provider, capability).orElse(Double.MAX_VALUE)));
+        measured.addAll(unmeasured);
+        return measured;
     }
 
     /**
@@ -134,8 +193,26 @@ final class ProviderSkills {
      * first panelist is the editor. One comparator rather than two, so the two cannot drift.
      */
     Comparator<String> ranking(Capability capability, String subject, List<String> canonicalOrder) {
+        return ranking(capability, subject, canonicalOrder, null, List.of());
+    }
+
+    /**
+     * The same order, with speed folded into the score.
+     *
+     * <p>The rating and the speed penalty are combined into one number rather than compared in
+     * sequence, because a tie-break would only ever fire on an exact tie and the interesting case
+     * is a provider rated 5 that takes forty seconds against one rated 5 that takes two. Both are
+     * 5. Sequencing the comparisons cannot separate them; subtracting can.
+     *
+     * <p>The subject-rating preference still comes first among providers left equal after that,
+     * for the reason it always did: an explicit opinion about the subject is worth more than the
+     * same number arrived at by having none.
+     */
+    Comparator<String> ranking(Capability capability, String subject, List<String> canonicalOrder,
+                                ProviderSpeed speed, List<String> among) {
         return Comparator
-                .comparingInt((String provider) -> score(provider, capability, subject))
+                .comparingDouble((String provider) -> score(provider, capability, subject)
+                        - (speed == null ? 0.0 : speed.penalty(provider, capability, among)))
                 .thenComparingInt(provider -> hasSubjectRating(provider, capability, subject) ? 1 : 0)
                 .reversed()
                 .thenComparingInt(canonicalOrder::indexOf);

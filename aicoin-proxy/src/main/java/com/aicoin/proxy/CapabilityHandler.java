@@ -65,7 +65,8 @@ final class CapabilityHandler {
 
     static void serve(ChannelHandlerContext ctx, Capability capability, byte[] requestBody,
                        ProxyConfig config, EventLoopGroup group, ProviderHealthTracker healthTracker,
-                       ProviderLiveness liveness, AicoinLedger ledger, String wallet) {
+                       ProviderSpeed speed, ProviderLiveness liveness, AicoinLedger ledger,
+                       String wallet) {
         Map<?, ?> body = parseBody(requestBody);
         if (body == null) {
             sendError(ctx, HttpResponseStatus.BAD_REQUEST, "body must be JSON");
@@ -104,7 +105,14 @@ final class CapabilityHandler {
             subject = SubjectTagger.tag(prompt, background);
         }
 
-        List<String> ranked = rank(config, liveness, capability, subject);
+        // "fastest": whoever answers soonest, among those rated for this at all. For callers whose
+        // request is a judgement with a right answer rather than a piece of writing - and who are
+        // holding somebody up while they wait for it. See ProviderSkills.fastest.
+        boolean quickest = Boolean.TRUE.equals(body.get("fastest"));
+        List<String> ranked = quickest
+                ? config.getCapabilities().getSkills().fastest(capability, subject, speed,
+                        provider -> isAvailable(config, liveness, capability, provider))
+                : rank(config, liveness, speed, capability, subject);
         String pinned = body.get("provider") instanceof String
                 ? ((String) body.get("provider")).trim().toLowerCase(Locale.ROOT) : null;
         if (pinned != null) {
@@ -130,17 +138,24 @@ final class CapabilityHandler {
         String voice = body.get("voice") instanceof String ? (String) body.get("voice") : null;
         String size = body.get("size") instanceof String ? (String) body.get("size") : "1024x1024";
 
-        new Attempt(ctx, config, group, healthTracker, ledger, wallet, capability, prompt, background,
-                subject, ranked, escalate, voice, size).next();
+        new Attempt(ctx, config, group, healthTracker, speed, ledger, wallet, capability, prompt,
+                background, subject, ranked, escalate, voice, size).next();
     }
 
     /**
      * The providers that could serve this capability, best first: rated for it, configured with a
      * key and a model, known to this proxy's adapters, and not last seen down.
      */
+    /** The order with nothing measured yet, which is what a caller with no speed record wants. */
     static List<String> rank(ProxyConfig config, ProviderLiveness liveness, Capability capability,
+                             String subject) {
+        return rank(config, liveness, null, capability, subject);
+    }
+
+    static List<String> rank(ProxyConfig config, ProviderLiveness liveness, ProviderSpeed speed,
+                             Capability capability,
                               String subject) {
-        return config.getCapabilities().getSkills().rank(capability, subject,
+        return config.getCapabilities().getSkills().rank(capability, subject, speed,
                 provider -> isAvailable(config, liveness, capability, provider));
     }
 
@@ -190,6 +205,7 @@ final class CapabilityHandler {
         private final ProxyConfig config;
         private final EventLoopGroup group;
         private final ProviderHealthTracker healthTracker;
+        private final ProviderSpeed speed;
         private final AicoinLedger ledger;
         private final String wallet;
         private final Capability capability;
@@ -209,13 +225,14 @@ final class CapabilityHandler {
         private long coinsCharged;
 
         Attempt(ChannelHandlerContext ctx, ProxyConfig config, EventLoopGroup group,
-                 ProviderHealthTracker healthTracker, AicoinLedger ledger, String wallet,
-                 Capability capability, String prompt, String background, String subject,
-                 List<String> ranked, boolean escalate, String voice, String size) {
+                 ProviderHealthTracker healthTracker, ProviderSpeed speed, AicoinLedger ledger,
+                 String wallet, Capability capability, String prompt, String background,
+                 String subject, List<String> ranked, boolean escalate, String voice, String size) {
             this.ctx = ctx;
             this.config = config;
             this.group = group;
             this.healthTracker = healthTracker;
+            this.speed = speed;
             this.ledger = ledger;
             this.wallet = wallet;
             this.capability = capability;
@@ -263,8 +280,16 @@ final class CapabilityHandler {
                 billingModel = model;
             }
 
+            // Timed from here rather than inside the HTTP client, because this is the interval
+            // the caller actually waits: connecting, the provider thinking, and the body coming
+            // back. A figure that left out the connection would describe something nobody
+            // experiences.
+            long began = System.currentTimeMillis();
             BilledCall.post(group, config, healthTracker, ledger, wallet, provider, path, headers,
                     requestBody, billingModel, outcome -> {
+                        speed.record(provider, capability,
+                                outcome.getError() == null ? 200 : 0,
+                                System.currentTimeMillis() - began);
                         if (outcome.isInsufficient()) {
                             sendInsufficient();
                             return;

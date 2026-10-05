@@ -24,6 +24,9 @@ public final class ProxyMain {
         ProviderHealthTracker healthTracker = new ProviderHealthTracker(config.getHealthWindowSize());
         // Asks each provider directly whether it is there, on a timer, so /health can answer for a
         // provider nobody has called — see ProviderLiveness.
+        // How long each provider has been taking to answer, so the router can prefer the quicker
+        // of two providers it rates the same - see ProviderSpeed.
+        ProviderSpeed speed = new ProviderSpeed(config.getHealthWindowSize());
         ProviderLiveness liveness = new ProviderLiveness(config);
         liveness.start();
         AicoinLedger ledger = new AicoinLedger(config.getRedisHost(), config.getRedisPort(),
@@ -38,7 +41,7 @@ public final class ProxyMain {
             ServerBootstrap bootstrap = new ServerBootstrap();
             bootstrap.group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
-                    .childHandler(new ProxyServerInitializer(config, workerGroup, healthTracker, liveness, ledger, accessLog))
+                    .childHandler(new ProxyServerInitializer(config, workerGroup, healthTracker, speed, liveness, ledger, accessLog))
                     .childOption(ChannelOption.AUTO_READ, true)
                     .option(ChannelOption.SO_BACKLOG, 1024);
 

@@ -3,6 +3,8 @@ package com.aicoin.proxy;
 import java.io.File;
 import java.io.IOException;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -146,6 +148,50 @@ final class AccessLog implements AutoCloseable {
             // sustained overrun is visible without the failure path becoming its own log flood.
             if (dropped++ % 1000 == 0) {
                 LOG.warning("access log queue full — dropped " + dropped + " records so far");
+            }
+        }
+    }
+
+    /**
+     * Records one routing decision: which providers were considered, which answered, and what each
+     * of them had been costing in time when the choice was made.
+     *
+     * <p>Separate from {@link #record} because it is a different fact. That line says a request
+     * happened and how long it took; this one says why it went where it did. Without it the log
+     * can show that a call took forty-six seconds and cannot show that a provider measured at two
+     * seconds was available and passed over - which is the only version of the record that is any
+     * use for deciding whether the routing should change.
+     *
+     * <p>Same file, same rotation, same JSON Lines. A {@code kind} field tells the two shapes
+     * apart, so {@code jq 'select(.kind=="routing")'} is the whole of reading them separately, and
+     * a week of decisions can be replayed against a change to the ranking before it ships.
+     */
+    void routing(String capability, String subject, List<String> considered, String chosen,
+                  String model, long durationMillis, Map<String, Long> observedMillis) {
+        StringBuilder line = new StringBuilder("{\"kind\":\"routing\",\"at\":\"")
+                .append(Instant.now()).append('"')
+                .append(",\"capability\":").append(json(capability))
+                .append(",\"subject\":").append(json(subject))
+                .append(",\"chosen\":").append(json(chosen))
+                .append(",\"model\":").append(json(model))
+                .append(",\"duration_ms\":").append(durationMillis)
+                .append(",\"considered\":[");
+        for (int i = 0; i < considered.size(); i++) {
+            line.append(i == 0 ? "" : ",").append(json(considered.get(i)));
+        }
+        line.append("],\"observed_ms\":{");
+        boolean first = true;
+        for (Map.Entry<String, Long> entry : observedMillis.entrySet()) {
+            line.append(first ? "" : ",").append(json(entry.getKey())).append(':').append(entry.getValue());
+            first = false;
+        }
+        line.append("}}");
+        String text = line.toString();
+        try {
+            writer.execute(() -> fileLogger.log(Level.INFO, text));
+        } catch (Exception e) {
+            if (dropped++ % 1000 == 0) {
+                LOG.warning("access log queue full - dropped " + dropped + " records so far");
             }
         }
     }

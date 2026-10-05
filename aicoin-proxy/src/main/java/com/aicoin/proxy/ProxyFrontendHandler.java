@@ -63,19 +63,36 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
      * refund on failure and no paid call to feed the price formula on success.
      */
     private static final double FREE_TARGET_COST_AICOIN = 0.0;
-    private static final double FREE_CLAIM_AMOUNT_AICOIN = 10.0;
+    /**
+     * What a new wallet is given, once, the first time an app asks.
+     *
+     * Ten was a guess made before there was anything to measure. There is now: over one week the
+     * proxy refused 1,019 calls for want of balance — 42% of every AI call, and 83% of every
+     * ElevenLabs request. Twenty-three of twenty-four wallets spent exactly their grant and were
+     * never seen again. Ten coins is three or four cards in All Languages Learner, which is not
+     * long enough to find out whether you want the app.
+     *
+     * A hundred is about a session's reading, and at the current coin price (~$0.0046) costs
+     * roughly fifty cents of provider spend per person who tries the app — the same order as what
+     * it costs to get one of them to install it in the first place. The shared pool below is what
+     * bounds the total, and it is the number to change if this turns out to be too generous.
+     */
+    private static final double FREE_CLAIM_AMOUNT_AICOIN = 100.0;
 
     private final ProxyConfig config;
     private final EventLoopGroup clientGroup;
     private final ProviderHealthTracker healthTracker;
+    private final ProviderSpeed speed;
     private final ProviderLiveness liveness;
     private final AicoinLedger ledger;
 
     public ProxyFrontendHandler(ProxyConfig config, EventLoopGroup clientGroup, ProviderHealthTracker healthTracker,
+                                ProviderSpeed speed,
                                  ProviderLiveness liveness, AicoinLedger ledger) {
         this.config = config;
         this.clientGroup = clientGroup;
         this.healthTracker = healthTracker;
+        this.speed = speed;
         this.liveness = liveness;
         this.ledger = ledger;
     }
@@ -244,11 +261,11 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             byte[] capabilityBody = ByteBufUtil.getBytes(request.content());
             requireApiToken(ctx, request, walletAddress -> CapabilityHandler.serve(
                     ctx, capability.get(), capabilityBody, config, clientGroup, healthTracker,
-                    liveness, ledger, walletAddress));
+                    speed, liveness, ledger, walletAddress));
             return;
         }
         if (request.method() == HttpMethod.GET && "/skills".equals(path)) {
-            SkillsHandler.respond(ctx, config, liveness);
+            SkillsHandler.respond(ctx, config, liveness, speed);
             return;
         }
 

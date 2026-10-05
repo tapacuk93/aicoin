@@ -306,7 +306,7 @@ final class UpstreamForwarder {
 
             FullHttpResponse toClient = new DefaultFullHttpResponse(
                     HttpVersion.HTTP_1_1, status, Unpooled.wrappedBuffer(bodyBytes));
-            copyHeaders(response.headers(), toClient.headers());
+            copyHeaders(response.headers(), toClient.headers(), config.getProvider(provider));
 
             if (status.code() >= 200 && status.code() < 300) {
                 // A free target's upstream cost really is zero, so it must not feed the price
@@ -387,9 +387,30 @@ final class UpstreamForwarder {
             return CostCalculator.price(provider, bodyStr, config.getModelPricing());
         }
 
-        private static void copyHeaders(HttpHeaders from, HttpHeaders to) {
+        /**
+         * Copies the upstream response's headers to the client, minus anything that could carry a
+         * credential back out.
+         *
+         * Nothing observed here has ever echoed the injected key — but the whole design of this
+         * proxy is that the client never holds a provider credential, and "no provider we use
+         * currently echoes that header" is a property of somebody else's server, not of this one.
+         * A provider that starts reflecting request headers in a debug response, or sets a cookie
+         * tied to the proxy's account, would hand the client exactly what this exists to withhold.
+         * Dropping them costs nothing: no client of this proxy has any use for the upstream's
+         * cookies, and the auth header is one the client was never allowed to send either.
+         */
+        private static void copyHeaders(HttpHeaders from, HttpHeaders to, ProviderConfig providerConfig) {
+            String authHeader = providerConfig == null ? null : providerConfig.getAuthHeader();
             for (Map.Entry<String, String> h : from) {
-                to.add(h.getKey(), h.getValue());
+                String name = h.getKey();
+                if (name.equalsIgnoreCase(HttpHeaderNames.AUTHORIZATION.toString())
+                        || name.equalsIgnoreCase(HttpHeaderNames.PROXY_AUTHENTICATE.toString())
+                        || name.equalsIgnoreCase(HttpHeaderNames.SET_COOKIE.toString())
+                        || name.equalsIgnoreCase("x-api-key")
+                        || (authHeader != null && !authHeader.isEmpty() && name.equalsIgnoreCase(authHeader))) {
+                    continue;
+                }
+                to.add(name, h.getValue());
             }
         }
     }

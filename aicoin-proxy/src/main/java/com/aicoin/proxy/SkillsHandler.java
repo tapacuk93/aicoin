@@ -29,8 +29,9 @@ final class SkillsHandler {
     private SkillsHandler() {
     }
 
-    static void respond(ChannelHandlerContext ctx, ProxyConfig config, ProviderLiveness liveness) {
-        byte[] bytes = buildJson(config, liveness).getBytes(CharsetUtil.UTF_8);
+    static void respond(ChannelHandlerContext ctx, ProxyConfig config, ProviderLiveness liveness,
+                         ProviderSpeed speed) {
+        byte[] bytes = buildJson(config, liveness, speed).getBytes(CharsetUtil.UTF_8);
         FullHttpResponse response = new DefaultFullHttpResponse(
                 HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.wrappedBuffer(bytes));
         response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
@@ -42,6 +43,10 @@ final class SkillsHandler {
 
     /** Pure JSON body construction, exposed for testing without a Netty channel. */
     static String buildJson(ProxyConfig config, ProviderLiveness liveness) {
+        return buildJson(config, liveness, null);
+    }
+
+    static String buildJson(ProxyConfig config, ProviderLiveness liveness, ProviderSpeed speed) {
         ProviderSkills skills = config.getCapabilities().getSkills();
         StringBuilder json = new StringBuilder();
         json.append("{\"subjects\":[");
@@ -71,7 +76,7 @@ final class SkillsHandler {
             json.append(Json.string(capability.path())).append(":{");
             boolean firstSubject = true;
             for (String subject : subjects) {
-                List<String> ranked = CapabilityHandler.rank(config, liveness, capability, subject);
+                List<String> ranked = CapabilityHandler.rank(config, liveness, speed, capability, subject);
                 json.append(firstSubject ? "" : ",");
                 firstSubject = false;
                 json.append(Json.string(subject)).append(":[");
@@ -79,6 +84,27 @@ final class SkillsHandler {
                     json.append(i == 0 ? "" : ",").append(Json.string(ranked.get(i)));
                 }
                 json.append("]");
+            }
+            json.append("}");
+        }
+        json.append("},\"observed_ms\":{");
+        // What the ordering above was actually based on. A ranked list with no numbers behind it
+        // is an assertion; with them it is a decision somebody else can check - and when a
+        // provider is ordered lower than its rating suggests, this is the reason why.
+        boolean firstObserved = true;
+        for (Capability capability : Capability.values()) {
+            Map<String, Long> medians = speed == null ? Map.of() : speed.observed(capability);
+            if (medians.isEmpty()) {
+                continue;
+            }
+            json.append(firstObserved ? "" : ",");
+            firstObserved = false;
+            json.append(Json.string(capability.path())).append(":{");
+            boolean firstProviderSeen = true;
+            for (Map.Entry<String, Long> entry : medians.entrySet()) {
+                json.append(firstProviderSeen ? "" : ",")
+                        .append(Json.string(entry.getKey())).append(":").append(entry.getValue());
+                firstProviderSeen = false;
             }
             json.append("}");
         }

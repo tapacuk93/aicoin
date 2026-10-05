@@ -408,7 +408,7 @@ Redis executes atomically with respect to every other client:
 - **Claim**: read `lastclaim:{address}`; if `now - lastclaim < cooldownMillis`
   return not-eligible (`reason:"cooldown"`). Else read the shared pool
   counter (lazily initialized to `aicoin.freeCoinsPoolSize` if never set);
-  if `< freeClaimAmount` (10 aicoin) return not-eligible
+  if `< freeClaimAmount` (100 aicoin) return not-eligible
   (`reason:"pool_exhausted"`) without touching balance/cooldown — a claim
   always grants the full amount or nothing, never a partial top-up of
   whatever's left in the pool. Else `SET lastclaim now` +
@@ -431,11 +431,18 @@ Redis executes atomically with respect to every other client:
 above against both the per-wallet cooldown (`aicoin.freeClaimCooldownSeconds`,
 default 3600 = 1 hour) and the shared pool (`aicoin.freeCoinsPoolSize`,
 default 100 — a single pool shared across *every* wallet, not a per-wallet
-allowance). A successful claim mints a fixed `freeClaimAmount` of 10 aicoin
-(hardcoded, not configurable — the "up to 10 free coins per wallet per hour"
+allowance). A successful claim mints a fixed `freeClaimAmount` of 100 aicoin
+(hardcoded, not configurable — the "up to 100 free coins per wallet per hour"
 rate limit is *this* fixed amount plus the hour-long cooldown, not a
 separate rolling counter). Granted →
-`200 {"granted":true,"amount":10,"next_eligible_at":"RFC3339"}`.
+`200 {"granted":true,"amount":100,"next_eligible_at":"RFC3339"}`.
+
+Raised from 10 on 2026-10-05. Ten was set before there was any usage to look
+at; a week of it showed 42% of all AI calls — and 83% of ElevenLabs requests —
+refused for insufficient balance, with 23 of 24 active wallets having spent
+exactly their grant and stopped. Ten coins is three or four cards; a hundred is
+a session. The shared pool is what bounds the total cost and is the number to
+revisit, not this one.
 Not yet eligible → `429 {"granted":false,"reason":"cooldown","next_eligible_at":"RFC3339"}`.
 Pool exhausted → `429 {"granted":false,"reason":"pool_exhausted"}` — this can
 reject a wallet that has never claimed before, since the constraint is
