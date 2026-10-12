@@ -60,7 +60,8 @@ final class ConsortiumHandler {
     private static final double CALL_COST_AICOIN = 1.0;
 
     /** Longest request this will accept, so one call cannot pin megabytes per panelist. */
-    private static final int MAX_PROMPT_CHARS = 32_000;
+    /** Longest request accepted, matching the text endpoint's cap. */
+    private static final int MAX_PROMPT_CHARS = 400_000;
 
     private ConsortiumHandler() {
     }

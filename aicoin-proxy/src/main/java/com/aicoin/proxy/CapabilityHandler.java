@@ -48,7 +48,22 @@ import org.yaml.snakeyaml.Yaml;
 final class CapabilityHandler {
 
     /** Longest request accepted, matching the consortium's cap — the same prompt may end up there. */
-    private static final int MAX_PROMPT_CHARS = 32_000;
+    /**
+     * Longest request accepted.
+     *
+     * Thirty-two thousand was a sentence-sized limit from when every caller was
+     * asking a question. A caller that wants a file read cannot work inside it:
+     * one driver in the project this fronts is ninety thousand characters, and
+     * a prompt carrying it was refused before any provider saw it. Models have
+     * had windows an order of magnitude past this for years; the limit was
+     * protecting nothing but the shape of the first caller.
+     *
+     * Still a limit, because a request this proxy cannot hold in memory is a
+     * request it cannot refund either, and because every provider has a ceiling
+     * of its own that a caller would otherwise discover one failed call at a
+     * time.
+     */
+    private static final int MAX_PROMPT_CHARS = 400_000;
 
     /**
      * How many providers one request may be tried against. A failing provider is refunded, so this
