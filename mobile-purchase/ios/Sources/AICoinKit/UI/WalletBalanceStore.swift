@@ -19,7 +19,8 @@ public final class WalletBalanceStore: ObservableObject {
     @Published public private(set) var isLoading = false
     @Published public private(set) var lastError: Error?
 
-    private let address: String
+    /// The wallet this store tracks — changed by `switchAddress(to:)`.
+    public private(set) var address: String
     private let walletClient: WalletClient
     private var cancellable: AnyCancellable?
     private var foregroundCancellable: AnyCancellable?
@@ -142,6 +143,15 @@ public final class WalletBalanceStore: ObservableObject {
         lastError = nil
         retryTask?.cancel()
         retryTask = nil
+    }
+
+    /// Tracks another wallet from now on — the one this device switched to after reconciling with
+    /// the user's other devices (see `WalletKeychainStore.reconcile`) — and shows its balance.
+    public func switchAddress(to newAddress: String) async {
+        guard newAddress != address else { return }
+        address = newAddress
+        balance = nil
+        await refresh()
     }
 
     /// Re-fetches the balance from `GET /wallet/api/balance/{address}`. Errors leave the last

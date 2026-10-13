@@ -7,8 +7,9 @@ import XCTest
 /// without the entitlement), since that's an environment limitation, not a logic bug in this
 /// package.
 final class WalletKeychainStoreTests: XCTestCase {
+    /// Never shared through iCloud Keychain: a test must not put wallets on the user's devices.
     private func freshStore() -> WalletKeychainStore {
-        WalletKeychainStore(service: "com.tarasmaslov.aicoinkit.tests", account: "seed-\(UUID().uuidString)")
+        WalletKeychainStore(service: "com.tarasmaslov.aicoinkit.tests", account: "seed-\(UUID().uuidString)", synchronizable: false)
     }
 
     private func skipIfKeychainUnavailable(_ error: Error) throws {
@@ -78,5 +79,21 @@ final class WalletKeychainStoreTests: XCTestCase {
         } catch {
             try skipIfKeychainUnavailable(error)
         }
+    }
+
+    // MARK: - Sharing with the user's other devices
+
+    func testReconciliationNeverHidesCoins() {
+        XCTAssertEqual(WalletKeychainStore.reconciliation(mine: 0, shared: 3186), .adoptShared, "an empty device takes the funded wallet")
+        XCTAssertEqual(WalletKeychainStore.reconciliation(mine: 0, shared: 0), .adoptShared, "two empty ones converge")
+        XCTAssertEqual(WalletKeychainStore.reconciliation(mine: 50, shared: 0), .shareMine, "a funded one is shared in place of an empty one")
+        XCTAssertEqual(WalletKeychainStore.reconciliation(mine: 50, shared: 3186), .keepBoth, "two funded ones are both left alone")
+    }
+
+    func testAStoreThatDoesntShareNeverReconciles() async {
+        let store = freshStore()
+        XCTAssertFalse(store.synchronizable)
+        let switched = await store.reconcile(current: WalletIdentity.generate()) { _ in 0 }
+        XCTAssertNil(switched)
     }
 }
