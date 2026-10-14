@@ -132,6 +132,22 @@ public final class IAPManager: ObservableObject {
     private let eventBus: AICoinEventBus
     private let pinStore: OfferPinStore
     private var updatesTask: Task<Void, Never>?
+    /// The warm-up in flight, if any — see `preload()`.
+    private var loadingTask: Task<Void, Never>?
+    /// How many loads are running. A counter rather than a flag because two of them now run at
+    /// once, and with a flag the first to finish said nothing was loading while the other still
+    /// was — a paywall that flickered its spinner off and its content in twice.
+    private var loadsInFlight = 0
+
+    private func beginLoading() {
+        loadsInFlight += 1
+        isLoading = true
+    }
+
+    private func endLoading() {
+        loadsInFlight = max(0, loadsInFlight - 1)
+        isLoading = loadsInFlight > 0
+    }
 
     /// - Parameters:
     ///   - walletClient: Used for `GET /iap/packages` and `POST /wallet/api/redeem-iap`.
@@ -158,9 +174,33 @@ public final class IAPManager: ObservableObject {
     /// resolves each to a StoreKit `Product` (for live, localized pricing via `displayPrice`).
     /// Safe to call repeatedly (e.g. every time the paywall sheet opens) — packages can change
     /// server-side at any time per CONTRACT.md.
+    /// Both of the above, at once, and only once at a time.
+    ///
+    /// The paywall used to `await` them in sequence, which is four round trips end to end — the
+    /// offer, its StoreKit product, the package list, its StoreKit products — against a server
+    /// and a store that have nothing to do with each other. Measured on a shipped Mac build, the
+    /// sheet took ten seconds to show a price. They do not depend on one another, so they do not
+    /// wait for one another.
+    ///
+    /// Safe to call repeatedly and from anywhere: a second call while the first is still running
+    /// waits for it rather than starting again, which is what lets an app warm this at launch
+    /// *and* refresh it when the sheet opens without paying twice.
+    public func preload() async {
+        if let running = loadingTask { return await running.value }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            async let offer: Void = self.loadOffer()
+            async let packages: Void = self.loadPackages()
+            _ = await (offer, packages)
+        }
+        loadingTask = task
+        await task.value
+        loadingTask = nil
+    }
+
     public func loadPackages() async {
-        isLoading = true
-        defer { isLoading = false }
+        beginLoading()
+        defer { endLoading() }
         do {
             let all = try await walletClient.iapPackages()
             let mine = all.filtered(byBundleIDPrefix: bundleIDPrefix)
@@ -180,8 +220,8 @@ public final class IAPManager: ObservableObject {
     /// to call repeatedly — the offer changes server-side at any time, so a paywall should call
     /// this every time it opens, exactly like `loadPackages()`.
     public func loadOffer() async {
-        isLoading = true
-        defer { isLoading = false }
+        beginLoading()
+        defer { endLoading() }
         do {
             let current = try await walletClient.currentOffer()
             offer = current

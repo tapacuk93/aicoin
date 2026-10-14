@@ -135,9 +135,10 @@ public struct BuyAICoinSheet: View {
             }
             .task {
                 // Both: the offer is what's displayed when the server has one set, and the
-                // package list is the fallback for a server that doesn't yet.
-                await iapManager.loadOffer()
-                await iapManager.loadPackages()
+                // package list is the fallback for a server that doesn't yet. Together rather
+                // than one after the other — see `IAPManager.preload`, which is also what an app
+                // should call at launch so this sheet opens on what is already there.
+                await iapManager.preload()
             }
         }
         // A macOS sheet takes its size from what its content asks for, and this content asks for
