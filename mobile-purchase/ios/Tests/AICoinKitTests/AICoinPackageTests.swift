@@ -108,4 +108,11 @@ final class AICoinPackageTests: XCTestCase {
             "com.tarasmaslov.infiniteairadio.aicoin.xl",
         ])
     }
+
+    func testOnlyPackagesStoreKitResolvedAreOffered() throws {
+        let packages = try decodePackages().filtered(byBundleIDPrefix: "com.tarasmaslov.infiniteairadio")
+        XCTAssertEqual(IAPManager.purchasable(packages, resolved: []).count, packages.count, "nothing resolved keeps every package")
+        let resolved = Set(packages.dropLast().map(\.productId))
+        XCTAssertEqual(IAPManager.purchasable(packages, resolved: resolved).map(\.productId), packages.dropLast().map(\.productId))
+    }
 }

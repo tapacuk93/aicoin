@@ -118,6 +118,21 @@ public enum AICoinPurchaseOutcome: Sendable, Equatable {
 public final class IAPManager: ObservableObject {
     @Published public private(set) var packages: [AICoinPackage] = []
     @Published public private(set) var products: [String: Product] = [:]
+
+    /// The packages to offer: those StoreKit resolved a product for. A catalog
+    /// entry StoreKit doesn't know (not yet approved, or not submitted with this
+    /// version) used to be listed anyway with only its price hint — a dead row
+    /// App Review read as the binary referencing a purchase it couldn't find.
+    /// When StoreKit resolved nothing at all (offline, or a test run with no
+    /// StoreKit configuration) every package stays listed, as before.
+    public var purchasablePackages: [AICoinPackage] {
+        Self.purchasable(packages, resolved: Set(products.keys))
+    }
+
+    nonisolated static func purchasable(_ packages: [AICoinPackage], resolved: Set<String>) -> [AICoinPackage] {
+        guard !resolved.isEmpty else { return packages }
+        return packages.filter { resolved.contains($0.productId) }
+    }
     @Published public private(set) var isLoading = false
     @Published public private(set) var lastError: Error?
 

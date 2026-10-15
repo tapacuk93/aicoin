@@ -208,7 +208,7 @@ public struct BuyAICoinSheet: View {
                 offerButton(offer)
                     .frame(maxWidth: .infinity)
                 Spacer()
-            } else if iapManager.packages.isEmpty {
+            } else if iapManager.purchasablePackages.isEmpty {
                 Spacer()
                 Text("No aicoins packages are available right now.")
                     .foregroundStyle(.secondary)
@@ -217,7 +217,7 @@ public struct BuyAICoinSheet: View {
                     .accessibilityIdentifier(Identifiers.emptyPackages)
                 Spacer()
             } else {
-                List(iapManager.packages) { package in
+                List(iapManager.purchasablePackages) { package in
                     packageRow(package)
                 }
                 .listStyle(.plain)
