@@ -250,6 +250,20 @@ final class UpstreamForwarder {
         }
     }
 
+    /**
+     * The status relayed for an upstream answer — the upstream's own, except 402.
+     *
+     * <p>402 from this proxy means one thing to every client: the wallet is empty, buy coins
+     * (CONTRACT.md's balance gate). A provider uses the same code for *its* account running dry —
+     * Stability answers "out of credits" with 402 — and relaying that verbatim told a reader with
+     * a full wallet to buy more, for a shortfall that is the operator's. It goes out as 503, the
+     * code a provider the proxy can't currently use already gets, with the real status kept in
+     * {@code X-Upstream-Status} and the provider's body untouched. Health still records the 402.
+     */
+    static HttpResponseStatus statusForClient(HttpResponseStatus upstream) {
+        return upstream.code() == 402 ? HttpResponseStatus.SERVICE_UNAVAILABLE : upstream;
+    }
+
     private static void sendSynthetic(ChannelHandlerContext clientCtx, HttpResponseStatus status, String message) {
         String json = "{\"error\":\"" + message + "\"}";
         byte[] bytes = json.getBytes(CharsetUtil.UTF_8);
@@ -305,8 +319,11 @@ final class UpstreamForwarder {
             healthTracker.record(provider, status.code());
 
             FullHttpResponse toClient = new DefaultFullHttpResponse(
-                    HttpVersion.HTTP_1_1, status, Unpooled.wrappedBuffer(bodyBytes));
+                    HttpVersion.HTTP_1_1, statusForClient(status), Unpooled.wrappedBuffer(bodyBytes));
             copyHeaders(response.headers(), toClient.headers(), config.getProvider(provider));
+            if (status.code() != toClient.status().code()) {
+                toClient.headers().set("X-Upstream-Status", Integer.toString(status.code()));
+            }
 
             if (status.code() >= 200 && status.code() < 300) {
                 // A free target's upstream cost really is zero, so it must not feed the price
