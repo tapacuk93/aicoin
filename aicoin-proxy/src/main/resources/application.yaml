@@ -154,8 +154,9 @@ pricing:
         # moves it.
         gemini-2.5-flash-image: { usdPerCall: 0.039 }
         gemini-2.0-flash-preview-image-generation: { usdPerCall: 0.039 }
-        # Speech, reached through POST /audio with provider "google". See ModelPricing.
-        gemini-3.8-flash-tts: { usdPerCall: 0.03 }
+        # Speech, reached through POST /audio with provider "google" and priced by the audio tokens
+        # it reports (25 a second). Google doubles these on 2027-01-01, to 1.00 / 18.00.
+        gemini-3.8-flash-tts: { inputUsdPerMillionTokens: 0.50, outputUsdPerMillionTokens: 9.00 }
     # Kimi K2.6 and K2.7 Code share a rate; the high-speed K2.7 Code doubles the output rate, and
     # its longer id wins the prefix match. The provider default is K3's rate — the dearest — so an
     # unlisted model is over-recorded rather than under-recorded.

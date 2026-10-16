@@ -184,6 +184,10 @@ final class ModelPricing {
         models.put("openai", new LinkedHashMap<>(Map.of("gpt-5", new Rates(1.25, 10.00))));
         Map<String, Rates> google = new LinkedHashMap<>();
         google.put("gemini-3.5-flash", new Rates(1.50, 9.00));
+        // Speech, priced by what it reports: 25 audio tokens a second of speech at the output rate.
+        // A flat per-clip price charged a long passage synthesised in pieces once per piece.
+        // Google's rates double on 2027-01-01 (to $1.00 / $18.00) — update this then.
+        google.put("gemini-3.8-flash-tts", new Rates(0.50, 9.00));
         models.put("google", google);
 
         Map<String, Rates> kimi = new LinkedHashMap<>();
@@ -209,9 +213,6 @@ final class ModelPricing {
         Map<String, Map<String, Double>> modelPerCall = new LinkedHashMap<>();
         Map<String, Double> googlePerCall = new LinkedHashMap<>();
         googlePerCall.put("gemini-2.5-flash-image", 0.039);
-        // A passage of a few hundred characters is under a minute of speech: ~1,500 audio tokens at
-        // $9/M through 2026 and $18/M after, plus the text. Rounded up to cover the higher rate.
-        googlePerCall.put("gemini-3.8-flash-tts", 0.03);
         googlePerCall.put("gemini-2.0-flash-preview-image-generation", 0.039);
         modelPerCall.put("google", googlePerCall);
         // Cloud TTS's Gemini voices bill audio tokens at the same rates as the Gemini API's.

@@ -178,6 +178,15 @@ public final class CostCalculator {
         if (jsonBody == null || jsonBody.trim().isEmpty()) {
             return null;
         }
+        if (jsonBody.length() > LARGE_BODY_CHARS) {
+            // A speech reply is megabytes of base64 audio around a few lines of usage, past
+            // SnakeYAML's 3 MB document limit — so this answered "no usage" and a Gemini speech
+            // call was priced at the flat default. Only the usage and the model are read.
+            jsonBody = usageOnly(jsonBody);
+            if (jsonBody == null) {
+                return null;
+            }
+        }
         Object parsed;
         try {
             parsed = new Yaml().load(jsonBody);
@@ -225,6 +234,46 @@ public final class CostCalculator {
             }
         }
         return null;
+    }
+
+    /** Bodies larger than this are read for their usage block alone — see {@link #usageOnly}. */
+    static final int LARGE_BODY_CHARS = 512 * 1024;
+
+    /**
+     * {@code {"usageMetadata": {...}, "modelVersion": "..."}} cut out of a large Gemini body, or
+     * null when it has none. The usage object holds only numbers, strings and small arrays, so its
+     * end is found by counting braces.
+     */
+    static String usageOnly(String body) {
+        int key = body.lastIndexOf("\"usageMetadata\"");
+        int open = key < 0 ? -1 : body.indexOf('{', key);
+        if (open < 0) {
+            return null;
+        }
+        int depth = 0;
+        int close = -1;
+        for (int i = open; i < body.length(); i++) {
+            char c = body.charAt(i);
+            if (c == '{') {
+                depth++;
+            } else if (c == '}' && --depth == 0) {
+                close = i;
+                break;
+            }
+        }
+        if (close < 0) {
+            return null;
+        }
+        StringBuilder small = new StringBuilder("{\"usageMetadata\":").append(body, open, close + 1);
+        int model = body.lastIndexOf("\"modelVersion\"");
+        if (model >= 0) {
+            int q1 = body.indexOf('"', body.indexOf(':', model) + 1);
+            int q2 = q1 < 0 ? -1 : body.indexOf('"', q1 + 1);
+            if (q2 > q1) {
+                small.append(",\"modelVersion\":").append(body, q1, q2 + 1);
+            }
+        }
+        return small.append('}').toString();
     }
 
     private static long number(Map<?, ?> map, String key) {

@@ -145,6 +145,32 @@ class GeminiSpeechTest {
         return new byte[] {(byte) value, (byte) (value >> 8), (byte) (value >> 16), (byte) (value >> 24)};
     }
 
+    /** Priced by the audio it reports, not a flat price per clip — pieces of one passage add up. */
+    @Test
+    void speechIsPricedByItsOwnTokenCounts() throws Exception {
+        byte[] reply;
+        try (java.io.InputStream in = getClass().getResourceAsStream("/gemini-tts-eu.json")) {
+            reply = in.readAllBytes();
+        }
+        ModelPricing pricing = ProxyConfig.load(java.util.Map.of()).getModelPricing();
+        assertNull(CostCalculator.priceKnownModel("google", "gemini-3.8-flash-tts", pricing),
+                "no flat per-clip price any more");
+        CostCalculator.Priced priced = CostCalculator.price("google", new String(reply, StandardCharsets.UTF_8), pricing);
+        // 11 text tokens in, 64 audio tokens out (2.56 s of speech).
+        assertEquals(11 * 0.50e-6 + 64 * 9.00e-6, priced.getCostUsd(), 1e-9);
+        assertEquals(75, priced.getTokens());
+    }
+
+    @Test
+    void aReplyTooLargeToParseStillHasItsUsageRead() {
+        String audio = "A".repeat(4 * 1024 * 1024);
+        String body = "{\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"audio/wav\",\"data\":\""
+                + audio + "\"}}]}}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":1500,"
+                + "\"candidatesTokensDetails\":[{\"modality\":\"AUDIO\",\"tokenCount\":1500}]},\"modelVersion\":\"gemini-3.8-flash-tts\"}";
+        ModelPricing pricing = ProxyConfig.load(java.util.Map.of()).getModelPricing();
+        assertEquals(100 * 0.50e-6 + 1500 * 9.00e-6, CostCalculator.price("google", body, pricing).getCostUsd(), 1e-9);
+    }
+
     @Test
     void googleSpeaksButIsNeverChosenOverTheOthersUnasked() {
         assertTrue(MediaAdapter.supportsAudio("google"));

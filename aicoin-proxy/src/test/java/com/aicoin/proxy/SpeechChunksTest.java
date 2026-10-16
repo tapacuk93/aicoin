@@ -12,6 +12,13 @@ import org.junit.jupiter.api.Test;
 class SpeechChunksTest {
 
     @Test
+    void piecesAreAtMostEightHundredCharacters() {
+        assertEquals(800, SpeechChunks.MAX_CHARS);
+        String passage = "A sentence of moderate length that keeps on going for a while. ".repeat(60).trim();
+        assertTrue(SpeechChunks.split(passage).stream().allMatch(p -> p.length() <= 800));
+    }
+
+    @Test
     void aShortPassageIsOnePiece() {
         assertEquals(List.of("Kaixo, zer moduz?"), SpeechChunks.split("  Kaixo, zer moduz?  "));
         assertTrue(SpeechChunks.split("   ").isEmpty());
