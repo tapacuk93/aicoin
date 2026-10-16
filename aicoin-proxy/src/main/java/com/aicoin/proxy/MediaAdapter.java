@@ -230,12 +230,99 @@ final class MediaAdapter {
         } catch (IllegalArgumentException e) {
             return null;
         }
+        String mimeType = stringField(body, "mimeType", inline);
+        int rate = pcmRate(mimeType);
+        int channels = 1;
+        Wav wav = Wav.read(pcm);
+        if (wav != null) {
+            if (wav.bitsPerSample != 16) {
+                return null;
+            }
+            pcm = wav.samples;
+            rate = wav.sampleRate;
+            channels = wav.channels;
+        }
         if (pcm.length < 2) {
             return null;
         }
-        String mimeType = stringField(body, "mimeType", inline);
-        byte[] mp3 = Mp3Encoder.fromPcm16(pcm, pcmRate(mimeType), 1);
+        byte[] mp3 = Mp3Encoder.fromPcm16(pcm, rate, channels);
         return new Media(Base64.getEncoder().encodeToString(mp3), "audio/mpeg");
+    }
+
+    /**
+     * A RIFF/WAVE file's format and the samples of its {@code data} chunk — exactly those, by the
+     * chunk's declared length.
+     *
+     * <p>Gemini's documentation describes bare {@code audio/L16} samples; what {@code
+     * gemini-3.8-flash-tts} actually answers is {@code audio/wav}, a whole file — and after its
+     * {@code data} chunk comes a 6 KB {@code C2PA} chunk, Google's content-provenance manifest.
+     * Read as samples, the header was a click at the start of every clip and the manifest a tenth
+     * of a second of noise at the end. The manifest does not survive the conversion to MP3; the
+     * watermark Google puts in the audio itself does.
+     */
+    static final class Wav {
+        final int sampleRate;
+        final int channels;
+        final int bitsPerSample;
+        final byte[] samples;
+
+        private Wav(int sampleRate, int channels, int bitsPerSample, byte[] samples) {
+            this.sampleRate = sampleRate;
+            this.channels = channels;
+            this.bitsPerSample = bitsPerSample;
+            this.samples = samples;
+        }
+
+        /** Null when {@code bytes} is not a RIFF/WAVE file with a format and a data chunk. */
+        static Wav read(byte[] bytes) {
+            if (bytes.length < 12 || !ascii(bytes, 0, "RIFF") || !ascii(bytes, 8, "WAVE")) {
+                return null;
+            }
+            int rate = 0;
+            int channels = 0;
+            int bits = 0;
+            int offset = 12;
+            while (offset + 8 <= bytes.length) {
+                long size = le32(bytes, offset + 4);
+                int body = offset + 8;
+                if (ascii(bytes, offset, "fmt ") && body + 16 <= bytes.length) {
+                    channels = le16(bytes, body + 2);
+                    rate = (int) le32(bytes, body + 4);
+                    bits = le16(bytes, body + 14);
+                } else if (ascii(bytes, offset, "data")) {
+                    if (rate <= 0 || channels <= 0) {
+                        return null;
+                    }
+                    // A streaming writer may leave the length unset (0 or 0xFFFFFFFF); then the
+                    // samples run to the end of the file.
+                    long end = size == 0 || size == 0xFFFFFFFFL ? bytes.length : Math.min(bytes.length, body + size);
+                    return new Wav(rate, channels, bits, java.util.Arrays.copyOfRange(bytes, body, (int) end));
+                }
+                // Chunks are padded to an even length.
+                offset = (int) Math.min((long) bytes.length, body + size + (size & 1));
+            }
+            return null;
+        }
+
+        private static boolean ascii(byte[] bytes, int at, String tag) {
+            if (at + 4 > bytes.length) {
+                return false;
+            }
+            for (int i = 0; i < 4; i++) {
+                if (bytes[at + i] != tag.charAt(i)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static int le16(byte[] b, int at) {
+            return (b[at] & 0xFF) | (b[at + 1] & 0xFF) << 8;
+        }
+
+        private static long le32(byte[] b, int at) {
+            return (b[at] & 0xFFL) | (b[at + 1] & 0xFFL) << 8 | (b[at + 2] & 0xFFL) << 16 | (b[at + 3] & 0xFFL) << 24;
+        }
     }
 
     /** The {@code rate=} parameter of an {@code audio/L16} media type; Gemini's 24 kHz if absent. */
