@@ -28,17 +28,24 @@ class GoogleCloudSpeechTest {
         String body = new String(request.body(), StandardCharsets.UTF_8);
         assertTrue(body.contains("\"languageCode\":\"mg-MG\""), "Cloud TTS does not guess the language");
         assertTrue(body.contains("\"modelName\":\"gemini-3.1-flash-tts-preview\""));
-        assertTrue(body.contains("\"audioEncoding\":\"MP3\""));
+        assertTrue(body.contains("\"audioEncoding\":\"LINEAR16\""), "samples, so pieces join; encoded to MP3 here");
     }
 
     @Test
-    void theMp3IsPassedOnAsItCame() {
-        String content = Base64.getEncoder().encodeToString(new byte[] {(byte) 0xFF, (byte) 0xF3, 0x44, 0x00});
-        MediaAdapter.Media media = MediaAdapter.read(Capability.AUDIO, "googletts",
-                ("{\n  \"audioContent\": \"" + content + "\"\n}").getBytes(StandardCharsets.UTF_8));
+    void itsWavIsEncodedToMp3() {
+        byte[] samples = new byte[4800];
+        java.io.ByteArrayOutputStream wav = new java.io.ByteArrayOutputStream();
+        wav.writeBytes("RIFF\0\0\0\0WAVEfmt ".getBytes(StandardCharsets.ISO_8859_1));
+        wav.writeBytes(new byte[] {16, 0, 0, 0, 1, 0, 1, 0, (byte) 0xC0, 0x5D, 0, 0, (byte) 0x80, (byte) 0xBB, 0, 0, 2, 0, 16, 0});
+        wav.writeBytes("data".getBytes(StandardCharsets.ISO_8859_1));
+        wav.writeBytes(new byte[] {(byte) 0xC0, 0x12, 0, 0});
+        wav.writeBytes(samples);
+        String reply = "{\n  \"audioContent\": \"" + Base64.getEncoder().encodeToString(wav.toByteArray()) + "\"\n}";
+        MediaAdapter.Media media = MediaAdapter.read(Capability.AUDIO, "googletts", reply.getBytes(StandardCharsets.UTF_8));
         assertNotNull(media);
-        assertEquals(content, media.base64());
         assertEquals("audio/mpeg", media.mediaType());
+        byte[] mp3 = Base64.getDecoder().decode(media.base64());
+        assertTrue((mp3[0] & 0xFF) == 0xFF && (mp3[1] & 0xE0) == 0xE0, "an MPEG frame");
         assertNull(MediaAdapter.read(Capability.AUDIO, "googletts", "{}".getBytes(StandardCharsets.UTF_8)));
     }
 

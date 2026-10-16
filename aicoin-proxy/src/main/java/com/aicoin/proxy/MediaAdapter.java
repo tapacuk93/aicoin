@@ -136,7 +136,10 @@ final class MediaAdapter {
             String json = "{\"input\":{\"text\":" + Json.string(text) + "}"
                     + ",\"voice\":{\"languageCode\":" + Json.string(language == null || language.isBlank() ? "en-US" : language)
                     + ",\"name\":" + Json.string(voice) + ",\"modelName\":" + Json.string(model) + "}"
-                    + ",\"audioConfig\":{\"audioEncoding\":\"MP3\"}}";
+                    // Samples, not MP3: a long passage is synthesised in pieces (see SpeechChunks) and
+                    // samples join seamlessly where MP3 files don't — so every Google reply is samples,
+                    // encoded once. LINEAR16 comes back as a WAV file.
+                    + ",\"audioConfig\":{\"audioEncoding\":\"LINEAR16\"}}";
             return new Request("/v1/text:synthesize", headers("application/json"), json.getBytes(StandardCharsets.UTF_8));
         }
         if ("google".equals(provider)) {
@@ -173,11 +176,7 @@ final class MediaAdapter {
             return geminiSpeech(responseBody);
         }
         if (capability == Capability.AUDIO && "googletts".equals(provider)) {
-            // Already MP3, already base64: {"audioContent": "..."} is passed on as it is. Scanned
-            // for, not parsed, for the same size reason as geminiSpeech.
-            String body = new String(responseBody, StandardCharsets.UTF_8);
-            String content = stringField(body, "audioContent", 0);
-            return content == null || content.isEmpty() ? null : new Media(content, "audio/mpeg");
+            return encoded(speechPcm(provider, responseBody));
         }
         if (capability == Capability.AUDIO) {
             // ElevenLabs and OpenAI answer in raw bytes. A JSON body here is an error shape that
@@ -215,37 +214,94 @@ final class MediaAdapter {
      * escapes — so finding the quotes around them is exact.
      */
     static Media geminiSpeech(byte[] responseBody) {
-        String body = new String(responseBody, StandardCharsets.UTF_8);
-        int inline = body.indexOf("\"inlineData\"");
-        if (inline < 0) {
-            return null;
+        return encoded(speechPcm("google", responseBody));
+    }
+
+    /** Raw 16-bit samples, how many a second, and how many channels. */
+    static final class Pcm {
+        final byte[] samples;
+        final int sampleRate;
+        final int channels;
+
+        Pcm(byte[] samples, int sampleRate, int channels) {
+            this.samples = samples;
+            this.sampleRate = sampleRate;
+            this.channels = channels;
         }
-        String data = stringField(body, "data", inline);
+    }
+
+    /** Whether this provider's speech is read as samples — and so can be synthesised in pieces. */
+    static boolean speaksInSamples(String provider) {
+        return "google".equals(provider) || "googletts".equals(provider);
+    }
+
+    /**
+     * The samples in a Google speech reply, or null when it holds none. Gemini answers {@code
+     * candidates[0].content.parts[0].inlineData} — a WAV file, despite documentation describing
+     * bare {@code audio/L16}, which is still read if it ever arrives; Cloud TTS answers {@code
+     * audioContent}, a WAV file when asked for LINEAR16. Scanned for, not parsed: a minute of
+     * speech is ~4 MB of base64 in one string, over SnakeYAML's default 3 MB document limit, and
+     * the fields are plain strings with nothing JSON escapes.
+     */
+    static Pcm speechPcm(String provider, byte[] responseBody) {
+        String body = new String(responseBody, StandardCharsets.UTF_8);
+        String data;
+        String mimeType = null;
+        if ("googletts".equals(provider)) {
+            data = stringField(body, "audioContent", 0);
+        } else {
+            int inline = body.indexOf("\"inlineData\"");
+            if (inline < 0) {
+                return null;
+            }
+            data = stringField(body, "data", inline);
+            mimeType = stringField(body, "mimeType", inline);
+        }
         if (data == null || data.isEmpty()) {
             return null;
         }
-        byte[] pcm;
+        byte[] bytes;
         try {
-            pcm = Base64.getDecoder().decode(data);
+            bytes = Base64.getDecoder().decode(data);
         } catch (IllegalArgumentException e) {
             return null;
         }
-        String mimeType = stringField(body, "mimeType", inline);
-        int rate = pcmRate(mimeType);
-        int channels = 1;
-        Wav wav = Wav.read(pcm);
+        Wav wav = Wav.read(bytes);
         if (wav != null) {
-            if (wav.bitsPerSample != 16) {
+            if (wav.bitsPerSample != 16 || wav.samples.length < 2) {
                 return null;
             }
-            pcm = wav.samples;
-            rate = wav.sampleRate;
-            channels = wav.channels;
+            return new Pcm(wav.samples, wav.sampleRate, wav.channels);
         }
-        if (pcm.length < 2) {
+        return bytes.length < 2 ? null : new Pcm(bytes, pcmRate(mimeType), 1);
+    }
+
+    /**
+     * Pieces of one passage, in order, as one recording — or null if any piece is missing or they
+     * disagree on format (a voice does not change its rate mid-passage; a reply that did would be
+     * joined into noise).
+     */
+    static Pcm joined(List<Pcm> pieces) {
+        if (pieces.isEmpty() || pieces.get(0) == null) {
             return null;
         }
-        byte[] mp3 = Mp3Encoder.fromPcm16(pcm, rate, channels);
+        Pcm first = pieces.get(0);
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        for (Pcm piece : pieces) {
+            if (piece == null || piece.sampleRate != first.sampleRate || piece.channels != first.channels) {
+                return null;
+            }
+            out.writeBytes(piece.samples);
+        }
+        return new Pcm(out.toByteArray(), first.sampleRate, first.channels);
+    }
+
+    /** Samples as the MP3 every audio provider here answers with — see {@link Mp3Encoder}. */
+    static Media encoded(Pcm pcm) {
+        if (pcm == null) {
+            return null;
+        }
+        byte[] mp3 = Mp3Encoder.fromPcm16(pcm.samples, pcm.sampleRate, pcm.channels);
         return new Media(Base64.getEncoder().encodeToString(mp3), "audio/mpeg");
     }
 

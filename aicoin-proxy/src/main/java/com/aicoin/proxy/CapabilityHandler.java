@@ -15,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.yaml.snakeyaml.Yaml;
 
 /**
@@ -273,6 +274,13 @@ final class CapabilityHandler {
             String provider = ranked.get(index++);
             String model = modelFor(config, capability, provider);
             tried.add(provider);
+            if (capability == Capability.AUDIO && MediaAdapter.speaksInSamples(provider)) {
+                List<String> pieces = SpeechChunks.split(prompt);
+                if (pieces.size() > 1) {
+                    speakInPieces(provider, model, pieces);
+                    return;
+                }
+            }
 
             String path;
             List<Map.Entry<String, String>> headers;
@@ -333,6 +341,69 @@ final class CapabilityHandler {
                     });
         }
 
+        /**
+         * A passage too long for a speech model to read faithfully in one go (see {@link
+         * SpeechChunks}), asked for piece by piece — all at once, so a long card takes about as
+         * long as a short one — and joined back into one recording. Each piece is an ordinary paid
+         * call, refunded if it fails; the pieces are joined as samples and encoded once, because
+         * MP3 files laid end to end carry a header in the middle that throws a player's duration
+         * and seeking off. Any piece missing and the passage is missing: half a passage read aloud
+         * is not the passage, so the next provider gets its turn.
+         */
+        private void speakInPieces(String provider, String model, List<String> pieces) {
+            long began = System.currentTimeMillis();
+            MediaAdapter.Pcm[] recorded = new MediaAdapter.Pcm[pieces.size()];
+            List<String> failures = new ArrayList<>();
+            boolean[] insufficient = {false};
+            AtomicInteger outstanding = new AtomicInteger(pieces.size());
+            for (int i = 0; i < pieces.size(); i++) {
+                int at = i;
+                MediaAdapter.Request request = MediaAdapter.audio(provider, model, voiceFor(provider), pieces.get(i), language);
+                BilledCall.post(group, config, healthTracker, ledger, wallet, provider, request.path(),
+                        request.headers(), request.body(), model, outcome -> {
+                            // The callbacks arrive on whichever thread finished each call.
+                            synchronized (this) {
+                                if (outcome.isInsufficient()) {
+                                    insufficient[0] = true;
+                                } else {
+                                    if (outcome.wasAttempted()) {
+                                        calls++;
+                                    }
+                                    if (outcome.getError() != null) {
+                                        failures.add(outcome.getError());
+                                    } else {
+                                        coinsCharged += outcome.getCharged();
+                                        spend.merge(provider, outcome.getCharged(), Long::sum);
+                                        recorded[at] = MediaAdapter.speechPcm(provider, outcome.getResponse().body());
+                                    }
+                                }
+                            }
+                            // The last piece to come back, however it came back, finishes the passage.
+                            if (outstanding.decrementAndGet() > 0) {
+                                return;
+                            }
+                            finishPieces(provider, model, recorded, failures, insufficient[0], began);
+                        });
+            }
+        }
+
+        private synchronized void finishPieces(String provider, String model, MediaAdapter.Pcm[] recorded,
+                                               List<String> failures, boolean insufficient, long began) {
+            speed.record(provider, capability, failures.isEmpty() && !insufficient ? 200 : 0,
+                    System.currentTimeMillis() - began);
+            if (insufficient) {
+                sendInsufficient();
+                return;
+            }
+            if (!failures.isEmpty()) {
+                errors.add("{\"provider\":" + Json.string(provider)
+                        + ",\"error\":" + Json.string(failures.get(0)) + "}");
+                next();
+                return;
+            }
+            sendMedia(provider, model, MediaAdapter.encoded(MediaAdapter.joined(java.util.Arrays.asList(recorded))));
+        }
+
         private String voiceFor(String provider) {
             String requested = voice == null ? "" : voice.trim();
             return requested.isEmpty() ? config.getCapabilities().voiceFor(provider) : requested;
@@ -367,7 +438,10 @@ final class CapabilityHandler {
         }
 
         private void onMedia(String provider, String model, UpstreamCall.Result result) {
-            MediaAdapter.Media media = MediaAdapter.read(capability, provider, result.body());
+            sendMedia(provider, model, MediaAdapter.read(capability, provider, result.body()));
+        }
+
+        private void sendMedia(String provider, String model, MediaAdapter.Media media) {
             if (media == null) {
                 errors.add("{\"provider\":" + Json.string(provider)
                         + ",\"error\":\"no " + capability.path() + " in response\"}");
