@@ -28,6 +28,9 @@ dependencies {
     implementation "io.netty:netty-all:${nettyVersion}"
     implementation 'org.yaml:snakeyaml:2.2'
     implementation 'io.lettuce:lettuce-core:6.5.0.RELEASE'
+    // Gemini's speech comes back as raw PCM; this turns it into the MP3 every other audio
+    // provider answers with. A pure-Java LAME port (LGPL), so the image needs no native encoder.
+    implementation 'de.sciss:jump3r:1.0.5'
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'

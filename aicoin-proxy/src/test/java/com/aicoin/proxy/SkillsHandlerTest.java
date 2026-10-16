@@ -37,10 +37,11 @@ class SkillsHandlerTest {
 
         assertEquals(List.of("anthropic", "google"), routing(body, "text", "code"));
         assertEquals(List.of("google", "anthropic"), routing(body, "text", "science"));
-        // No image or audio key is configured, so there is nothing to route there and the page
-        // says so rather than listing providers that cannot be called.
+        // No image key is configured, so there is nothing to route there and the page says so
+        // rather than listing providers that cannot be called. Audio has exactly one: the Google
+        // key also reaches Gemini's speech models.
         assertTrue(routing(body, "image", "creative").isEmpty());
-        assertTrue(routing(body, "audio", "creative").isEmpty());
+        assertEquals(List.of("google"), routing(body, "audio", "creative"));
     }
 
     @Test

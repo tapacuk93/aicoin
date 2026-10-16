@@ -152,9 +152,10 @@ final class CapabilityHandler {
                 && !Boolean.FALSE.equals(body.get("escalate"));
         String voice = body.get("voice") instanceof String ? (String) body.get("voice") : null;
         String size = body.get("size") instanceof String ? (String) body.get("size") : "1024x1024";
+        String language = body.get("language") instanceof String ? (String) body.get("language") : null;
 
         new Attempt(ctx, config, group, healthTracker, speed, ledger, wallet, capability, prompt,
-                background, subject, ranked, escalate, voice, size).next();
+                background, subject, ranked, escalate, voice, size, language).next();
     }
 
     /**
@@ -231,6 +232,8 @@ final class CapabilityHandler {
         private final boolean escalate;
         private final String voice;
         private final String size;
+        /** /audio only: the text's language, for the one provider that will not infer it. */
+        private final String language;
 
         private final List<String> tried = new ArrayList<>();
         private final List<String> errors = new ArrayList<>();
@@ -242,7 +245,8 @@ final class CapabilityHandler {
         Attempt(ChannelHandlerContext ctx, ProxyConfig config, EventLoopGroup group,
                  ProviderHealthTracker healthTracker, ProviderSpeed speed, AicoinLedger ledger,
                  String wallet, Capability capability, String prompt, String background,
-                 String subject, List<String> ranked, boolean escalate, String voice, String size) {
+                 String subject, List<String> ranked, boolean escalate, String voice, String size,
+                 String language) {
             this.ctx = ctx;
             this.config = config;
             this.group = group;
@@ -258,6 +262,7 @@ final class CapabilityHandler {
             this.escalate = escalate;
             this.voice = voice;
             this.size = size;
+            this.language = language;
         }
 
         void next() {
@@ -288,7 +293,7 @@ final class CapabilityHandler {
             } else {
                 MediaAdapter.Request request = capability == Capability.IMAGE
                         ? MediaAdapter.image(provider, model, prompt, size)
-                        : MediaAdapter.audio(provider, model, voiceFor(provider), prompt);
+                        : MediaAdapter.audio(provider, model, voiceFor(provider), prompt, language);
                 path = request.path();
                 headers = request.headers();
                 requestBody = request.body();

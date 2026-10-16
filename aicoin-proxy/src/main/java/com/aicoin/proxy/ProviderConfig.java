@@ -1,6 +1,7 @@
 package com.aicoin.proxy;
 
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * Per-provider config entry (one of {@code providers.openai}, {@code
@@ -21,9 +22,22 @@ public final class ProviderConfig {
     private final boolean authAsQueryParam;
     private final String authQueryParamName;
     private final List<String> freePaths;
+    /**
+     * Where the key comes from when it is not a fixed string — a Google service account's hourly
+     * OAuth token (see {@link GoogleServiceAccount}). Null for every provider authenticated by a
+     * key that does not change.
+     */
+    private final Supplier<String> keySource;
 
     public ProviderConfig(String baseUrl, String apiKey, String authHeader, String authPrefix,
                            boolean authAsQueryParam, String authQueryParamName, List<String> freePaths) {
+        this(baseUrl, apiKey, authHeader, authPrefix, authAsQueryParam, authQueryParamName, freePaths, null);
+    }
+
+    public ProviderConfig(String baseUrl, String apiKey, String authHeader, String authPrefix,
+                           boolean authAsQueryParam, String authQueryParamName, List<String> freePaths,
+                           Supplier<String> keySource) {
+        this.keySource = keySource;
         this.baseUrl = baseUrl;
         this.apiKey = apiKey;
         this.authHeader = authHeader;
@@ -37,7 +51,16 @@ public final class ProviderConfig {
         return baseUrl;
     }
 
+    /**
+     * The key to inject. For a provider with a {@code keySource} that is the current token — read
+     * each time, because it changes — or a placeholder until the first token arrives, so the
+     * provider counts as configured from the start rather than flickering in once minting finishes.
+     */
     public String getApiKey() {
+        if (keySource != null) {
+            String current = keySource.get();
+            return current == null || current.isEmpty() ? "pending" : current;
+        }
         return apiKey;
     }
 

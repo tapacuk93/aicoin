@@ -226,18 +226,23 @@ final class ProviderSkills {
      * The shipped ratings. Read them as "which of these would you reach for", not as a benchmark.
      *
      * <p>Text is rated for every chat provider {@link ChatAdapter} knows the shape of. Image is
-     * OpenAI and Stability; audio is ElevenLabs and OpenAI. Everything unlisted is 0, which is why
+     * OpenAI and Stability; audio is ElevenLabs, OpenAI and Google. Everything unlisted is 0, which is why
      * asking {@code /image} never reaches Anthropic.
      */
     static ProviderSkills defaults() {
         Map<String, Map<String, Integer>> capabilities = new LinkedHashMap<>();
         capabilities.put("anthropic", ratings("text", 5));
         capabilities.put("openai", ratings("text", 5, "image", 5, "audio", 4));
-        capabilities.put("google", ratings("text", 4));
+        // Audio at 3: below ElevenLabs and OpenAI, so an unpinned /audio never lands on it. It is
+        // here to be named — for the languages only it speaks (see MediaAdapter.audio).
+        capabilities.put("google", ratings("text", 4, "audio", 3));
         capabilities.put("mistral", ratings("text", 3));
         capabilities.put("kimi", ratings("text", 4));
         capabilities.put("elevenlabs", ratings("audio", 5));
         capabilities.put("stability", ratings("image", 4));
+        // Lowest of all: it speaks only when asked for by name, for the one language (Malagasy)
+        // nothing else here can say.
+        capabilities.put("googletts", ratings("audio", 2));
 
         Map<String, Map<String, Integer>> subjects = new LinkedHashMap<>();
         subjects.put("anthropic", ratings("code", 5, "writing", 5, "analysis", 5, "legal", 4, "creative", 4));

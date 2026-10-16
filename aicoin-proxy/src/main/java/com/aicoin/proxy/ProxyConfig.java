@@ -23,7 +23,7 @@ import org.yaml.snakeyaml.Yaml;
 public final class ProxyConfig {
 
     private static final String[] PROVIDERS =
-            {"openai", "anthropic", "google", "mistral", "cohere", "elevenlabs", "stability", "kimi"};
+            {"openai", "anthropic", "google", "mistral", "cohere", "elevenlabs", "stability", "kimi", "googletts"};
 
     /** Stable, canonical provider order used everywhere a full provider list must be reported (e.g. {@code GET /health}). */
     public static final List<String> PROVIDER_NAMES = Collections.unmodifiableList(Arrays.asList(PROVIDERS));
@@ -344,6 +344,13 @@ public final class ProxyConfig {
         // api.moonshot.ai is still the API host after the platform docs moved to kimi.ai.
         defaults.put("kimi", new ProviderConfig("https://api.moonshot.ai", "", "Authorization", "Bearer ", false, null,
                 List.of("GET /v1/models", "GET /v1/models/*")));
+        // Google Cloud Text-to-Speech — a different Google from `google` above, and not reachable
+        // with that key: this API refuses API keys outright. It is authenticated by a service
+        // account (AICOIN_PROXY_GOOGLETTS_CREDENTIALS, a key file path) whose OAuth token is
+        // minted and refreshed by GoogleServiceAccount. Here for Malagasy, which only Cloud TTS's
+        // Gemini voices speak.
+        defaults.put("googletts", new ProviderConfig("https://texttospeech.googleapis.com", "", "Authorization", "Bearer ",
+                false, null, List.of("GET /v1/voices")));
 
         Map<String, ProviderConfig> providers = new LinkedHashMap<>();
         for (String provider : PROVIDERS) {
@@ -371,8 +378,14 @@ public final class ProxyConfig {
                 freePaths = FreeTargets.parseEnvList(envFreePaths);
             }
 
+            GoogleServiceAccount serviceAccount = null;
+            if ("googletts".equals(provider) && (apiKey == null || apiKey.isEmpty())) {
+                serviceAccount = GoogleServiceAccount.start(envStr(env, envPrefix + "CREDENTIALS",
+                        getString(yaml, prefix + "credentials", "")));
+            }
             providers.put(provider, new ProviderConfig(baseUrl, apiKey, authHeader, authPrefix,
-                    authAsQueryParam, authQueryParamName, freePaths));
+                    authAsQueryParam, authQueryParamName, freePaths,
+                    serviceAccount == null ? null : serviceAccount::currentToken));
         }
 
         double coinValueUsd = getDouble(yaml, "pricing.coinValueUsd", 0.009);
@@ -465,11 +478,17 @@ public final class ProxyConfig {
         Map<String, String> audioModels = new LinkedHashMap<>();
         audioModels.put("elevenlabs", "eleven_multilingual_v2");
         audioModels.put("openai", "gpt-4o-mini-tts");
+        audioModels.put("google", "gemini-3.8-flash-tts");
+        // Not 3.8: Cloud TTS has not taken that model yet, and answers "not supported" for it.
+        audioModels.put("googletts", "gemini-3.1-flash-tts-preview");
         Map<String, String> voices = new LinkedHashMap<>();
         // A stock ElevenLabs voice every account has, and OpenAI's default. Both are overridable
         // per request, so this is only what an unspecified request gets.
         voices.put("elevenlabs", "EXAVITQu4vr4xnSDxMaL");
         voices.put("openai", "alloy");
+        // One of Gemini's prebuilt voices; it speaks every language the model does.
+        voices.put("google", "Kore");
+        voices.put("googletts", "Kore");
         for (String provider : PROVIDER_NAMES) {
             imageModels.computeIfPresent(provider, (p, model) ->
                     envStr(env, "AICOIN_PROXY_" + p.toUpperCase(Locale.ROOT) + "_IMAGE_MODEL",
@@ -525,6 +544,7 @@ public final class ProxyConfig {
         defaults.put("elevenlabs", "/v1/voices");
         defaults.put("stability", "/v1/engines/list");
         defaults.put("kimi", "/v1/models");
+        defaults.put("googletts", "/v1/voices");
         Map<String, String> paths = new LinkedHashMap<>();
         for (String provider : PROVIDER_NAMES) {
             String path = getString(yaml, "providers." + provider + ".probePath", defaults.getOrDefault(provider, ""));

@@ -78,6 +78,17 @@ providers:
     authPrefix: "Bearer "
     freePaths: ["GET /v1/models", "GET /v1/models/*"]
     probePath: /v1/models
+  # Google Cloud Text-to-Speech, for Malagasy. Not the `google` key: this API refuses API keys,
+  # so it signs in as a service account — the key file Google's console downloads, by path.
+  # Env: AICOIN_PROXY_GOOGLETTS_CREDENTIALS. Unset, the provider is simply unconfigured.
+  googletts:
+    baseUrl: https://texttospeech.googleapis.com
+    apiKey: ""
+    credentials: ""
+    authHeader: Authorization
+    authPrefix: "Bearer "
+    freePaths: ["GET /v1/voices"]
+    probePath: /v1/voices
 pricing:
   # Charge each call what it actually cost, rounded up to whole coins with a floor of one,
   # instead of a flat coin per call. This is the billing model — the flag exists so it can be
@@ -143,6 +154,8 @@ pricing:
         # moves it.
         gemini-2.5-flash-image: { usdPerCall: 0.039 }
         gemini-2.0-flash-preview-image-generation: { usdPerCall: 0.039 }
+        # Speech, reached through POST /audio with provider "google". See ModelPricing.
+        gemini-3.8-flash-tts: { usdPerCall: 0.03 }
     # Kimi K2.6 and K2.7 Code share a rate; the high-speed K2.7 Code doubles the output rate, and
     # its longer id wins the prefix match. The provider default is K3's rate — the dearest — so an
     # unlisted model is over-recorded rather than under-recorded.
@@ -216,11 +229,15 @@ capabilities:
     models:
       elevenlabs: eleven_multilingual_v2             # AICOIN_PROXY_ELEVENLABS_AUDIO_MODEL
       openai: gpt-4o-mini-tts                        # AICOIN_PROXY_OPENAI_AUDIO_MODEL
+      google: gemini-3.8-flash-tts                   # AICOIN_PROXY_GOOGLE_AUDIO_MODEL
+      googletts: gemini-3.1-flash-tts-preview        # AICOIN_PROXY_GOOGLETTS_AUDIO_MODEL
     voices:
       # A stock ElevenLabs voice every account has, and OpenAI's default. Either can be overridden
       # per request with "voice". Env: AICOIN_PROXY_<PROVIDER>_VOICE.
       elevenlabs: EXAVITQu4vr4xnSDxMaL
       openai: alloy
+      google: Kore
+      googletts: Kore
   # What each provider is rated at, 0-5. A capability rating of 0 means never route: it is how
   # "this provider does not do that" is said. Subject ratings override the capability rating for
   # requests tagged with that subject; a subject with no entry means no opinion, not a bad score.
@@ -235,13 +252,14 @@ capabilities:
   skills:
     anthropic: { text: 5, code: 5, writing: 5, analysis: 5, legal: 4, creative: 4 }
     openai:    { text: 5, image: 5, audio: 4, code: 5, math: 5, science: 4, analysis: 4, creative: 4 }
-    google:    { text: 4, science: 5, translation: 5, math: 4, analysis: 4, code: 3 }
+    google:    { text: 4, audio: 3, science: 5, translation: 5, math: 4, analysis: 4, code: 3 }
     mistral:   { text: 3, translation: 4, code: 3, writing: 3 }
     kimi:      { text: 4, translation: 5, analysis: 4, code: 4, writing: 4 }
     # A media provider's subject rating is prefixed with the capability: being rated for writing
     # code says nothing about who should read a sentence about code aloud, and an unprefixed
     # rating decided exactly that.
     elevenlabs: { audio: 5, audio-creative: 5 }
+    googletts: { audio: 2 }
     stability:  { image: 4, image-creative: 5 }
 health:
   windowSize: 50

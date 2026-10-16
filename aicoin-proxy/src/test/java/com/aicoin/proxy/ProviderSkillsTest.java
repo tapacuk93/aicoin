@@ -114,7 +114,9 @@ class ProviderSkillsTest {
         assertEquals(List.of("openai", "stability"), SKILLS.rank(Capability.IMAGE, "general", null));
         // ElevenLabs is rated above OpenAI at speech, which is the whole reason the ranking is by
         // rating rather than by provider order.
-        assertEquals(List.of("elevenlabs", "openai"), SKILLS.rank(Capability.AUDIO, "general", null));
+        // Google last: it speaks the languages the other two cannot, and is meant to be named for
+        // those, not reached for first.
+        assertEquals(List.of("elevenlabs", "openai", "google", "googletts"), SKILLS.rank(Capability.AUDIO, "general", null));
         assertEquals("elevenlabs", SKILLS.rank(Capability.AUDIO, "creative", null).get(0));
     }
 }

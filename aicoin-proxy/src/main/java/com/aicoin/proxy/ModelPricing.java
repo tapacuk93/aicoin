@@ -209,8 +209,13 @@ final class ModelPricing {
         Map<String, Map<String, Double>> modelPerCall = new LinkedHashMap<>();
         Map<String, Double> googlePerCall = new LinkedHashMap<>();
         googlePerCall.put("gemini-2.5-flash-image", 0.039);
+        // A passage of a few hundred characters is under a minute of speech: ~1,500 audio tokens at
+        // $9/M through 2026 and $18/M after, plus the text. Rounded up to cover the higher rate.
+        googlePerCall.put("gemini-3.8-flash-tts", 0.03);
         googlePerCall.put("gemini-2.0-flash-preview-image-generation", 0.039);
         modelPerCall.put("google", googlePerCall);
+        // Cloud TTS's Gemini voices bill audio tokens at the same rates as the Gemini API's.
+        perCall.put("googletts", 0.03);
 
         return new ModelPricing(providerDefaults, models, perCall, modelPerCall,
                 fallbackCostPerTokenUsd, fallbackCostUsdPerCall);
