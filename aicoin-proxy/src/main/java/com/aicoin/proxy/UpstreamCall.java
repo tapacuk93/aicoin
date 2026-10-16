@@ -53,11 +53,14 @@ final class UpstreamCall {
 
     private static final Logger LOG = Logger.getLogger(UpstreamCall.class.getName());
     /**
-     * Chat responses are text; nothing here is speech or images. Well under {@link
-     * UpstreamForwarder}'s 32MB, because a consortium holds several of these in memory at once on
-     * a host with a 512MB heap.
+     * The largest response read whole. Chat is text and small; speech through {@code POST /audio}
+     * is not: Gemini answers with a WAV file as base64 inside JSON, ~64 KB a second of speech, so
+     * an 800-character piece (see {@link SpeechChunks}) in a slowly spoken language — Igbo reads at
+     * ~12 characters a second, ~67 s — is ~4.3 MB, and the 4 MB this used to be refused it. Still
+     * well under {@link UpstreamForwarder}'s 32MB: several of these can be in memory at once on a
+     * small host.
      */
-    private static final int MAX_CONTENT_LENGTH = 4 * 1024 * 1024;
+    private static final int MAX_CONTENT_LENGTH = 8 * 1024 * 1024;
 
     private UpstreamCall() {
     }
