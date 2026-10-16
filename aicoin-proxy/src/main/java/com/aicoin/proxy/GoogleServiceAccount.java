@@ -77,7 +77,10 @@ final class GoogleServiceAccount {
             LOG.log(Level.WARNING, "could not read Google service account key " + keyFile, e);
             return null;
         }
-        account.refresher.execute(account::refresh);
+        // The first token is minted here, at start-up, before anything is served. Left to the
+        // background thread, the health probe that runs as the proxy starts went out with no token
+        // and recorded the provider as down for its first interval.
+        account.refresh();
         return account;
     }
 
@@ -98,6 +101,7 @@ final class GoogleServiceAccount {
         return token;
     }
 
+    /** Mints a token now and schedules the next; on failure, retries sooner. */
     private void refresh() {
         Duration next = REFRESH_EVERY;
         try {
