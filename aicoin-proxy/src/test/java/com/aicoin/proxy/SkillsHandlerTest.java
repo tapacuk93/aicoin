@@ -72,4 +72,43 @@ class SkillsHandlerTest {
         assertEquals(Boolean.TRUE,
                 parse(SkillsHandler.buildJson(ProxyConfig.load(new HashMap<>()), null)).get("escalation"));
     }
+    @SuppressWarnings("unchecked")
+    @Test
+    void namesTheModelEachRoutableProviderWouldAnswerWith() {
+        // A reader app offers to rewrite a chapter when the model behind its provider has changed,
+        // so what this names must be what a call would send - and only for providers a call could
+        // reach. Mistral is rated for text but has no key here, so it is not listed.
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_ANTHROPIC_APIKEY", "a");
+        env.put("AICOIN_PROXY_GOOGLE_APIKEY", "g");
+        env.put("AICOIN_PROXY_CONSORTIUM_ANTHROPIC_MODEL", "claude-test-9");
+        ProxyConfig config = ProxyConfig.load(env);
+        Map<String, Object> models = (Map<String, Object>) parse(SkillsHandler.buildJson(config, null)).get("models");
+
+        Map<String, Object> text = (Map<String, Object>) models.get("text");
+        assertEquals("claude-test-9", text.get("anthropic"));
+        assertEquals(config.getConsortium().modelFor("google"), text.get("google"));
+        assertEquals(2, text.size());
+        assertTrue(((Map<String, Object>) models.get("image")).isEmpty());
+        assertEquals(Map.of("google", config.getCapabilities().modelFor(Capability.AUDIO, "google")),
+                models.get("audio"));
+
+        Map<String, Object> consortium = (Map<String, Object>) models.get("consortium");
+        assertEquals(List.of("anthropic:claude-test-9", "google:" + config.getConsortium().modelFor("google")),
+                consortium.get("panel"));
+        // No editor configured: the panelist ranked first for a general request.
+        assertEquals("anthropic", consortium.get("editor"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void anEmptyPanelWhenTheConsortiumIsOff() {
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_ANTHROPIC_APIKEY", "a");
+        env.put("AICOIN_PROXY_CONSORTIUM_ENABLED", "false");
+        Map<String, Object> consortium = (Map<String, Object>) ((Map<String, Object>) parse(
+                SkillsHandler.buildJson(ProxyConfig.load(env), null)).get("models")).get("consortium");
+        assertTrue(((List<String>) consortium.get("panel")).isEmpty());
+        assertEquals(null, consortium.get("editor"));
+    }
 }

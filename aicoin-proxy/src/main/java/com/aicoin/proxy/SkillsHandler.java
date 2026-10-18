@@ -108,8 +108,60 @@ final class SkillsHandler {
             }
             json.append("}");
         }
-        json.append("},\"escalation\":").append(config.getCapabilities().isEscalationEnabled()).append("}");
+        json.append("},\"escalation\":").append(config.getCapabilities().isEscalationEnabled());
+        appendModels(json, config, liveness);
+        json.append("}");
         return json.toString();
+    }
+
+    /**
+     * {@code "models"}: which model stands behind each provider right now, per capability, and who
+     * would sit on a {@code POST /consortium} panel.
+     *
+     * <p>A caller that keeps what a model wrote needs this to know when that writing has been
+     * overtaken: a reader app holding a chapter written by an older model can offer to have it
+     * rewritten only if it can tell the model it was written by is no longer the one answering.
+     * The provider name alone cannot tell it that — "anthropic" is the same string across every
+     * model Anthropic ships — and the model ids live in config, so they change with a restart and
+     * no release; publishing them is the only way a client can see that happen.
+     *
+     * <p>Each capability lists the providers its routing would consider, with the model a call
+     * would actually send, from {@link CapabilityHandler#models} — the same filter the {@code
+     * routing} block above applies, so a provider absent there is absent here.
+     *
+     * <p>The panel is the one {@link ConsortiumHandler#panel} builds for a call that names nobody:
+     * keyed, with a model, in {@link ChatAdapter#CHAT_PROVIDERS} order. Like that call it does not
+     * consult liveness, so neither does this. The editor is the configured one if it is on the
+     * panel; otherwise a call's editor is the panelist ranked first <em>for that call's subject</em>,
+     * and what is published is that choice for {@link SubjectTagger#GENERAL} — the subject a request
+     * with nothing more specific about it is tagged as. An empty panel and a null editor when the
+     * endpoint is disabled, since then nobody sits on it.
+     */
+    private static void appendModels(StringBuilder json, ProxyConfig config, ProviderLiveness liveness) {
+        json.append(",\"models\":{");
+        boolean firstCapability = true;
+        for (Capability capability : Capability.values()) {
+            json.append(firstCapability ? "" : ",");
+            firstCapability = false;
+            json.append(Json.string(capability.path())).append(":{");
+            boolean firstProvider = true;
+            for (Map.Entry<String, String> entry : CapabilityHandler.models(config, liveness, capability).entrySet()) {
+                json.append(firstProvider ? "" : ",")
+                        .append(Json.string(entry.getKey())).append(":").append(Json.string(entry.getValue()));
+                firstProvider = false;
+            }
+            json.append("}");
+        }
+        ConsortiumConfig consortium = config.getConsortium();
+        List<String> panel = consortium.isEnabled() ? ConsortiumHandler.panel(config, null) : List.of();
+        json.append(",\"consortium\":{\"panel\":[");
+        for (int i = 0; i < panel.size(); i++) {
+            json.append(i == 0 ? "" : ",")
+                    .append(Json.string(panel.get(i) + ":" + consortium.modelFor(panel.get(i)).trim()));
+        }
+        String editor = panel.isEmpty() ? null : ConsortiumHandler.editor(config,
+                ConsortiumHandler.panel(config, null, SubjectTagger.GENERAL, null), null);
+        json.append("],\"editor\":").append(editor == null ? "null" : Json.string(editor)).append("}}");
     }
 
     private static String ratingsJson(Map<String, Integer> ratings) {

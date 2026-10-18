@@ -176,6 +176,25 @@ final class CapabilityHandler {
                 provider -> isAvailable(config, liveness, capability, provider));
     }
 
+    /**
+     * Which model each provider that could serve this capability would answer with, in ranking
+     * order: exactly the providers {@link #rank} would consider, mapped to exactly the model
+     * {@link Attempt#next} would send.
+     *
+     * <p>Derived from the same two calls rather than read from config separately, because the point
+     * of publishing it is that a caller can trust it — a reader that learns "anthropic writes with
+     * claude-sonnet-5" and offers to rewrite a page written by an older model is acting on this,
+     * and a list that included a provider with no key, or named a model that is not the one sent,
+     * would have it offering rewrites that never happen.
+     */
+    static Map<String, String> models(ProxyConfig config, ProviderLiveness liveness, Capability capability) {
+        Map<String, String> models = new LinkedHashMap<>();
+        for (String provider : rank(config, liveness, capability, null)) {
+            models.put(provider, modelFor(config, capability, provider));
+        }
+        return models;
+    }
+
     private static boolean isAvailable(ProxyConfig config, ProviderLiveness liveness, Capability capability,
                                         String provider) {
         ProviderConfig providerConfig = config.getProvider(provider);

@@ -299,6 +299,19 @@ Auth is the same API token as any paid call. Body:
 
 **`GET /skills`** — public and unauthenticated, like `/price` and `/health`: the rating table, and the live ranking each capability/subject pair would actually route by right now, filtered through keys and liveness. Routing a request on a caller's behalf is only defensible if the caller can find out how, and the table alone would not do it.
 
+It also carries `models` — which model stands behind each provider right now (additive; older proxies omit it, and a client should read its absence as "unknown", not as an error):
+
+```jsonc
+"models": {
+  "text":  {"anthropic": "claude-sonnet-5", "google": "gemini-3.5-flash"},   // provider -> model a POST /text call sends
+  "image": {"openai": "gpt-image-1"},
+  "audio": {"elevenlabs": "eleven_multilingual_v2"},
+  "consortium": {"panel": ["anthropic:claude-sonnet-5", "google:gemini-3.5-flash"], "editor": "anthropic"}
+}
+```
+
+Each capability lists exactly the providers its `routing` would consider (rated above 0, keyed, with a model, not `down`), in ranking order for an untagged request, with the model a call would send: `consortium.models` for text, `capabilities.<image|audio>.models` for media. `consortium.panel` is the panel a `POST /consortium` naming nobody would seat — keyed, with a model, in chat-provider order; like that call it does not consult liveness — as `provider:model`, and empty (with `editor: null`) when the endpoint is disabled. `editor` is `consortium.editor` if it is on the panel; otherwise a call's editor is the panelist ranked first for *that call's* subject, and the one published is the choice for `general`. The point is for a client that keeps what a model wrote to notice when it has been overtaken: the provider name is the same across every model a provider ships, and the model ids are config, so they change with a restart and no release.
+
 ### Ledger (Redis)
 
 Backed by a single Redis instance — ElastiCache for Redis (with snapshotting
@@ -488,7 +501,7 @@ It stops at what the payer actually holds, and that limit is load-bearing. Payin
 ### Additional proxy-side endpoints
 - `GET /price` → `{"price_usd":..,"total_spend_usd":..,"weighted_total":..,"half_life_days":110}` computed directly from the ledger — `total_spend_usd` is the plain unweighted all-time sum (visibility only), `weighted_total` is `Σweight_i` (the formula's denominator, for debugging/verification), `half_life_days` is the configured decay half-life. Always includes `Access-Control-Allow-Origin: *` — this is public, read-only data fetched cross-origin by the landing page at aicoin.oeaio.com (a separate origin from the proxy).
 - `GET /free-coins/available` → `{"available": N}` — the real, live remaining count in the shared Redis-backed pool (`AicoinLedger.getFreeCoinsRemaining`), the same counter `POST /wallet/api/claim` atomically decrements. Not a static admin-managed file — this number is authoritative and changes in real time as wallets claim. A ledger-lookup failure resolves to `{"available": 0}`.
-- `GET /skills` → the capability/subject rating table and the ranking each pair would route by right now (see "Capability endpoints"). Public and unauthenticated, `Access-Control-Allow-Origin: *`, like `/price` and `/health`.
+- `GET /skills` → the capability/subject rating table and the ranking each pair would route by right now, plus `models`: the model behind each routable provider per capability and the consortium's panel and editor (see "Capability endpoints"). Public and unauthenticated, `Access-Control-Allow-Origin: *`, like `/price` and `/health`.
 - `GET /health` — for each configured provider (openai, anthropic, google, mistral, cohere, elevenlabs, stability, kimi), report whether recent upstream calls have hit rate-limiting or budget errors, and whether the proxy has a real (non-empty) `apiKey` configured for it at all (`enabled`) — this is what the landing page reads to show which AI backends are actually live. Track, per provider, a rolling window of the last `health.windowSize` forwarded calls (config, default 50, env `AICOIN_PROXY_HEALTH_WINDOW_SIZE`): `rateLimited` = true if any upstream response in the window was HTTP 429; `overBudget` = true if any was HTTP 402 or 403; `healthy` = `!rateLimited && !overBudget`. Response: `{"providers":[{"name":"openai","enabled":true,"healthy":true,"rateLimited":false,"overBudget":false,"state":"alive","detail":"responded 200","checkedAt":1757183940000,"latencyMs":180}, ...]}` (all providers always listed, even ones with zero calls so far — those default to `healthy:true`/`enabled` reflects config regardless of traffic). Always includes `Access-Control-Allow-Origin: *`, same as `/price`, since the landing page fetches it cross-origin too.
 
   **Liveness (`state`).** `healthy`/`rateLimited`/`overBudget` are inferences from calls this proxy happened to forward, so they say nothing about a provider nobody has called: a revoked key, an expired card or a dead host is indistinguishable from a healthy backend until the first customer call fails on it. So the proxy also **asks each provider directly**, on a timer: one `GET` per provider every `health.probe.intervalSeconds` (default 60, env `AICOIN_PROXY_HEALTH_PROBE_INTERVAL_SECONDS`), timing out after `health.probe.timeoutSeconds` (default 10), to that provider's `probePath` — a path in its own `freePaths`, so probing forever costs nothing — with the proxy's key injected exactly as a real call would inject it. Probing can be turned off entirely with `health.probe.enabled` / `AICOIN_PROXY_HEALTH_PROBE_ENABLED`, and any single provider's path can be overridden with `AICOIN_PROXY_<PROVIDER>_PROBE_PATH`.
