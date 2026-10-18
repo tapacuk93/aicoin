@@ -71,7 +71,7 @@ class ProxyConfigTest {
         assertEquals(50, config.getHealthWindowSize());
         assertEquals(60, config.getUpstreamReadTimeoutSeconds());
 
-        assertEquals(12, config.getIapPackages().size());
+        assertEquals(16, config.getIapPackages().size());
         IapPackageConfig first = config.getIapPackages().get(0);
         assertEquals("com.tarasmaslov.infiniteairadio.aicoin.small", first.getProductId());
         assertEquals(50, first.getCoins());
@@ -79,13 +79,17 @@ class ProxyConfigTest {
     }
 
     @Test
-    void bundledIapPackagesCoverAllThreeAppsAtAllFourTiers() {
+    void bundledIapPackagesCoverEveryAppAtAllFourTiers() {
         ProxyConfig config = ProxyConfig.load(new HashMap<>());
         List<IapPackageConfig> packages = config.getIapPackages();
 
         assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals("com.tarasmaslov.infiniteairadio.aicoin.xl")));
         assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals("com.tarasmaslov.alllanguageslearner.aicoin.medium")));
         assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals("com.tarasmaslov.learnit.aicoin.large")));
+        for (String tier : List.of("small", "medium", "large", "xl")) {
+            String productId = "com.oeaio.infiniteaibook.aicoin." + tier;
+            assertTrue(packages.stream().anyMatch(p -> p.getProductId().equals(productId)), productId);
+        }
 
         for (IapPackageConfig p : packages) {
             assertTrue(p.getCoins() > 0, p.getProductId());

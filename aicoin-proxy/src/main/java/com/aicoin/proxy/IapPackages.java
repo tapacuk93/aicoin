@@ -19,15 +19,17 @@ import org.yaml.snakeyaml.Yaml;
 final class IapPackages {
 
     /**
-     * The three client apps' real bundle ids, per CONTRACT.md's "Coin packages" section — every
-     * IAP product id is one of these bundle ids plus {@code .aicoin.<tier>}. {@code POST
+     * The client apps' real bundle ids, per CONTRACT.md's "Coin packages" section — every IAP
+     * product id is one of these bundle ids plus {@code .aicoin.<tier>}. {@code POST
      * /wallet/api/redeem-iap} rejects any verified transaction whose {@code bundleId} isn't one
      * of these, regardless of whether its signature is otherwise valid.
      */
     private static final Set<String> KNOWN_BUNDLE_IDS = Set.of(
             "com.tarasmaslov.infiniteairadio",
             "com.tarasmaslov.alllanguageslearner",
-            "com.tarasmaslov.learn-it");
+            "com.tarasmaslov.learn-it",
+            // Infinite AI Book, the first app built on AICoinKit's shared app runtime.
+            "com.oeaio.infiniteaibook");
 
     private IapPackages() {
     }
