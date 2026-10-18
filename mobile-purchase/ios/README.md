@@ -44,6 +44,13 @@ Sources/AICoinKit/
     CoinBalanceBadge.swift      Toolbar-sized balance badge
     BuyAICoinSheet.swift        "Buy AICoin" sheet (server-set offer) + Send/Receive tab
     SendReceiveView.swift       Peer-transfer UI
+  App/
+    AICoinAppRuntime.swift      An app's wallet, token cache and transport, swappable across devices
+    AICoinAppStore.swift        Balance + IAP + buy-sheet state, faucet and reconcile at launch
+    AICoinFaucet.swift          The once-per-install free-coin claim
+    AICoinUITestHooks.swift     UITEST_AICOIN_* environment hooks
+    AICoinUITestTransport.swift Offline wallet/IAP stub (and the app's canned AI replies) for UI tests
+    DirectProviderKeyTransport.swift  SOAK_*_API_KEY provider keys for soak runs (apps gate with #if DEBUG)
 
 Tests/AICoinKitTests/          XCTest, no network/Redis — pure logic + mock transports
 ```
@@ -120,6 +127,55 @@ do {
 }
 ```
 
+## App support
+
+Every app used to hand-write the same few hundred lines of glue around the pieces above — a
+runtime holding the wallet and transport, a faucet, a store that raises the buy sheet, UI-test
+hooks — and each copy had picked up a different subset of the fixes. `App/` is that glue, once:
+
+```swift
+// At launch, once per process.
+let runtime = AICoinAppRuntime(configuration: .init(
+    keychainService: "com.oeaio.infiniteaibook.aicoin",
+    defaultsKeyPrefix: "infiniteaibook"           // faucet flag: infiniteaibook_aicoin_faucet_claim_attempted_v1
+))
+let coins = AICoinAppStore(runtime: runtime)
+
+// In the root view.
+ContentView()
+    .environmentObject(coins)
+    .aicoinBuySheet(coins)                        // any 402 anywhere raises BuyAICoinSheet
+    .task { coins.start() }                       // unfinished purchases, sheet warm-up, reconcile, faucet
+// ...and on returning to the foreground: Task { await coins.reconcileWallet() }
+
+// Provider calls go through runtime.transport; the proxy's own endpoints take runtime.currentToken.
+```
+
+What it keeps from the copies it replaces:
+
+- **The Keychain can fail** (a locked device at a background launch) and the app still launches,
+  on an ephemeral wallet that reads zero and 402s into the buy sheet.
+- **One wallet across the user's devices**: `reconcileWallet()` settles this device's wallet
+  against the one shared through iCloud Keychain and swaps identity and token cache together under
+  a lock, so no request ever signs with one wallet and presents the other. `start()` reconciles
+  *before* claiming the faucet: a claim that landed first would fund the local wallet, and
+  reconcile would then keep both and hide the shared balance.
+- **The faucet is claimed once**, recorded only after the server answers, so an offline first
+  launch retries. Apps that shipped their own faucet pass its key as `faucetDefaultsKey` so an
+  update doesn't claim again.
+- **UI tests never touch real coins**: any `UITEST_AICOIN_*` variable (`_BALANCE`,
+  `_DISABLE_FAUCET`, `_FORCE_INSUFFICIENT`, `_FAKE_AI`) gives the runtime an ephemeral wallet and
+  routes everything through `AICoinUITestTransport`, which stubs balance, packages
+  (`<prefix>.aicoin.{small,medium,large,xl}`) and the faucet, 402s on demand, and serves the app's
+  own canned AI replies (`uiTestFakeAI:`) — every app's replies differ, so they stay in the app.
+- **Debug-only behaviour is opt-in**, because a package can't see the app's `DEBUG` flag:
+  `debugAutoReloadWhenEmpty` (honoured only in a Debug build) and
+  `directTransport: DirectProviderKeyTransport.fromEnvironment()` should both be passed under the
+  app's own `#if DEBUG`.
+
+A new app's bundle id also has to be in the proxy's `KNOWN_BUNDLE_IDS` and its four products in the
+`iap.packages` list, or its purchases are refused at redemption.
+
 ## The buy flow (the current-offer model)
 
 What's on sale is one server-set number, the same in every app — not a list of tiers the user picks
@@ -168,6 +224,8 @@ has no offer set. Both credit via the catalog's `coins` for the purchased produc
 - `IAPManager` — `loadOffer()`, `purchaseCurrentOffer(address:confirmedCoins:)`, `loadPackages()`,
   `purchase(_:address:)`, `startObservingUnfinishedTransactions(address:)`.
 - `WalletBalanceStore`, `CoinBalanceBadge`, `BuyAICoinSheet`, `SendReceiveView` — SwiftUI layer.
+- `AICoinAppRuntime`, `AICoinAppStore`, `View.aicoinBuySheet(_:)`, `AICoinFaucet`,
+  `AICoinUITestHooks`, `AICoinUITestTransport`, `DirectProviderKeyTransport` — app support (above).
 
 ## Design decisions made beyond CONTRACT.md's explicit spec
 
