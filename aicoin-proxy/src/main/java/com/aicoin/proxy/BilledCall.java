@@ -79,7 +79,7 @@ final class BilledCall {
     static void post(EventLoopGroup group, ProxyConfig config, ProviderHealthTracker healthTracker,
                       AicoinLedger ledger, String wallet, String provider, String path,
                       List<Map.Entry<String, String>> headers, byte[] body, Consumer<Outcome> onDone) {
-        post(group, config, healthTracker, ledger, wallet, provider, path, headers, body, null, onDone);
+        post(group, config, healthTracker, ledger, wallet, provider, path, headers, body, null, UpstreamTimer.NONE, onDone);
     }
 
     /**
@@ -87,11 +87,13 @@ final class BilledCall {
      *                     or speech call, priced by that model's configured per-call rate rather
      *                     than by a token count that is not coming. Null for chat, whose responses
      *                     report their own usage.
+     * @param timer        the client request's {@link UpstreamTimer}, charged with the provider call
+     *                     (and nothing else: the ledger debit before it is this proxy's own time)
      */
     static void post(EventLoopGroup group, ProxyConfig config, ProviderHealthTracker healthTracker,
                       AicoinLedger ledger, String wallet, String provider, String path,
                       List<Map.Entry<String, String>> headers, byte[] body, String billingModel,
-                      Consumer<Outcome> onDone) {
+                      UpstreamTimer timer, Consumer<Outcome> onDone) {
         ledger.debitForCall(wallet, CALL_COST_AICOIN, provider, debit -> {
             if (!debit.isReachable()) {
                 onDone.accept(new Outcome(false, false, "could not validate wallet", null, 0));
@@ -101,7 +103,7 @@ final class BilledCall {
                 onDone.accept(new Outcome(true, false, "insufficient balance", null, 0));
                 return;
             }
-            UpstreamCall.post(group, config, healthTracker, provider, path, headers, body, result -> {
+            UpstreamCall.post(group, config, healthTracker, provider, path, headers, body, timer, result -> {
                 if (!result.isOk()) {
                     ledger.refund(wallet, CALL_COST_AICOIN, provider);
                     onDone.accept(new Outcome(false, true, result.getError(), null, 0));

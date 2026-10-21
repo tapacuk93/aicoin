@@ -76,7 +76,7 @@ class AccessLogTest {
         assertNotNull(log);
 
         log.record("POST", "/v1/text-to-speech/x/with-timestamps", "elevenlabs", "abc123",
-                200, 52, 900_000, 8421, "1", "ok");
+                200, 52, 900_000, 8421, 8390, 31, "1", "ok");
         log.close();
 
         List<String> lines = Files.readAllLines(logFiles(dir).get(0));
@@ -90,6 +90,8 @@ class AccessLogTest {
         assertEquals("elevenlabs", entry.get("provider"));
         assertEquals(200, entry.get("status"));
         assertEquals(8421, entry.get("duration_ms"));
+        assertEquals(8390, entry.get("upstream_ms"));
+        assertEquals(31, entry.get("overhead_ms"));
         assertEquals("1", entry.get("coins"));
         assertEquals("ok", entry.get("outcome"));
         assertNotNull(entry.get("at"));
@@ -104,7 +106,7 @@ class AccessLogTest {
         AccessLog log = AccessLog.create(ProxyConfig.load(env(dir.resolve("access.log"), "1048576", "3")));
 
         log.record("POST", "/v1/text-to-speech/x/with-timestamps", "elevenlabs", "abc123",
-                -1, 52, 0, 20_000, "", "client_gone");
+                -1, 52, 0, 20_000, 19_990, 10, "", "client_gone");
         log.close();
 
         Map<?, ?> entry = (Map<?, ?>) new Yaml().load(Files.readAllLines(logFiles(dir).get(0)).get(0));
@@ -120,7 +122,7 @@ class AccessLogTest {
         AccessLog log = AccessLog.create(ProxyConfig.load(env(dir.resolve("access.log"), "1024", "3")));
 
         for (int i = 0; i < 500; i++) {
-            log.record("GET", "/price", "", "", 200, 0, 83, i, "", "ok");
+            log.record("GET", "/price", "", "", 200, 0, 83, i, 0, i, "", "ok");
         }
         log.close();
 
@@ -166,7 +168,7 @@ class AccessLogTest {
     void aCraftedPathCannotForgeALogLine(@TempDir Path dir) throws Exception {
         AccessLog log = AccessLog.create(ProxyConfig.load(env(dir.resolve("access.log"), "1048576", "3")));
 
-        log.record("GET", "/x\",\"status\":999}\n{\"forged\":true", "", "", 200, 0, 0, 1, "", "ok");
+        log.record("GET", "/x\",\"status\":999}\n{\"forged\":true", "", "", 200, 0, 0, 1, 0, 1, "", "ok");
         log.close();
 
         List<String> lines = Files.readAllLines(logFiles(dir).get(0));

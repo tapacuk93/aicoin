@@ -332,7 +332,7 @@ final class CapabilityHandler {
             // experiences.
             long began = System.currentTimeMillis();
             BilledCall.post(group, config, healthTracker, ledger, wallet, provider, path, headers,
-                    requestBody, billingModel, outcome -> {
+                    requestBody, billingModel, UpstreamTimer.of(ctx.channel()), outcome -> {
                         speed.record(provider, capability,
                                 outcome.getError() == null ? 200 : 0,
                                 System.currentTimeMillis() - began);
@@ -378,7 +378,7 @@ final class CapabilityHandler {
                 int at = i;
                 MediaAdapter.Request request = MediaAdapter.audio(provider, model, voiceFor(provider), pieces.get(i), language);
                 BilledCall.post(group, config, healthTracker, ledger, wallet, provider, request.path(),
-                        request.headers(), request.body(), model, outcome -> {
+                        request.headers(), request.body(), model, UpstreamTimer.of(ctx.channel()), outcome -> {
                             // The callbacks arrive on whichever thread finished each call.
                             synchronized (this) {
                                 if (outcome.isInsufficient()) {

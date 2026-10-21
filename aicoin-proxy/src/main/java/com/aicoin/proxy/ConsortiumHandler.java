@@ -593,7 +593,7 @@ final class ConsortiumHandler {
                 }
                 countCall();
                 UpstreamCall.post(group, config, healthTracker, provider, path, ChatAdapter.headers(provider), body,
-                        result -> {
+                        UpstreamTimer.of(ctx.channel()), result -> {
                             if (!result.isOk()) {
                                 ledger.refund(wallet, CALL_COST_AICOIN, provider);
                                 recordError(stage, provider, result.getError());

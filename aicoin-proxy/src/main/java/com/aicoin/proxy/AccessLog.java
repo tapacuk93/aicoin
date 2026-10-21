@@ -27,8 +27,12 @@ import java.util.logging.Logger;
  * <pre>
  * {"at":"2026-08-12T17:04:05.123Z","method":"POST","path":"/v1/text-to-speech/xxx/with-timestamps",
  *  "provider":"elevenlabs","wallet":"a1b2...","status":200,"req_bytes":412,"resp_bytes":1048576,
- *  "duration_ms":8421,"coins":"1","outcome":"ok"}
+ *  "duration_ms":8421,"upstream_ms":8390,"overhead_ms":31,"coins":"1","outcome":"ok"}
  * </pre>
+ *
+ * <p>{@code upstream_ms} is the wall-clock time at least one provider call for the request was in
+ * flight (see {@link UpstreamTimer} for why the union, not the sum); {@code overhead_ms} is
+ * {@code duration_ms - upstream_ms}, floored at zero — the latency this proxy itself added.
  *
  * <p><b>What is deliberately never logged:</b> the {@code X-Api-Key} token itself (it can spend the
  * wallet's coins, so a log file that leaks is otherwise a wallet that leaks), any provider API key,
@@ -128,7 +132,8 @@ final class AccessLog implements AutoCloseable {
      * @param coins  the {@code X-Aicoin-Charged} value, or empty when the call wasn't billed
      */
     void record(String method, String path, String provider, String wallet, int status,
-                 int requestBytes, int responseBytes, long durationMillis, String coins, String outcome) {
+                 int requestBytes, int responseBytes, long durationMillis, long upstreamMillis,
+                 long overheadMillis, String coins, String outcome) {
         String line = "{\"at\":\"" + Instant.now() + "\""
                 + ",\"method\":" + json(method)
                 + ",\"path\":" + json(path)
@@ -138,6 +143,8 @@ final class AccessLog implements AutoCloseable {
                 + ",\"req_bytes\":" + requestBytes
                 + ",\"resp_bytes\":" + responseBytes
                 + ",\"duration_ms\":" + durationMillis
+                + ",\"upstream_ms\":" + upstreamMillis
+                + ",\"overhead_ms\":" + overheadMillis
                 + ",\"coins\":" + json(coins)
                 + ",\"outcome\":" + json(outcome)
                 + "}";

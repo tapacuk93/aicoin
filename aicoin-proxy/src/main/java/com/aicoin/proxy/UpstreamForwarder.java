@@ -111,6 +111,10 @@ final class UpstreamForwarder {
         // response. Shared across the response handler, the read-timeout path, and the
         // client-disconnect listener below, all of which can fire on different event loops.
         AtomicBoolean settled = new AtomicBoolean(false);
+        // Provider time for the access log's overhead figure: from here (connect and TLS are
+        // network time to the provider) until the answer, failure or timeout is in hand. Ended on
+        // every terminal path below; ending twice is harmless.
+        UpstreamTimer.Span span = UpstreamTimer.of(clientCtx.channel()).begin();
 
         Bootstrap bootstrap = new Bootstrap();
         bootstrap.group(group)
@@ -135,12 +139,13 @@ final class UpstreamForwarder {
                         ch.pipeline().addLast(new HttpObjectAggregator(MAX_CONTENT_LENGTH));
                         ch.pipeline().addLast(new UpstreamResponseHandler(
                                 config, healthTracker, ledger, clientCtx, provider, walletAddress, callCostAicoin,
-                                settled));
+                                settled, span));
                     }
                 });
 
         bootstrap.connect(host, port).addListener((ChannelFutureListener) future -> {
             if (!future.isSuccess()) {
+                span.end();
                 LOG.log(Level.WARNING, "upstream connect failed for provider " + provider + " at " + baseUrl, future.cause());
                 if (settled.compareAndSet(false, true)) {
                     refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
@@ -160,6 +165,7 @@ final class UpstreamForwarder {
             // AccessLogHandler already records this case as status -1 / "client_gone"; that only
             // ever noted it happened. This ends the upstream call and returns the coins.
             ChannelFutureListener clientGone = f -> {
+                span.end();
                 if (settled.compareAndSet(false, true)) {
                     LOG.log(Level.FINE, "client gone before upstream answered; aborting " + provider + " call");
                     refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
@@ -173,7 +179,10 @@ final class UpstreamForwarder {
             // stacking one more listener per request until the client finally disconnects. The
             // upstream channel closes on every terminal path here — response relayed, read
             // timeout, error, or this listener itself — so it is the reliable place to unhook.
-            upstreamCh.closeFuture().addListener(f -> clientCtx.channel().closeFuture().removeListener(clientGone));
+            upstreamCh.closeFuture().addListener(f -> {
+                span.end();
+                clientCtx.channel().closeFuture().removeListener(clientGone);
+            });
             String hostHeader = (port == (tls ? 443 : 80)) ? host : host + ":" + port;
             FullHttpRequest req = new DefaultFullHttpRequest(
                     HttpVersion.HTTP_1_1, method, forwardUri, Unpooled.wrappedBuffer(body));
@@ -185,6 +194,7 @@ final class UpstreamForwarder {
 
             upstreamCh.writeAndFlush(req).addListener((ChannelFutureListener) writeFuture -> {
                 if (!writeFuture.isSuccess()) {
+                    span.end();
                     LOG.log(Level.WARNING, "upstream write failed for provider " + provider, writeFuture.cause());
                     if (settled.compareAndSet(false, true)) {
                         refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
@@ -287,10 +297,11 @@ final class UpstreamForwarder {
         private final String walletAddress;
         private final double callCostAicoin;
         private final AtomicBoolean settled;
+        private final UpstreamTimer.Span span;
 
         UpstreamResponseHandler(ProxyConfig config, ProviderHealthTracker healthTracker, AicoinLedger ledger,
                                  ChannelHandlerContext clientCtx, String provider, String walletAddress, double callCostAicoin,
-                                 AtomicBoolean settled) {
+                                 AtomicBoolean settled, UpstreamTimer.Span span) {
             this.config = config;
             this.healthTracker = healthTracker;
             this.ledger = ledger;
@@ -299,10 +310,12 @@ final class UpstreamForwarder {
             this.walletAddress = walletAddress;
             this.callCostAicoin = callCostAicoin;
             this.settled = settled;
+            this.span = span;
         }
 
         @Override
         protected void channelRead0(ChannelHandlerContext upstreamCtx, FullHttpResponse response) {
+            span.end();
             HttpResponseStatus status = response.status();
 
             // The client's own timeout beat this answer, and the disconnect listener has already
@@ -360,6 +373,7 @@ final class UpstreamForwarder {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext upstreamCtx, Throwable cause) {
+            span.end();
             boolean timedOut = cause instanceof ReadTimeoutException;
             if (timedOut) {
                 // Distinct from a transport error: the provider is reachable and simply took

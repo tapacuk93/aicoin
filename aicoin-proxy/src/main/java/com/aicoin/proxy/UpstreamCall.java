@@ -124,10 +124,14 @@ final class UpstreamCall {
      * POSTs {@code body} to {@code path} on {@code provider}'s configured baseUrl with the proxy's
      * own key injected, and reports the outcome once. Records the response — of any status — in the
      * provider's health window, exactly as a forwarded call would.
+     *
+     * <p>{@code timer} is charged from just before connecting until the outcome is known, and
+     * stops before {@code onResult} runs, so the caller's own processing of the answer counts as
+     * this proxy's time, not the provider's.
      */
     static void post(EventLoopGroup group, ProxyConfig config, ProviderHealthTracker healthTracker,
                       String provider, String path, List<Map.Entry<String, String>> headers, byte[] body,
-                      Consumer<Result> onResult) {
+                      UpstreamTimer timer, Consumer<Result> onResult) {
         ProviderConfig providerConfig = config.getProvider(provider);
         if (providerConfig == null) {
             onResult.accept(Result.failed("unknown provider " + provider));
@@ -162,8 +166,10 @@ final class UpstreamCall {
         // Exactly one of: a response, a failure, a timeout. Whichever gets here first owns the
         // single callback the caller is counting on.
         AtomicBoolean settled = new AtomicBoolean(false);
+        UpstreamTimer.Span span = timer.begin();
         Consumer<Result> once = result -> {
             if (settled.compareAndSet(false, true)) {
+                span.end();
                 onResult.accept(result);
             }
         };
