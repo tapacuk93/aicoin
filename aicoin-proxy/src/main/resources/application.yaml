@@ -319,6 +319,6 @@ iap:
     - { productId: com.tarasmaslov.learnit.aicoin.large,               coins: 1000, usdPriceHint: 9.99 }
     - { productId: com.tarasmaslov.learnit.aicoin.xl,                  coins: 5000, usdPriceHint: 44.99 }
     - { productId: com.oeaio.infiniteaibook.aicoin.small,              coins: 50,   usdPriceHint: 0.99 }
-    - { productId: com.oeaio.infiniteaibook.aicoin.medium,             coins: 200,  usdPriceHint: 2.99 }
+    - { productId: com.oeaio.infiniteaibook.aicoin.medium,             coins: 200,  usdPriceHint: 1.99 }
     - { productId: com.oeaio.infiniteaibook.aicoin.large,              coins: 1000, usdPriceHint: 9.99 }
-    - { productId: com.oeaio.infiniteaibook.aicoin.xl,                 coins: 5000, usdPriceHint: 44.99 }
+    - { productId: com.oeaio.infiniteaibook.aicoin.xl,                 coins: 5000, usdPriceHint: 24.99 }
