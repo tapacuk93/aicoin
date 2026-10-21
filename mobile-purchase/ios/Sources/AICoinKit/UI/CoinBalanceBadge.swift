@@ -57,6 +57,10 @@ public struct CoinBalanceBadge: View {
                 balanceLabel
             }
             .font(.subheadline.weight(.medium))
+            // As much room at the sides as the toolbar's capsule leaves above and below (44 pt
+            // tall, plus the few points it adds itself): with none, the coin and the last digit
+            // sat against the curve.
+            .padding(.horizontal, 8)
         }
         .buttonStyle(.plain)
         .disabled(onTap == nil)
