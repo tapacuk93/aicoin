@@ -1,7 +1,6 @@
 package com.aicoin.proxy;
 
 import java.util.Map;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * Pure-function cost computation from an upstream JSON response body, per
@@ -14,10 +13,8 @@ import org.yaml.snakeyaml.Yaml;
  * else pricing.defaultCostUsdPerCall.
  * </pre>
  *
- * We parse the body with SnakeYAML rather than pulling in a separate JSON
- * library: valid JSON is (for the purposes of this contract's simple object
- * shapes) valid YAML, and SnakeYAML is already a project dependency for
- * config loading. This is a deliberate simplification; see README.md.
+ * Bodies are parsed with {@link Json#load}, the proxy's own small JSON parser,
+ * rather than a separate JSON library.
  */
 public final class CostCalculator {
 
@@ -179,9 +176,10 @@ public final class CostCalculator {
             return null;
         }
         if (jsonBody.length() > LARGE_BODY_CHARS) {
-            // A speech reply is megabytes of base64 audio around a few lines of usage, past
-            // SnakeYAML's 3 MB document limit — so this answered "no usage" and a Gemini speech
-            // call was priced at the flat default. Only the usage and the model are read.
+            // A speech reply is megabytes of base64 audio around a few lines of usage. It once
+            // overran the old SnakeYAML parse's 3 MB document limit (so a Gemini speech call was
+            // priced at the flat default); parsing it whole would still build a tree around
+            // megabytes of string nobody reads. Only the usage and the model are read.
             jsonBody = usageOnly(jsonBody);
             if (jsonBody == null) {
                 return null;
@@ -189,7 +187,7 @@ public final class CostCalculator {
         }
         Object parsed;
         try {
-            parsed = new Yaml().load(jsonBody);
+            parsed = Json.load(jsonBody);
         } catch (Exception e) {
             return null;
         }
@@ -293,7 +291,7 @@ public final class CostCalculator {
 
         Object parsed;
         try {
-            parsed = new Yaml().load(jsonBody);
+            parsed = Json.load(jsonBody);
         } catch (Exception e) {
             return null;
         }

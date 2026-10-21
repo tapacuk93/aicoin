@@ -13,7 +13,6 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * Verifies a StoreKit2 {@code Transaction.jwsRepresentation} — a JWS (JSON Web Signature, compact
@@ -88,8 +87,8 @@ final class AppleJwsVerifier {
         Map<?, ?> header;
         Map<?, ?> payload;
         try {
-            Object headerParsed = new Yaml().load(new String(headerBytes, StandardCharsets.UTF_8));
-            Object payloadParsed = new Yaml().load(new String(payloadBytes, StandardCharsets.UTF_8));
+            Object headerParsed = Json.load(new String(headerBytes, StandardCharsets.UTF_8));
+            Object payloadParsed = Json.load(new String(payloadBytes, StandardCharsets.UTF_8));
             if (!(headerParsed instanceof Map) || !(payloadParsed instanceof Map)) {
                 return VerifyResult.failure("malformed signed_transaction JSON");
             }

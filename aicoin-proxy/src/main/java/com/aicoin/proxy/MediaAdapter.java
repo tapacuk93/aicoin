@@ -6,7 +6,6 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * What {@link ChatAdapter} is for chat, this is for images and speech: the one place this proxy
@@ -189,7 +188,7 @@ final class MediaAdapter {
         String body = new String(responseBody, StandardCharsets.UTF_8);
         Object parsed;
         try {
-            parsed = new Yaml().load(body);
+            parsed = Json.load(body);
         } catch (Exception e) {
             return null;
         }
@@ -208,9 +207,7 @@ final class MediaAdapter {
      * Mp3Encoder}.
      *
      * <p>Read by scanning for the two fields rather than parsing the document. A minute of speech
-     * is ~4 MB of base64 in one string, which is over SnakeYAML's default 3 MB document limit (so
-     * the parse every other reader here uses would refuse it) and would be held twice more as a
-     * parsed tree. The fields are plain strings — base64 and a media type contain nothing JSON
+     * is ~4 MB of base64 in one string, which would be held twice more as a parsed tree. The fields are plain strings — base64 and a media type contain nothing JSON
      * escapes — so finding the quotes around them is exact.
      */
     static Media geminiSpeech(byte[] responseBody) {
@@ -240,8 +237,8 @@ final class MediaAdapter {
      * candidates[0].content.parts[0].inlineData} — a WAV file, despite documentation describing
      * bare {@code audio/L16}, which is still read if it ever arrives; Cloud TTS answers {@code
      * audioContent}, a WAV file when asked for LINEAR16. Scanned for, not parsed: a minute of
-     * speech is ~4 MB of base64 in one string, over SnakeYAML's default 3 MB document limit, and
-     * the fields are plain strings with nothing JSON escapes.
+     * speech is ~4 MB of base64 in one string, not worth a parsed tree, and the fields are plain
+     * strings with nothing JSON escapes.
      */
     static Pcm speechPcm(String provider, byte[] responseBody) {
         String body = new String(responseBody, StandardCharsets.UTF_8);

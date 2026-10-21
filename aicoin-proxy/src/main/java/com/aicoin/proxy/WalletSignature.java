@@ -10,7 +10,6 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Map;
 import java.util.Optional;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * Ed25519 wallet-address cryptography, per CONTRACT.md's auth sections: a
@@ -221,7 +220,7 @@ final class WalletSignature {
     private static Optional<Map<?, ?>> decodePayload(String payloadPart) {
         try {
             byte[] payloadBytes = Base64.getUrlDecoder().decode(payloadPart);
-            Object parsed = new Yaml().load(new String(payloadBytes, StandardCharsets.UTF_8));
+            Object parsed = Json.load(new String(payloadBytes, StandardCharsets.UTF_8));
             return (parsed instanceof Map) ? Optional.of((Map<?, ?>) parsed) : Optional.empty();
         } catch (Exception e) {
             return Optional.empty();

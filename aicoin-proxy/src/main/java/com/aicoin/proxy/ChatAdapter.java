@@ -5,7 +5,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * The one place this proxy speaks a provider's chat API rather than forwarding somebody else's
@@ -107,7 +106,7 @@ final class ChatAdapter {
     static String text(String provider, String jsonBody) {
         Object parsed;
         try {
-            parsed = new Yaml().load(jsonBody);
+            parsed = Json.load(jsonBody);
         } catch (Exception e) {
             return null;
         }

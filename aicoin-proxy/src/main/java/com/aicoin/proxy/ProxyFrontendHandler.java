@@ -23,7 +23,6 @@ import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * Inbound routing/forwarding handler, per CONTRACT.md's "Routing" section:
@@ -513,7 +512,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
     private void handleTransfer(ChannelHandlerContext ctx, String fromAddress, byte[] body) {
         Object parsed;
         try {
-            parsed = new Yaml().load(new String(body, CharsetUtil.UTF_8));
+            parsed = Json.load(new String(body, CharsetUtil.UTF_8));
         } catch (Exception e) {
             sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "invalid request body");
             return;
@@ -554,7 +553,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
     private void handleRedeemIap(ChannelHandlerContext ctx, byte[] body) {
         Object parsed;
         try {
-            parsed = new Yaml().load(new String(body, CharsetUtil.UTF_8));
+            parsed = Json.load(new String(body, CharsetUtil.UTF_8));
         } catch (Exception e) {
             sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "invalid request body");
             return;
@@ -920,8 +919,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return null;
         }
         try {
-            Object parsed = new org.yaml.snakeyaml.Yaml()
-                    .load(new String(bytes, CharsetUtil.UTF_8));
+            Object parsed = Json.load(new String(bytes, CharsetUtil.UTF_8));
             return parsed instanceof Map ? (Map<?, ?>) parsed : null;
         } catch (Exception e) {
             return null;

@@ -1098,12 +1098,15 @@ against real claim/debit/refund activity.
 
 ## Assumptions made where the contract is ambiguous
 
-- **JSON parsing.** The contract doesn't name a JSON library. Rather than
-  add a second parsing dependency, `CostCalculator` (and the wallet
-  transfer/claim body parsing in `ProxyFrontendHandler`) parse request/
-  response bodies with SnakeYAML (already required for config): valid JSON
-  is valid YAML for the simple object/array/number shapes used here, so
-  `new Yaml().load(jsonBody)` gives a plain `Map`/`List`/`Number` tree.
+- **JSON parsing.** The contract doesn't name a JSON library. Every JSON
+  body (client requests, provider responses, signed payloads, Redis
+  entries) goes through `Json.load`, a small strict parser in this codebase
+  that gives a plain `Map`/`List`/`String`/`Number`/`Boolean` tree.
+  SnakeYAML is only for the config file: these bodies used to go through
+  `new Yaml().load(...)`, but YAML is not a JSON superset in practice. It
+  rejects the `\/` escape (which Apple's JSONSerialization and Redis's
+  cjson write for every "/"), alters some raw characters, and caps
+  documents at 3 MiB.
 - **Connection failure to upstream.** The contract says to "relay the real
   error/status to the client" on connection failure, but there is no real
   HTTP status in that case (the connection never succeeded). That language
@@ -1179,8 +1182,7 @@ against real claim/debit/refund activity.
   pagination or cold-storage archive for anything older. Fine for a
   draft/prototype's admin page, not for a wallet with genuinely high
   transaction volume.
-- **cjson for the transaction-log entries, not the SnakeYAML-as-JSON
-  convention used elsewhere in this codebase.** Redis's embedded Lua
+- **cjson for the transaction-log entries, not hand-built JSON strings.** Redis's embedded Lua
   interpreter ships `cjson` built in; using it inside the Lua scripts to
   build each transaction-log entry (rather than string-concatenating JSON
   by hand, as the claim/pool responses do in Java) is simpler and can't
@@ -1195,8 +1197,8 @@ against real claim/debit/refund activity.
   auth doesn't have this concern at all, since a token is meant to be
   reused many times by design; its own risk (a leaked token) is mitigated
   by expiry + the revocation endpoint instead.
-- **Token payload parsing** reuses the same SnakeYAML-as-JSON-parser
-  approach as the rest of this codebase (see "JSON parsing" above) rather
+- **Token payload parsing** reuses the same `Json.load`
+  parser as the rest of this codebase (see "JSON parsing" above) rather
   than adding a JWT library — the token format is JWT-*shaped* but
   deliberately not a general JWT implementation (no `alg` field, no
   algorithm negotiation): the embedded address is always the verification

@@ -16,7 +16,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * The consolidated endpoints: {@code POST /text}, {@code POST /image}, {@code POST /audio}.
@@ -228,7 +227,7 @@ final class CapabilityHandler {
             return null;
         }
         try {
-            Object parsed = new Yaml().load(new String(bytes, CharsetUtil.UTF_8));
+            Object parsed = Json.load(new String(bytes, CharsetUtil.UTF_8));
             return parsed instanceof Map ? (Map<?, ?>) parsed : null;
         } catch (Exception e) {
             return null;

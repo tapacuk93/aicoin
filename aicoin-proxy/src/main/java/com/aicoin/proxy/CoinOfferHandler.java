@@ -15,7 +15,6 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * Serves the current offer, per CONTRACT.md's "The current offer" section: {@code GET /iap/offer}
@@ -110,7 +109,7 @@ final class CoinOfferHandler {
         }
         Object parsed;
         try {
-            parsed = new Yaml().load(new String(ByteBufUtil.getBytes(request.content()), CharsetUtil.UTF_8));
+            parsed = Json.load(new String(ByteBufUtil.getBytes(request.content()), CharsetUtil.UTF_8));
         } catch (Exception e) {
             sendError(ctx, HttpResponseStatus.BAD_REQUEST, "invalid JSON body", false);
             return;

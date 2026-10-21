@@ -6,7 +6,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * Pure logic for the <b>current offer</b> — the single coin amount every app is selling right
@@ -114,7 +113,7 @@ final class CoinOffer {
     static List<Tier> tiers(String packagesJson) {
         Object parsed;
         try {
-            parsed = new Yaml().load(packagesJson);
+            parsed = Json.load(packagesJson);
         } catch (Exception e) {
             return List.of();
         }
@@ -226,7 +225,7 @@ final class CoinOffer {
         }
         Object parsed;
         try {
-            parsed = new Yaml().load(offerJson);
+            parsed = Json.load(offerJson);
         } catch (Exception e) {
             return Optional.empty();
         }

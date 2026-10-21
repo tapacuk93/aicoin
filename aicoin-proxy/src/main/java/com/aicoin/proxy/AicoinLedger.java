@@ -1055,12 +1055,11 @@ final class AicoinLedger implements AutoCloseable {
     /**
      * The {@code at} field of a transaction entry, or 0 for one that can't be parsed — an
      * unparseable entry sorts to the end of the feed rather than taking the whole page down with it.
-     * Parsed with SnakeYAML, which reads JSON as a subset of YAML, the same way
-     * {@link CostCalculator} reads provider usage bodies.
+     * Parsed with {@link Json#load}, like every other JSON body here.
      */
     private static double timestampOf(String entryJson) {
         try {
-            Object parsed = new org.yaml.snakeyaml.Yaml().load(entryJson);
+            Object parsed = Json.load(entryJson);
             if (parsed instanceof Map) {
                 Object at = ((Map<?, ?>) parsed).get("at");
                 if (at instanceof Number) {

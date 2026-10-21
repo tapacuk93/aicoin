@@ -5,7 +5,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * Pure-function pieces of the IAP coin-package list stored as a single JSON array in the Redis
@@ -132,7 +131,7 @@ final class IapPackages {
     static ValidationResult validate(String bodyJson) {
         Object parsed;
         try {
-            parsed = new Yaml().load(bodyJson);
+            parsed = Json.load(bodyJson);
         } catch (Exception e) {
             return ValidationResult.invalid("invalid JSON body");
         }
@@ -170,7 +169,7 @@ final class IapPackages {
     static Optional<Entry> findByProductId(String packagesJson, String productId) {
         Object parsed;
         try {
-            parsed = new Yaml().load(packagesJson);
+            parsed = Json.load(packagesJson);
         } catch (Exception e) {
             return Optional.empty();
         }

@@ -21,7 +21,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * An OAuth access token for a Google service account, kept fresh in the background.
@@ -85,7 +84,7 @@ final class GoogleServiceAccount {
     }
 
     static GoogleServiceAccount fromJson(String json) throws Exception {
-        Map<?, ?> key = (Map<?, ?>) new Yaml().load(json);
+        Map<?, ?> key = (Map<?, ?>) Json.load(json);
         String email = (String) key.get("client_email");
         String pem = (String) key.get("private_key");
         Object uri = key.get("token_uri");
@@ -125,7 +124,7 @@ final class GoogleServiceAccount {
             throw new IllegalStateException("token endpoint answered " + response.statusCode() + ": "
                     + response.body().substring(0, Math.min(300, response.body().length())));
         }
-        Object minted = ((Map<?, ?>) new Yaml().load(response.body())).get("access_token");
+        Object minted = ((Map<?, ?>) Json.load(response.body())).get("access_token");
         if (!(minted instanceof String) || ((String) minted).isEmpty()) {
             throw new IllegalStateException("token endpoint returned no access_token");
         }

@@ -21,7 +21,6 @@ import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * {@code POST /consortium}, per CONTRACT.md's "Consortium" section: one request answered by every
@@ -286,7 +285,7 @@ final class ConsortiumHandler {
             return null;
         }
         try {
-            Object parsed = new Yaml().load(new String(bytes, CharsetUtil.UTF_8));
+            Object parsed = Json.load(new String(bytes, CharsetUtil.UTF_8));
             return parsed instanceof Map ? (Map<?, ?>) parsed : null;
         } catch (Exception e) {
             return null;
