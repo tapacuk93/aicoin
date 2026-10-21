@@ -161,7 +161,9 @@ public struct AICoinCapabilityClient: Sendable {
         request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(token, forHTTPHeaderField: "X-Api-Key")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        // Slashes unescaped: the proxy reads bodies with a YAML parser, which has no `\/`, and a
+        // prompt with a "/" in it came back 400 "body must be JSON".
+        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
 
         let (data, response) = try await transport.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0

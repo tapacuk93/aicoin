@@ -63,6 +63,14 @@ final class AICoinCapabilityClientTests: XCTestCase {
         XCTAssertEqual(body["max_tokens"] as? Int, 300)
     }
 
+    func testSlashesGoUnescapedBecauseTheProxyReadsBodiesAsYAML() async throws {
+        let transport = StubTransport(#"{"answer":"x"}"#)
+        _ = try await client(transport).text(prompt: "practical/theoretical, 1/2")
+        let raw = String(decoding: try XCTUnwrap(transport.requests.first?.httpBody), as: UTF8.self)
+        XCTAssertTrue(raw.contains("practical/theoretical, 1/2"))
+        XCTAssertFalse(raw.contains(#"\/"#))
+    }
+
     func testUnsetFieldsAreLeftOutRatherThanSentAsNull() async throws {
         let transport = StubTransport(#"{"answer":"x"}"#)
         _ = try await client(transport).text(prompt: "p")
