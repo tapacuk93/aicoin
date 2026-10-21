@@ -1,0 +1,8 @@
+[Unit]
+Description=Push aicoin-proxy overhead metrics to CloudWatch
+After=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/aicoin-proxy-metrics.env
+ExecStart=/usr/bin/python3 /opt/aicoin-proxy-metrics/push-overhead-metrics.py

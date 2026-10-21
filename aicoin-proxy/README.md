@@ -393,8 +393,18 @@ after the fact.
 ```
 {"at":"2026-08-12T16:43:59.608Z","method":"POST","path":"/v1/text-to-speech/x/with-timestamps",
  "provider":"elevenlabs","wallet":"281c9103...","status":-1,"req_bytes":52,"resp_bytes":0,
- "duration_ms":4963,"coins":"","outcome":"client_gone"}
+ "duration_ms":4963,"upstream_ms":4950,"overhead_ms":13,"coins":"","outcome":"client_gone"}
 ```
+
+`upstream_ms` is the wall-clock time at least one provider call for the request
+was in flight (connect through response, failure or timeout); `overhead_ms` is
+`duration_ms - upstream_ms`, floored at 0 — the latency **this proxy** added.
+Retries add up; a consortium panel asked in parallel counts once, from the
+first send to the last answer (the union of the intervals — see
+`UpstreamTimer`). Requests that never call a provider (wallet, IAP, health)
+have `upstream_ms:0`, so all of their time is overhead. Every response also
+carries the figure as `X-Aicoin-Overhead-Ms`. The overhead is pushed to
+CloudWatch with an email alarm — see [`ops/README.md`](ops/README.md).
 
 JSON Lines so a line survives being grepped out of context and the file can be
 fed straight to `jq`:
@@ -402,6 +412,8 @@ fed straight to `jq`:
 ```bash
 # slowest calls
 jq -s 'sort_by(-.duration_ms) | .[:20]' logs/access.log.0
+# where the proxy itself was slow
+jq -s 'sort_by(-.overhead_ms) | .[:20]' logs/access.log.0
 # requests that never got a response — clients that gave up waiting
 jq 'select(.outcome == "client_gone")' logs/access.log.0
 # spend by provider
@@ -438,7 +450,9 @@ unwritable path is reported once at startup and then ignored — logging must
 never be a reason to stop serving traffic.
 
 Under Docker the log lives on a bind mount (`./logs`), since otherwise every
-redeploy discards exactly the history worth reading after an incident.
+redeploy discards exactly the history worth reading after an incident. In
+production that is `~/aicoin/logs` on the box, mounted by the box-only
+`docker-compose.prod.yml` (added 2026-10-21; before that each deploy wiped it).
 
 ## Forwarding pipeline
 
