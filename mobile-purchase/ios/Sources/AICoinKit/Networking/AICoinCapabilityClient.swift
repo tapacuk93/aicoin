@@ -102,9 +102,13 @@ public struct AICoinCapabilityClient: Sendable {
     /// costs nothing to say and is what the learner always sent.
     public func text(
         prompt: String, context: String? = nil, subject: String? = nil, provider: String? = nil,
-        escalate: Bool? = nil, maxTokens: Int? = nil, timeout: TimeInterval = 120
+        escalate: Bool? = nil, maxTokens: Int? = nil, timeout: TimeInterval = 120,
+        fastest: Bool? = nil
     ) async throws -> TextAnswer {
         var body: [String: Any] = ["prompt": prompt]
+        // Whoever answers soonest among the providers rated for it, rather than the best-rated:
+        // for short requests someone is waiting on.
+        if let fastest { body["fastest"] = fastest }
         if let context, !context.isEmpty { body["context"] = context }
         if let subject { body["subject"] = subject }
         if let provider { body["provider"] = provider }
