@@ -655,6 +655,25 @@ else
   fail "expected 200 from /consortium, got $code: $(cat "$WORKDIR/t25.json")"
 fi
 
+log "--- test 25b: an editor that hands back a piece of the answer is not taken for the answer ---"
+NOW=$(epoch_seconds)
+HEIDI_TOKEN=$(build_token "$KEY_HEIDI" "$ADDR_HEIDI" "$NOW" "$((NOW + 86400))")
+code=$(curl -s -o "$WORKDIR/t25b.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $HEIDI_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"EDITOR_CUTS: what is an aicoin?","providers":["openai","anthropic"]}')
+if [ "$code" = "200" ]; then
+  read -r answer stage <<<"$(python3 -c "
+import json
+d = json.load(open('$WORKDIR/t25b.json'))
+print(d['answer'].replace(' ', '_'), ','.join(e['stage'] for e in d['errors']))
+")"
+  [ "$answer" = "DRAFT_from_mock" ] && pass "a merge outside the markers falls back to a whole draft" \
+    || fail "expected the first draft, got $answer"
+  [ "$stage" = "merge" ] && pass "the rejected merge is reported in errors" || fail "expected a merge error, got: $stage"
+else
+  fail "expected 200 from /consortium, got $code: $(cat "$WORKDIR/t25b.json")"
+fi
+
 log "--- test 26: reviewers that never clear are ended by the round cap, not by agreement ---"
 NOW=$(epoch_seconds)
 IVAN_TOKEN=$(build_token "$KEY_IVAN" "$ADDR_IVAN" "$NOW" "$((NOW + 86400))")

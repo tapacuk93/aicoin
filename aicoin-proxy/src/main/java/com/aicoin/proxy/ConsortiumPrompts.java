@@ -32,6 +32,22 @@ final class ConsortiumPrompts {
      */
     static final String ESCALATE = "NEEDS CONSORTIUM";
 
+    /**
+     * The lines an editor puts around every merged or revised answer, alone on their own lines,
+     * with the whole answer between them. The editor's reply replaces the answer outright, so a
+     * reply that is only part of one must not be able to pass for it: an editor once handed back a
+     * stretch from the middle of the text it was revising — opening inside a tag, every word
+     * numbered, stopping mid-sentence — and that piece went out as the call's answer. A piece
+     * lacks one end or the other; see {@link #editedAnswer}.
+     */
+    static final String ANSWER_OPEN = "<<<ANSWER";
+    static final String ANSWER_CLOSE = "ANSWER>>>";
+
+    private static final String ENVELOPE = "\n\nWrite the whole answer, from its first word to its last,"
+            + " between a line containing only " + ANSWER_OPEN + " and a line containing only "
+            + ANSWER_CLOSE + ", with nothing before or after them. Never a part of the answer, an"
+            + " excerpt or a list of changes: what is between them replaces the answer entirely.";
+
     private ConsortiumPrompts() {
     }
 
@@ -107,7 +123,8 @@ final class ConsortiumPrompts {
                 + " what is wrong or unsupported, and resolve contradictions between them on the merits"
                 + " rather than by majority. Where the drafts genuinely disagree and you cannot settle"
                 + " it, say so in the answer instead of picking silently.\n\n"
-                + "Do not describe the drafts, credit them, or mention the panel. Output only the answer.";
+                + "Do not describe the drafts, credit them, or mention the panel. Output only the answer."
+                + ENVELOPE;
     }
 
     static String reviewSystem() {
@@ -136,7 +153,8 @@ final class ConsortiumPrompts {
                 + " way to a mistaken one makes the answer worse. Change nothing the comments did not"
                 + " reach.\n\n"
                 + "Do not mention the reviews, the comments or the panel, and do not describe your"
-                + " changes. Output only the revised answer.";
+                + " changes. Output only the revised answer."
+                + ENVELOPE;
     }
 
     /**
@@ -190,7 +208,8 @@ final class ConsortiumPrompts {
     }
 
     static String mergeTask() {
-        return "Merge the drafts above into the single best answer to the request. Output only the answer.";
+        return "Merge the drafts above into the single best answer to the request. Output only the"
+                + " answer, whole, between " + ANSWER_OPEN + " and " + ANSWER_CLOSE + ".";
     }
 
     static String reviewTask() {
@@ -200,7 +219,29 @@ final class ConsortiumPrompts {
 
     static String reviseTask() {
         return "Revise the answer as it now stands to address the comments in the latest round, rejecting"
-                + " any that are mistaken. Output only the revised answer.";
+                + " any that are mistaken. Output only the revised answer, whole, between " + ANSWER_OPEN
+                + " and " + ANSWER_CLOSE + ".";
+    }
+
+    /**
+     * The answer inside an editor's merge or revision, or null when the reply is not exactly one
+     * whole answer: {@link #ANSWER_OPEN} on the first line, {@link #ANSWER_CLOSE} on the last,
+     * each once, and something between them. Strict for the reason {@link #CLEAN_REVIEW} is — a
+     * reply that is nearly right is read as not right, and the answer it would have replaced
+     * stands.
+     */
+    static String editedAnswer(String reply) {
+        if (reply == null) {
+            return null;
+        }
+        String text = reply.strip();
+        if (!text.startsWith(ANSWER_OPEN + "\n") || !text.endsWith("\n" + ANSWER_CLOSE)
+                || text.indexOf(ANSWER_OPEN, 1) >= 0
+                || text.indexOf(ANSWER_CLOSE) != text.length() - ANSWER_CLOSE.length()) {
+            return null;
+        }
+        String answer = text.substring(ANSWER_OPEN.length(), text.length() - ANSWER_CLOSE.length()).strip();
+        return answer.isEmpty() ? null : answer;
     }
 
     /**

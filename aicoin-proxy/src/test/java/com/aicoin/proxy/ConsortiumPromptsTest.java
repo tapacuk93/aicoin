@@ -1,6 +1,8 @@
 package com.aicoin.proxy;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -109,5 +111,22 @@ class ConsortiumPromptsTest {
         String system = ConsortiumPrompts.singleSystem();
         assertTrue(system.contains(ConsortiumPrompts.ESCALATE));
         assertTrue(system.contains("costs"));
+    }
+
+    @Test
+    void anEditorsAnswerCountsOnlyWhenItIsWhole() {
+        // The prompts and the parser have to agree, or every merge falls back to a draft.
+        assertTrue(ConsortiumPrompts.mergeSystem(2).contains(ConsortiumPrompts.ANSWER_OPEN));
+        assertTrue(ConsortiumPrompts.reviseSystem(1).contains(ConsortiumPrompts.ANSWER_CLOSE));
+        assertEquals("<p>All of it.</p>",
+                ConsortiumPrompts.editedAnswer("<<<ANSWER\n<p>All of it.</p>\nANSWER>>>\n"));
+        // A stretch from the middle of the answer, as an editor once returned one.
+        assertNull(ConsortiumPrompts.editedAnswer("\">wi represents dynamic weights, such as rare-earth</p>"));
+        assertNull(ConsortiumPrompts.editedAnswer("<<<ANSWER\n<p>Cut off before the end"));
+        assertNull(ConsortiumPrompts.editedAnswer("<p>No start</p>\nANSWER>>>"));
+        assertNull(ConsortiumPrompts.editedAnswer("Here it is:\n<<<ANSWER\n<p>Text.</p>\nANSWER>>>"));
+        assertNull(ConsortiumPrompts.editedAnswer("<<<ANSWER\nOne\nANSWER>>>\n<<<ANSWER\nTwo\nANSWER>>>"));
+        assertNull(ConsortiumPrompts.editedAnswer("<<<ANSWER\n\nANSWER>>>"));
+        assertNull(ConsortiumPrompts.editedAnswer(null));
     }
 }

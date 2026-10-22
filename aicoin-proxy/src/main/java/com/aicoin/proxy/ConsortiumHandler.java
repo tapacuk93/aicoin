@@ -463,7 +463,12 @@ final class ConsortiumHandler {
                     (text, error) -> {
                         // An editor that failed to merge must not sink the call: the first draft is
                         // a real answer to the request, and the review rounds still run over it.
-                        String merged = text != null ? text : draftsSnapshot.get(0);
+                        // A merge that is not one whole answer (see editedAnswer) counts as failed.
+                        String edited = ConsortiumPrompts.editedAnswer(text);
+                        if (text != null && edited == null) {
+                            recordError("merge", editor, "reply was not one whole answer");
+                        }
+                        String merged = edited != null ? edited : draftsSnapshot.get(0);
                         setAnswer(merged);
                         context.addAnswer("The answer as it now stands", merged);
                         beginReviewRound();
@@ -551,7 +556,13 @@ final class ConsortiumHandler {
             }
             turn(editor, ConsortiumPrompts.reviseSystem(commentsSnapshot.size()),
                     context.forTurn(ConsortiumPrompts.reviseTask()), "revise",
-                    (text, error) -> {
+                    (rawText, error) -> {
+                        // A revision that is not one whole answer (see editedAnswer) is no revision:
+                        // the answer it would have replaced stands.
+                        String text = ConsortiumPrompts.editedAnswer(rawText);
+                        if (rawText != null && text == null) {
+                            recordError("revise", editor, "reply was not one whole answer");
+                        }
                         if (text == null) {
                             // The comments stand unanswered and there is no revised text to review.
                             // Returning the answer as it was, and saying so, beats another round
