@@ -206,3 +206,17 @@ final class WalletClientTests: XCTestCase {
 private extension String {
     func repeated(_ n: Int) -> String { String(repeating: self, count: n) }
 }
+
+final class AICoinErrorWordingTests: XCTestCase {
+    func testAServerFailureIsNeverWorded() {
+        let shown = AICoinError.server(status: 502, message: "anthropic: Your credit balance is too low").errorDescription ?? ""
+        XCTAssertFalse(shown.contains("credit"), shown)
+        XCTAssertFalse(shown.contains("502"), shown)
+        XCTAssertTrue(shown.hasSuffix("(AIC-401)"), shown)
+    }
+
+    func testTheProxysOwnVerdictIsKept() {
+        XCTAssertEqual(AICoinError.server(status: 409, message: "This purchase was already redeemed.").errorDescription,
+                       "This purchase was already redeemed. (AIC-402)")
+    }
+}

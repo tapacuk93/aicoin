@@ -5,7 +5,7 @@ import Foundation
 /// — per this task's brief, apps built on this package have **no bring-your-own-key fallback**
 /// anymore, so this is a typed error meant to be caught by app UI and turned into a "buy more
 /// AICoin" prompt (see `BuyAICoinSheet`), not silently retried against a user-supplied key.
-public enum AICoinError: Error, LocalizedError, Sendable, Equatable {
+public enum AICoinError: Error, AICoinCodedError, Sendable, Equatable {
     /// The wallet's balance was too low to cover this call (< 1.0 aicoin). `balance`, when the
     /// proxy's error body parsed successfully, is the wallet's actual balance at the time.
     case insufficientBalance(balance: Double?)
@@ -23,7 +23,18 @@ public enum AICoinError: Error, LocalizedError, Sendable, Equatable {
     /// The response body wasn't parseable JSON where JSON was expected.
     case malformedResponse
 
-    public var errorDescription: String? {
+    public var code: AICoinErrorCode {
+        switch self {
+        case .insufficientBalance: return .insufficientBalance
+        case .missingToken: return .walletNotSetUp
+        case .server(let status, _): return status >= 500 ? .serviceUnavailable : .serviceRejected
+        case .malformedResponse: return .serviceMalformed
+        }
+    }
+
+    public var errorDescription: String? { code.worded(message) }
+
+    private var message: String {
         switch self {
         case .insufficientBalance(let balance):
             if let balance {
@@ -32,10 +43,15 @@ public enum AICoinError: Error, LocalizedError, Sendable, Equatable {
             return "Your AICoin balance is too low for this call. Buy more AICoin to continue."
         case .missingToken:
             return "No AICoin wallet is set up for AI calls yet."
-        case .server(let status, let message):
-            return message ?? "AICoin server error (\(status))."
+        // A 5xx says something broke on the server or upstream of it — its text ("upstream
+        // provider: credit balance too low") is the operator's, not the reader's. A 4xx is the
+        // proxy's own verdict on this request and is written to be read.
+        case .server(let status, _) where status >= 500:
+            return "The AICoin service isn't available right now. Please try again later."
+        case .server(_, let message):
+            return message ?? "The AICoin service couldn't complete this request."
         case .malformedResponse:
-            return "Received an unexpected response from the AICoin server."
+            return "The AICoin service sent a reply the app couldn't read. Please try again."
         }
     }
 }
