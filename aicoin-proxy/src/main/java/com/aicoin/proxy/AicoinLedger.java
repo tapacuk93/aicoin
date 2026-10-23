@@ -1256,6 +1256,70 @@ final class AicoinLedger implements AutoCloseable {
      * single grant is checked, and answering it by scanning the keyspace is
      * how a ledger becomes slow in exactly the wrong place.
      */
+    /**
+     * Remember that {@code address} created ElevenLabs voice {@code voiceId} — see {@link
+     * VoiceOwnership}. The set is written first for the same reason as {@link #addGrant}: a voice in
+     * the wallet's list with no owner key is merely listed, while an owner key with no list entry
+     * would hide the wallet's own voice from it. Calls {@code onDone} either way; a failure only
+     * means the voice is treated as nobody's, which is how voices made before this existed are.
+     */
+    void addVoiceOwner(String address, String voiceId, Runnable onDone) {
+        commands.sadd(ownedVoicesKey(address), voiceId).whenComplete((added, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger voice ownership write failed for " + address, err);
+                onDone.run();
+                return;
+            }
+            commands.set(voiceOwnerKey(voiceId), address).whenComplete((ok, err2) -> {
+                if (err2 != null) {
+                    LOG.log(Level.WARNING, "ledger voice owner write failed for " + address, err2);
+                }
+                onDone.run();
+            });
+        });
+    }
+
+    /**
+     * Who created {@code voiceId}: {@code Optional.of(Optional.empty())} for a voice nobody is
+     * recorded as owning, {@code Optional.empty()} when the ledger could not be asked.
+     */
+    void getVoiceOwner(String voiceId, Consumer<Optional<Optional<String>>> onResult) {
+        commands.get(voiceOwnerKey(voiceId)).whenComplete((value, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger voice owner lookup failed", err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            onResult.accept(Optional.of(Optional.ofNullable(value)));
+        });
+    }
+
+    /** The voices {@code address} created, or empty when the ledger could not be asked. */
+    void listOwnedVoices(String address, Consumer<Optional<java.util.Set<String>>> onResult) {
+        commands.smembers(ownedVoicesKey(address)).whenComplete((ids, err) -> {
+            if (err != null || ids == null) {
+                LOG.log(Level.WARNING, "ledger owned-voices listing failed for " + address, err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            onResult.accept(Optional.of(ids));
+        });
+    }
+
+    /** Forget a deleted voice. Fire-and-forget: a stale entry names a voice that no longer exists. */
+    void removeVoiceOwner(String address, String voiceId) {
+        commands.srem(ownedVoicesKey(address), voiceId);
+        commands.del(voiceOwnerKey(voiceId));
+    }
+
+    private static String voiceOwnerKey(String voiceId) {
+        return "aicoin:" + TAG + ":voice-owner:" + voiceId;
+    }
+
+    private static String ownedVoicesKey(String address) {
+        return "aicoin:" + TAG + ":voices:" + address;
+    }
+
     private static String grantKey(String address, String id) {
         return "aicoin:" + TAG + ":grant:" + address + ":" + id;
     }

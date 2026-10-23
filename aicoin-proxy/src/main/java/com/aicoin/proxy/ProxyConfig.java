@@ -40,6 +40,12 @@ public final class ProxyConfig {
     private final int freeCoinsPoolSize;
     private final String adminToken;
     private final Map<String, ProviderConfig> providers;
+    /**
+     * {@code providers.<name>.allowedPaths}: what the generic {@code X-AI} route forwards for each
+     * provider — see {@link AllowedTargets}. Set by {@link #load} after construction, so the long
+     * constructor is unchanged; a config built any other way gets the bundled lists.
+     */
+    private Map<String, List<String>> allowedPaths = AllowedTargets.DEFAULTS;
     private final ModelPricing modelPricing;
     private final double coinValueUsd;
     private final boolean meteredBilling;
@@ -182,6 +188,11 @@ public final class ProxyConfig {
     }
 
     /** @return the full config entry for the given (already-lowercased, known) provider, or null if unknown. */
+    /** @return the endpoint patterns the generic route forwards for {@code provider}; empty forwards nothing. */
+    public List<String> getAllowedPaths(String provider) {
+        return allowedPaths.getOrDefault(provider, List.of());
+    }
+
     public ProviderConfig getProvider(String provider) {
         return providers.get(provider);
     }
@@ -353,6 +364,7 @@ public final class ProxyConfig {
                 false, null, List.of("GET /v1/voices")));
 
         Map<String, ProviderConfig> providers = new LinkedHashMap<>();
+        Map<String, List<String>> allowedPaths = new LinkedHashMap<>();
         for (String provider : PROVIDERS) {
             ProviderConfig def = defaults.get(provider);
             String prefix = "providers." + provider + ".";
@@ -377,6 +389,16 @@ public final class ProxyConfig {
             if (envFreePaths != null && !envFreePaths.isEmpty()) {
                 freePaths = FreeTargets.parseEnvList(envFreePaths);
             }
+
+            List<String> allowed = AllowedTargets.parseYamlList(getNested(yaml, prefix + "allowedPaths"));
+            if (allowed == null) {
+                allowed = AllowedTargets.defaultsFor(provider);
+            }
+            String envAllowed = env.get(envPrefix + "ALLOWEDPATHS");
+            if (envAllowed != null && !envAllowed.isEmpty()) {
+                allowed = AllowedTargets.parseEnvList(envAllowed);
+            }
+            allowedPaths.put(provider, allowed);
 
             GoogleServiceAccount serviceAccount = null;
             if ("googletts".equals(provider) && (apiKey == null || apiKey.isEmpty())) {
@@ -428,12 +450,14 @@ public final class ProxyConfig {
         HealthProbeConfig healthProbe = parseHealthProbe(yaml, env);
         CapabilityConfig capabilities = parseCapabilities(yaml, env);
 
-        return new ProxyConfig(port, redisHost, redisPort, redisUsername, redisPassword, redisSsl,
+        ProxyConfig loaded = new ProxyConfig(port, redisHost, redisPort, redisUsername, redisPassword, redisSsl,
                 decayHalflifeDays, freeClaimCooldownSeconds, signatureSkewSeconds, freeCoinsPoolSize, adminToken, providers,
                 costPerTokenUsd, defaultCostUsdPerCall, healthWindowSize, iapPackages, modelPricing,
                 coinValueUsd, meteredBilling, acceptSandboxPurchases,
                 accessLogPath, accessLogMaxBytes, accessLogCount, upstreamReadTimeoutSeconds, consortium,
                 healthProbe, capabilities);
+        loaded.allowedPaths = Map.copyOf(allowedPaths);
+        return loaded;
     }
 
     /**

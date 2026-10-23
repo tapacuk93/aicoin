@@ -74,6 +74,17 @@ final class UpstreamForwarder {
     private UpstreamForwarder() {
     }
 
+    /**
+     * Sees a successful (2xx) upstream body before the client does, and may replace it — see
+     * {@link VoiceOwnership}, which records who created a voice and narrows a voice listing to
+     * what the caller may see. {@code body} arrives decoded (no {@code Content-Encoding}); whatever
+     * is passed to {@code write} goes to the client unencoded. {@code write} must be called
+     * exactly once, on any thread.
+     */
+    interface ResponseHook {
+        void onSuccess(byte[] body, java.util.function.Consumer<byte[]> write);
+    }
+
     static void forward(EventLoopGroup group,
                          ProxyConfig config,
                          ProviderHealthTracker healthTracker,
@@ -87,6 +98,24 @@ final class UpstreamForwarder {
                          String provider,
                          String walletAddress,
                          double callCostAicoin) {
+        forward(group, config, healthTracker, ledger, clientCtx, method, forwardUri, headers, body, baseUrl,
+                provider, walletAddress, callCostAicoin, null);
+    }
+
+    static void forward(EventLoopGroup group,
+                         ProxyConfig config,
+                         ProviderHealthTracker healthTracker,
+                         AicoinLedger ledger,
+                         ChannelHandlerContext clientCtx,
+                         HttpMethod method,
+                         String forwardUri,
+                         List<Map.Entry<String, String>> headers,
+                         byte[] body,
+                         String baseUrl,
+                         String provider,
+                         String walletAddress,
+                         double callCostAicoin,
+                         ResponseHook hook) {
         URI upstreamUri;
         try {
             upstreamUri = new URI(baseUrl);
@@ -139,7 +168,7 @@ final class UpstreamForwarder {
                         ch.pipeline().addLast(new HttpObjectAggregator(MAX_CONTENT_LENGTH));
                         ch.pipeline().addLast(new UpstreamResponseHandler(
                                 config, healthTracker, ledger, clientCtx, provider, walletAddress, callCostAicoin,
-                                settled, span));
+                                settled, span, hook));
                     }
                 });
 
@@ -298,10 +327,18 @@ final class UpstreamForwarder {
         private final double callCostAicoin;
         private final AtomicBoolean settled;
         private final UpstreamTimer.Span span;
+        private final ResponseHook hook;
 
         UpstreamResponseHandler(ProxyConfig config, ProviderHealthTracker healthTracker, AicoinLedger ledger,
                                  ChannelHandlerContext clientCtx, String provider, String walletAddress, double callCostAicoin,
                                  AtomicBoolean settled, UpstreamTimer.Span span) {
+            this(config, healthTracker, ledger, clientCtx, provider, walletAddress, callCostAicoin, settled, span, null);
+        }
+
+        UpstreamResponseHandler(ProxyConfig config, ProviderHealthTracker healthTracker, AicoinLedger ledger,
+                                 ChannelHandlerContext clientCtx, String provider, String walletAddress, double callCostAicoin,
+                                 AtomicBoolean settled, UpstreamTimer.Span span, ResponseHook hook) {
+            this.hook = hook;
             this.config = config;
             this.healthTracker = healthTracker;
             this.ledger = ledger;
@@ -362,7 +399,18 @@ final class UpstreamForwarder {
                     // tell metered from flat billing without being configured for it.
                     toClient.headers().set("X-Aicoin-Charged", Long.toString(charged));
                 }
-                clientCtx.writeAndFlush(toClient);
+                if (hook != null) {
+                    byte[] decoded = decodedForPricing(response.headers(), bodyBytes).getBytes(CharsetUtil.UTF_8);
+                    hook.onSuccess(decoded, replaced -> {
+                        toClient.content().release();
+                        FullHttpResponse rewritten = toClient.replace(Unpooled.wrappedBuffer(replaced));
+                        rewritten.headers().remove(HttpHeaderNames.CONTENT_ENCODING);
+                        HttpUtil.setContentLength(rewritten, replaced.length);
+                        clientCtx.writeAndFlush(rewritten);
+                    });
+                } else {
+                    clientCtx.writeAndFlush(toClient);
+                }
             } else {
                 clientCtx.writeAndFlush(toClient);
                 refundIfBilled(ledger, walletAddress, callCostAicoin, provider);

@@ -12,6 +12,17 @@ aicoin:
   signatureSkewSeconds: 120
   freeCoinsPoolSize: 5000
   adminToken: ""
+# allowedPaths: the only endpoints the generic X-AI route forwards for a provider; anything else
+# is answered 403 before a coin is held or the provider is contacted. Every wallet's call goes out
+# under the proxy's one key per provider, so whatever a provider stores for its customer (files,
+# batches, stored responses, caches, history, voices) would be shared by every wallet — readable and
+# deletable by all of them. So this lists stateless generation and model listings only; add an
+# endpoint here only once it is certain the provider keeps nothing from it that another caller
+# could read back. Syntax: "METHOD path-glob", where * is one path segment (or part of one) and **
+# crosses segments. OpenAI POST /v1/responses is additionally forced to store:false, and ElevenLabs
+# voices are scoped to the wallet that designed them (see AllowedTargets and VoiceOwnership).
+# Env: AICOIN_PROXY_<PROVIDER>_ALLOWEDPATHS (comma-separated; "none" forwards nothing).
+#
 # freePaths: endpoints the provider does not bill the proxy for. A matching call is
 # forwarded (with the proxy's key, after the usual token auth) but costs no aicoin and
 # records no price event. Syntax: "[METHOD ]path-glob", where * matches any characters.
@@ -22,6 +33,11 @@ providers:
     authHeader: Authorization
     authPrefix: "Bearer "
     freePaths: ["GET /v1/models", "GET /v1/models/*"]
+    allowedPaths: ["POST /v1/chat/completions", "POST /v1/completions", "POST /v1/responses",
+                   "POST /v1/responses/input_tokens", "POST /v1/embeddings", "POST /v1/moderations",
+                   "POST /v1/audio/speech", "POST /v1/audio/transcriptions", "POST /v1/audio/translations",
+                   "POST /v1/images/generations", "POST /v1/images/edits", "POST /v1/images/variations",
+                   "GET /v1/models", "GET /v1/models/*"]
     probePath: /v1/models
   anthropic:
     baseUrl: https://api.anthropic.com
@@ -29,6 +45,7 @@ providers:
     authHeader: x-api-key
     authPrefix: ""
     freePaths: ["GET /v1/models", "GET /v1/models/*", "POST /v1/messages/count_tokens"]
+    allowedPaths: ["POST /v1/messages", "POST /v1/messages/count_tokens", "GET /v1/models", "GET /v1/models/*"]
     probePath: /v1/models
   google:
     baseUrl: https://generativelanguage.googleapis.com
@@ -37,6 +54,13 @@ providers:
     authQueryParamName: key
     freePaths: ["GET /v1/models", "GET /v1/models/*", "GET /v1beta/models", "GET /v1beta/models/*",
                 "POST /v1/models/*:countTokens", "POST /v1beta/models/*:countTokens"]
+    allowedPaths: ["POST /v1/models/*:generateContent", "POST /v1beta/models/*:generateContent",
+                   "POST /v1/models/*:streamGenerateContent", "POST /v1beta/models/*:streamGenerateContent",
+                   "POST /v1/models/*:countTokens", "POST /v1beta/models/*:countTokens",
+                   "POST /v1/models/*:embedContent", "POST /v1beta/models/*:embedContent",
+                   "POST /v1/models/*:batchEmbedContents", "POST /v1beta/models/*:batchEmbedContents",
+                   "POST /v1beta/models/*:predict",
+                   "GET /v1/models", "GET /v1/models/*", "GET /v1beta/models", "GET /v1beta/models/*"]
     probePath: /v1/models
   mistral:
     baseUrl: https://api.mistral.ai
@@ -44,6 +68,8 @@ providers:
     authHeader: Authorization
     authPrefix: "Bearer "
     freePaths: ["GET /v1/models", "GET /v1/models/*"]
+    allowedPaths: ["POST /v1/chat/completions", "POST /v1/fim/completions", "POST /v1/embeddings",
+                   "POST /v1/moderations", "POST /v1/chat/moderations", "GET /v1/models", "GET /v1/models/*"]
     probePath: /v1/models
   cohere:
     baseUrl: https://api.cohere.ai
@@ -52,6 +78,10 @@ providers:
     authPrefix: "Bearer "
     freePaths: ["GET /v1/models", "GET /v1/models/*", "POST /v1/tokenize", "POST /v1/detokenize",
                 "POST /v1/check-api-key"]
+    allowedPaths: ["POST /v1/chat", "POST /v2/chat", "POST /v1/generate", "POST /v1/embed", "POST /v2/embed",
+                   "POST /v1/rerank", "POST /v2/rerank", "POST /v1/classify",
+                   "POST /v1/tokenize", "POST /v1/detokenize", "POST /v1/check-api-key",
+                   "GET /v1/models", "GET /v1/models/*"]
     probePath: /v1/models
   elevenlabs:
     baseUrl: https://api.elevenlabs.io
@@ -59,6 +89,12 @@ providers:
     authHeader: xi-api-key
     authPrefix: ""
     freePaths: ["GET /v1/models", "GET /v1/voices", "GET /v1/voices/*", "GET /v1/user", "GET /v1/user/subscription"]
+    allowedPaths: ["POST /v1/text-to-speech/*", "POST /v1/text-to-speech/*/stream",
+                   "POST /v1/text-to-speech/*/with-timestamps", "POST /v1/text-to-speech/*/stream/with-timestamps",
+                   "POST /v1/sound-generation", "POST /v1/music", "POST /v1/music/stream",
+                   "POST /v1/text-to-voice/create-previews", "POST /v1/text-to-voice",
+                   "POST /v1/text-to-voice/create-voice-from-preview", "DELETE /v1/voices/*",
+                   "GET /v1/voices", "GET /v1/models"]
     # Not /v1/models: a key scoped without models_read is refused there while still being able to
     # synthesize speech, and the liveness probe would report a working backend as down.
     probePath: /v1/voices
@@ -68,6 +104,9 @@ providers:
     authHeader: Authorization
     authPrefix: "Bearer "
     freePaths: ["GET /v1/engines/list", "GET /v1/user/account", "GET /v1/user/balance"]
+    allowedPaths: ["POST /v1/generation/*/text-to-image", "POST /v1/generation/*/image-to-image",
+                   "POST /v2beta/stable-image/generate/core", "POST /v2beta/stable-image/generate/sd3",
+                   "POST /v2beta/stable-image/generate/ultra", "GET /v1/engines/list"]
     probePath: /v1/engines/list
   # Moonshot's Kimi, spoken to on its OpenAI-compatible surface. api.moonshot.ai is still the
   # API host even though the platform docs now live at kimi.ai.
@@ -77,6 +116,7 @@ providers:
     authHeader: Authorization
     authPrefix: "Bearer "
     freePaths: ["GET /v1/models", "GET /v1/models/*"]
+    allowedPaths: ["POST /v1/chat/completions", "POST /v1/tokenizers/estimate-token-count", "GET /v1/models", "GET /v1/models/*"]
     probePath: /v1/models
   # Google Cloud Text-to-Speech, for Malagasy. Not the `google` key: this API refuses API keys,
   # so it signs in as a service account — the key file Google's console downloads, by path.

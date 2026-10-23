@@ -405,7 +405,16 @@ for i in "${!PROVIDERS[@]}"; do
   outfile="$WORKDIR/t12-$provider.json"
   headerfile="$WORKDIR/t12-$provider.headers"
   bal_before=$(balance_of "$ADDR_FRANK")
-  code=$(curl -s -o "$outfile" -D "$headerfile" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
+  # Each provider's own generation path: the generic route forwards only allowlisted endpoints.
+  case "$provider" in
+    anthropic) gen_path="/v1/messages" ;;
+    google) gen_path="/v1beta/models/test:generateContent" ;;
+    cohere) gen_path="/v2/chat" ;;
+    elevenlabs) gen_path="/v1/sound-generation" ;;
+    stability) gen_path="/v2beta/stable-image/generate/core" ;;
+    *) gen_path="/v1/chat/completions" ;;
+  esac
+  code=$(curl -s -o "$outfile" -D "$headerfile" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT$gen_path" \
     -H "X-AI: $provider" -H "X-Api-Key: $FRANK_TOKEN" -H "Content-Type: application/json" -d '{"model":"test"}')
   if [ "$code" != "200" ]; then
     fail "$provider: expected 200, got $code: $(cat "$outfile")"
@@ -576,16 +585,16 @@ code=$(curl -s -o "$WORKDIR/t22b.json" -w "%{http_code}" -X POST "http://127.0.0
 [ "$code" = "402" ] && pass "paid call at the same 0 balance still 402s — free targets didn't weaken the balance gate" \
   || fail "expected 402 for a paid call at balance 0, got $code: $(cat "$WORKDIR/t22b.json")"
 
-log "--- test 23: a traversal path that would normalize onto a billed endpoint is not treated as free ---"
+log "--- test 23: a traversal path that would normalize onto a billed endpoint is refused, not freed ---"
 bal_before_traversal=$(balance_of "$ADDR_DAVE")
 code=$(curl -s -o "$WORKDIR/t23.json" -w "%{http_code}" --path-as-is \
   "http://127.0.0.1:$PROXY_PORT/v1/models/../chat/completions" -H "X-Api-Key: $FREE_TOKEN" -H "X-AI: openai")
 bal_after_traversal=$(balance_of "$ADDR_DAVE")
 spent=$(python3 -c "print(round(float('$bal_before_traversal') - float('$bal_after_traversal'), 6))")
-if [ "$code" = "200" ] && [ "$spent" = "1.0" ]; then
-  pass "/v1/models/../chat/completions was billed 1 aicoin (fails closed to paid, no free ride)"
+if [ "$code" = "403" ] && [ "$spent" = "0.0" ]; then
+  pass "/v1/models/../chat/completions was refused 403 and cost nothing (no free ride, no forward)"
 else
-  fail "expected a 1-aicoin debit for the traversal path, got code=$code spent=$spent"
+  fail "expected 403 and no debit for the traversal path, got code=$code spent=$spent"
 fi
 
 log "--- test 24: a consortium call drafts with every panelist, merges, reviews, and stops when a round is clean ---"
@@ -1003,6 +1012,64 @@ code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_P
   -H "X-Api-Key: $KATE_TOKEN" -d '{"prompt":"hi"}')
 [ "$code" = "400" ] || [ "$code" = "404" ] && pass "a capability that does not exist is not an endpoint ($code)" \
   || fail "expected 400/404 for /video, got $code"
+
+log "--- test 41: the generic route forwards stateless generation only; stored-object APIs are refused ---"
+NOW=$(epoch_seconds)
+KEY_OWEN="$WORKDIR/owen.pem"; gen_wallet "$KEY_OWEN"; ADDR_OWEN=$(wallet_address "$KEY_OWEN")
+KEY_PIA="$WORKDIR/pia.pem"; gen_wallet "$KEY_PIA"; ADDR_PIA=$(wallet_address "$KEY_PIA")
+for a in "$ADDR_OWEN" "$ADDR_PIA"; do
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" \
+    -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+    -d "{\"address\":\"$a\",\"amount\":50,\"reason\":\"e2e allowlist\",\"reference\":\"e2e-allow-$a\"}"
+done
+OWEN_TOKEN=$(build_token "$KEY_OWEN" "$ADDR_OWEN" "$NOW" "$((NOW + 86400))")
+PIA_TOKEN=$(build_token "$KEY_PIA" "$ADDR_PIA" "$NOW" "$((NOW + 86400))")
+bal_owen_before=$(balance_of "$ADDR_OWEN")
+for spec in "anthropic GET /v1/files" "anthropic POST /v1/messages/batches" "openai GET /v1/responses/resp_1" \
+            "openai GET /v1/files" "google GET /v1beta/files" "google GET /v1beta/cachedContents" \
+            "elevenlabs GET /v1/history" "elevenlabs GET /v1/voices/designed-1" "kimi GET /v1/files" \
+            "mistral GET /v1/files"; do
+  read -r prov meth p <<<"$spec"
+  code=$(curl -s -o "$WORKDIR/t41.json" -w "%{http_code}" -X "$meth" "http://127.0.0.1:$PROXY_PORT$p" \
+    -H "X-Api-Key: $OWEN_TOKEN" -H "X-AI: $prov")
+  [ "$code" = "403" ] && pass "$prov $meth $p refused 403" || fail "expected 403 for $prov $meth $p, got $code: $(cat "$WORKDIR/t41.json")"
+done
+[ "$(balance_of "$ADDR_OWEN")" = "$bal_owen_before" ] && pass "refused calls cost nothing" \
+  || fail "refused calls were billed: $bal_owen_before -> $(balance_of "$ADDR_OWEN")"
+
+code=$(curl -s -o "$WORKDIR/t41r.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/responses" \
+  -H "X-Api-Key: $OWEN_TOKEN" -H "X-AI: openai" -H "Content-Type: application/json" -d '{"model":"test","input":"hi"}')
+store=$(python3 -c "import json;print(json.load(open('$WORKDIR/t41r.json'))['received_body'].get('store'))" 2>/dev/null)
+[ "$code" = "200" ] && [ "$store" = "False" ] && pass "POST /v1/responses reached the provider with store:false" \
+  || fail "expected store:false upstream, got code=$code store=$store"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/responses" \
+  -H "X-Api-Key: $OWEN_TOKEN" -H "X-AI: openai" -d '{"model":"test","input":"hi","previous_response_id":"resp_1"}')
+[ "$code" = "400" ] && pass "previous_response_id refused 400" || fail "expected 400 for previous_response_id, got $code"
+
+log "--- test 42: ElevenLabs voices are scoped to the wallet that designed them ---"
+code=$(curl -s -o "$WORKDIR/t42a.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/text-to-voice" \
+  -H "X-Api-Key: $OWEN_TOKEN" -H "X-AI: elevenlabs" -H "Content-Type: application/json" \
+  -d '{"voice_name":"Owen private topic","voice_description":"d","generated_voice_id":"g1"}')
+OWEN_VOICE=$(python3 -c "import json;print(json.load(open('$WORKDIR/t42a.json'))['voice_id'])" 2>/dev/null)
+[ "$code" = "200" ] && [ -n "$OWEN_VOICE" ] && pass "owen designed voice $OWEN_VOICE" || fail "voice design failed: $code"
+list_ids() {
+  curl -s "http://127.0.0.1:$PROXY_PORT/v1/voices" -H "X-Api-Key: $1" -H "X-AI: elevenlabs" -H "Accept-Encoding: gzip" \
+    | python3 -c "import json,sys;print(' '.join(v['voice_id'] for v in json.load(sys.stdin)['voices']))"
+}
+owen_sees=$(list_ids "$OWEN_TOKEN"); pia_sees=$(list_ids "$PIA_TOKEN")
+[[ " $owen_sees " == *" $OWEN_VOICE "* ]] && [[ " $owen_sees " == *" 21m00Tcm4TlvDq8ikWAM "* ]] \
+  && pass "owen's listing has stock voices and his own ($owen_sees)" || fail "owen's listing wrong: $owen_sees"
+[[ " $pia_sees " != *" $OWEN_VOICE "* ]] && [[ " $pia_sees " == *" 21m00Tcm4TlvDq8ikWAM "* ]] \
+  && pass "pia's listing hides owen's voice ($pia_sees)" || fail "pia sees owen's voice: $pia_sees"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "http://127.0.0.1:$PROXY_PORT/v1/voices/$OWEN_VOICE" \
+  -H "X-Api-Key: $PIA_TOKEN" -H "X-AI: elevenlabs")
+[ "$code" = "403" ] && pass "pia cannot delete owen's voice" || fail "expected 403 deleting another wallet's voice, got $code"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "http://127.0.0.1:$PROXY_PORT/v1/voices/$OWEN_VOICE" \
+  -H "X-Api-Key: $OWEN_TOKEN" -H "X-AI: elevenlabs")
+[ "$code" = "200" ] && pass "owen deletes his own voice" || fail "expected 200 deleting own voice, got $code"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM/with-timestamps" \
+  -H "X-Api-Key: $PIA_TOKEN" -H "X-AI: elevenlabs" -H "Content-Type: application/json" -d '{"text":"hi"}')
+[ "$code" = "200" ] && pass "speech with a stock voice still forwards" || fail "expected 200 for TTS, got $code"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

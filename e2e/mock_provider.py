@@ -39,6 +39,10 @@ MOCK_IMAGE_BASE64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42m
                      "IQAAAABJRU5ErkJggg==")
 MOCK_AUDIO_BYTES = bytes([0xFF, 0xFB, 0x10, 0x00, 0x42])
 
+# The one piece of state: ElevenLabs voices designed through the proxy, so the suite can check that
+# one wallet's voices are hidden from, and cannot be deleted by, another. One account, as upstream.
+DESIGNED_VOICES = {}
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def _respond(self):
@@ -82,6 +86,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path_only.startswith("/v1/generation/") and path_only.endswith("/text-to-image"):
             self._respond_json({"artifacts": [{"base64": MOCK_IMAGE_BASE64, "finishReason": "SUCCESS"}]})
+            return
+        if self.command == "POST" and path_only in ("/v1/text-to-voice", "/v1/text-to-voice/create-voice-from-preview"):
+            voice_id = "designed-%d" % (len(DESIGNED_VOICES) + 1)
+            DESIGNED_VOICES[voice_id] = parsed_body.get("voice_name", "")
+            self._respond_json({"voice_id": voice_id, "name": DESIGNED_VOICES[voice_id]})
+            return
+        if self.command == "GET" and path_only == "/v1/voices":
+            voices = [{"voice_id": "21m00Tcm4TlvDq8ikWAM", "name": "Rachel", "category": "premade"}]
+            voices += [{"voice_id": k, "name": v, "category": "generated"} for k, v in DESIGNED_VOICES.items()]
+            self._respond_json({"voices": voices})
+            return
+        if self.command == "DELETE" and path_only.startswith("/v1/voices/"):
+            DESIGNED_VOICES.pop(path_only[len("/v1/voices/"):], None)
+            self._respond_json({"status": "ok"})
+            return
+        if self.command == "POST" and path_only == "/v1/responses":
+            self._respond_json({"received_body": parsed_body, "usage": {"total_tokens": 100}})
             return
         if path_only.startswith("/v1/text-to-speech/") or path_only == "/v1/audio/speech":
             # Raw bytes, as both speech APIs answer. Deliberately not JSON: reading these as text
@@ -185,6 +206,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._respond()
 
     def do_POST(self):
+        self._respond()
+
+    def do_DELETE(self):
         self._respond()
 
     def log_message(self, fmt, *args):

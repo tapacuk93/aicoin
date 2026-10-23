@@ -343,6 +343,54 @@ final class Json {
         }
     }
 
+    /**
+     * Writes back what {@link #load} produced: maps, lists, strings, numbers, booleans and null.
+     * Used only where the proxy must hand a provider's document on with parts removed (see {@link
+     * VoiceOwnership}); everything it does not remove goes out as it came in, save for number
+     * spelling ({@code 1.50} becomes {@code 1.5}).
+     */
+    static String write(Object value) {
+        StringBuilder out = new StringBuilder();
+        write(value, out);
+        return out.toString();
+    }
+
+    private static void write(Object value, StringBuilder out) {
+        if (value == null) {
+            out.append("null");
+        } else if (value instanceof String) {
+            out.append(string((String) value));
+        } else if (value instanceof Map) {
+            out.append('{');
+            boolean first = true;
+            for (Map.Entry<?, ?> e : ((Map<?, ?>) value).entrySet()) {
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                out.append(string(String.valueOf(e.getKey()))).append(':');
+                write(e.getValue(), out);
+            }
+            out.append('}');
+        } else if (value instanceof List) {
+            out.append('[');
+            boolean first = true;
+            for (Object item : (List<?>) value) {
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                write(item, out);
+            }
+            out.append(']');
+        } else if (value instanceof Double) {
+            double d = (Double) value;
+            out.append(Double.isFinite(d) ? Double.toString(d) : "null");
+        } else {
+            out.append(value);
+        }
+    }
+
     /** @return {@code value} as a quoted, escaped JSON string — or {@code null} (unquoted) when it is null. */
     static String string(String value) {
         if (value == null) {

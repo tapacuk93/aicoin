@@ -301,6 +301,24 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         String provider = providerOpt.get();
         ProviderConfig providerConfig = config.getProvider(provider);
 
+        // Only stateless generation and listing endpoints are forwarded. Every wallet's call goes
+        // out under the one shared provider key, so anything a provider stores (files, batches,
+        // stored responses, history, voices) would be readable and deletable by every wallet —
+        // see AllowedTargets. Refused before any coin is held or any provider is contacted.
+        if (!AllowedTargets.isAllowed(request.method().name(), path, config.getAllowedPaths(provider))) {
+            sendJsonError(ctx, HttpResponseStatus.FORBIDDEN, request.method().name() + " " + path
+                    + " is not available through the AICoin proxy for " + provider
+                    + ": only stateless generation endpoints are forwarded, because every wallet shares one provider"
+                    + " account and anything stored there would be visible to all of them");
+            return;
+        }
+        AllowedTargets.BodyDecision bodyDecision = AllowedTargets.checkBody(provider, request.method().name(), path,
+                ByteBufUtil.getBytes(request.content()), request.headers().get(HttpHeaderNames.CONTENT_ENCODING));
+        if (bodyDecision.isRefused()) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, bodyDecision.error());
+            return;
+        }
+
         AuthInjector.Injection injection = AuthInjector.compute(providerConfig);
 
         List<Map.Entry<String, String>> forwardHeaders = new ArrayList<>();
@@ -325,7 +343,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         }
         String finalForwardUri = forwardUri;
 
-        byte[] bodyBytes = ByteBufUtil.getBytes(request.content());
+        byte[] bodyBytes = bodyDecision.body();
         HttpMethod method = request.method();
 
         // A free target (model/voice listing, token counting, account lookup) costs the proxy
@@ -342,25 +360,94 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             }
             withLiveGrant(ctx, authResult, () -> {
                 String walletAddress = authResult.getAddress();
-                if (freeTarget) {
-                    UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, finalForwardUri,
-                            forwardHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
-                            walletAddress, FREE_TARGET_COST_AICOIN);
+                Optional<String> deleted = VoiceOwnership.deletedVoice(provider, method.name(), path);
+                if (!deleted.isPresent()) {
+                    forwardPaid(ctx, method, finalForwardUri, forwardHeaders, bodyBytes, providerConfig, provider,
+                            walletAddress, freeTarget, voiceHook(provider, method.name(), path, walletAddress, null));
                     return;
                 }
-                ledger.debitForCall(walletAddress, CALL_COST_AICOIN, provider, debit -> {
-                    if (!debit.isReachable()) {
-                        sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
-                    } else if (!debit.isSuccess()) {
-                        sendInsufficientBalance(ctx, debit.getBalance());
+                // Only the wallet that made a voice may delete it; see VoiceOwnership for why a
+                // voice nobody is recorded as owning stays deletable.
+                ledger.getVoiceOwner(deleted.get(), owner -> {
+                    if (!owner.isPresent()) {
+                        sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not check who owns this voice");
+                    } else if (owner.get().isPresent() && !owner.get().get().equals(walletAddress)) {
+                        sendJsonError(ctx, HttpResponseStatus.FORBIDDEN, "this voice belongs to another wallet");
                     } else {
-                        UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, finalForwardUri,
-                                forwardHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
-                                walletAddress, CALL_COST_AICOIN);
+                        forwardPaid(ctx, method, finalForwardUri, forwardHeaders, bodyBytes, providerConfig, provider,
+                                walletAddress, freeTarget, voiceHook(provider, method.name(), path, walletAddress,
+                                        deleted.get()));
                     }
                 });
             });
         });
+    }
+
+    /** The balance gate (skipped for a free target), then the forward. */
+    private void forwardPaid(ChannelHandlerContext ctx, HttpMethod method, String forwardUri,
+                             List<Map.Entry<String, String>> forwardHeaders, byte[] bodyBytes,
+                             ProviderConfig providerConfig, String provider, String walletAddress, boolean freeTarget,
+                             UpstreamForwarder.ResponseHook hook) {
+        List<Map.Entry<String, String>> headers = forwardHeaders;
+        if (hook != null) {
+            // The hook reads the answer, so ask for it unencoded.
+            headers = new ArrayList<>();
+            for (Map.Entry<String, String> h : forwardHeaders) {
+                if (!h.getKey().equalsIgnoreCase(HttpHeaderNames.ACCEPT_ENCODING.toString())) {
+                    headers.add(h);
+                }
+            }
+        }
+        List<Map.Entry<String, String>> finalHeaders = headers;
+        if (freeTarget) {
+            UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, forwardUri,
+                    finalHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
+                    walletAddress, FREE_TARGET_COST_AICOIN, hook);
+            return;
+        }
+        ledger.debitForCall(walletAddress, CALL_COST_AICOIN, provider, debit -> {
+            if (!debit.isReachable()) {
+                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
+            } else if (!debit.isSuccess()) {
+                sendInsufficientBalance(ctx, debit.getBalance());
+            } else {
+                UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, forwardUri,
+                        finalHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
+                        walletAddress, CALL_COST_AICOIN, hook);
+            }
+        });
+    }
+
+    /**
+     * What to do with a successful ElevenLabs voice call's answer — see {@link VoiceOwnership}:
+     * record the creator of a new voice, narrow a listing to what this wallet may see, forget a
+     * deleted voice. Null for every other call, which is relayed untouched.
+     */
+    private UpstreamForwarder.ResponseHook voiceHook(String provider, String method, String path,
+                                                     String walletAddress, String deletedVoiceId) {
+        if (deletedVoiceId != null) {
+            return (body, write) -> {
+                ledger.removeVoiceOwner(walletAddress, deletedVoiceId);
+                write.accept(body);
+            };
+        }
+        if (VoiceOwnership.createsVoice(provider, method, path)) {
+            return (body, write) -> {
+                Optional<String> id = VoiceOwnership.createdVoiceId(body);
+                if (!id.isPresent()) {
+                    write.accept(body);
+                    return;
+                }
+                // Written before the answer goes out, so the app's next call (a listing, or
+                // speaking with the voice) already finds it as this wallet's.
+                ledger.addVoiceOwner(walletAddress, id.get(), () -> write.accept(body));
+            };
+        }
+        if (VoiceOwnership.listsVoices(provider, method, path)) {
+            return (body, write) -> ledger.listOwnedVoices(walletAddress, owned ->
+                    write.accept(VoiceOwnership.filterListing(body, owned.orElse(java.util.Set.of()))));
+        }
+        return null;
     }
 
     @Override
