@@ -497,7 +497,7 @@ public final class ProxyConfig {
         }
 
         Map<String, String> imageModels = new LinkedHashMap<>();
-        imageModels.put("openai", "gpt-image-1");
+        imageModels.put("openai", "gpt-image-1-mini");
         imageModels.put("stability", "stable-diffusion-xl-1024-v1-0");
         Map<String, String> audioModels = new LinkedHashMap<>();
         audioModels.put("elevenlabs", "eleven_multilingual_v2");

@@ -138,7 +138,7 @@ capabilities:                      # POST /text, /image, /audio — see their ow
     escalation: true               # AICOIN_PROXY_CAPABILITIES_ESCALATION_ENABLED (false: /text is always one call)
   image:
     models:
-      openai: gpt-image-1                        # AICOIN_PROXY_OPENAI_IMAGE_MODEL
+      openai: gpt-image-1-mini                   # AICOIN_PROXY_OPENAI_IMAGE_MODEL
       stability: stable-diffusion-xl-1024-v1-0   # AICOIN_PROXY_STABILITY_IMAGE_MODEL
   audio:
     models:

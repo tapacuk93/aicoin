@@ -328,7 +328,7 @@ It also carries `models` — which model stands behind each provider right now (
 ```jsonc
 "models": {
   "text":  {"anthropic": "claude-sonnet-5", "google": "gemini-3.5-flash"},   // provider -> model a POST /text call sends
-  "image": {"openai": "gpt-image-1"},
+  "image": {"openai": "gpt-image-1-mini"},
   "audio": {"elevenlabs": "eleven_multilingual_v2"},
   "consortium": {"panel": ["anthropic:claude-sonnet-5", "google:gemini-3.5-flash"], "editor": "anthropic"}
 }
