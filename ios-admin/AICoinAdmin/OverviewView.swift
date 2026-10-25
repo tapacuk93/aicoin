@@ -81,6 +81,9 @@ struct OverviewView: View {
                         .opacity(p.enabled ? 1 : 0.4)
                     }
                 }
+                Section {
+                    NavigationLink("Activity across all wallets") { ActivityView() }
+                }
                 ErrorBanner(message: error)
             }
             .navigationTitle("AICoin")

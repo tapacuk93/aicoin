@@ -23,8 +23,12 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false
+        UIBackgroundModes: [remote-notification]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.tarasmaslov.aicoinadmin
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: NO
+        # Push alerts from the proxy. "development" for the dev install; an App Store or
+        # TestFlight export rewrites it to production from its distribution profile.
+        CODE_SIGN_ENTITLEMENTS: AICoinAdmin/AICoinAdmin.entitlements

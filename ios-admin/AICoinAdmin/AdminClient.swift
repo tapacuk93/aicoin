@@ -111,6 +111,35 @@ final class AdminClient: ObservableObject {
                               body: ["address": address, "amount": amount, "reason": reason], admin: true)
     }
 
+    // MARK: per-app caps
+
+    func apps() async throws -> [AppCap] { (try await get("/admin/apps", admin: true) as AppCaps).apps }
+
+    /// Sets an app's daily cap (nil removes it) and, when given, its wallets.
+    func putApp(_ name: String, usdPerDay: Double?, wallets: [String]?) async throws {
+        var body: [String: Any] = ["usd_per_day": usdPerDay.map { $0 as Any } ?? NSNull()]
+        if let wallets { body["wallets"] = wallets }
+        _ = try await request("/admin/apps/\(name)", method: "PUT", body: body, admin: true)
+    }
+
+    func deleteApp(_ name: String) async throws {
+        _ = try await request("/admin/apps/\(name)", method: "DELETE", admin: true)
+    }
+
+    // MARK: alerts
+
+    func alerts() async throws -> AlertsInfo { try await get("/admin/alerts", admin: true) }
+
+    func registerDevice(token: String, environment: String, disabled: [String]) async throws {
+        _ = try await request("/admin/devices", method: "POST",
+                              body: ["token": token, "environment": environment, "disabled": disabled], admin: true)
+    }
+
+    func testPush() async throws -> [String] {
+        let data = try await request("/admin/alerts/test", method: "POST", body: [String: Any](), admin: true)
+        return (try? JSONDecoder().decode(TestPush.self, from: data))?.results ?? []
+    }
+
     func internalWallets(add: [String] = [], remove: [String] = []) async throws {
         var body: [String: Any] = [:]
         if !add.isEmpty { body["add"] = add }
@@ -196,6 +225,49 @@ struct Activity: Decodable { let activity: [ActivityEntry] }
 struct ActivityEntry: Decodable, Hashable {
     let address: String
     let tx: Transaction
+}
+
+struct AppCaps: Decodable { let apps: [AppCap] }
+struct AppCap: Decodable, Identifiable, Hashable {
+    let app: String
+    let usd_per_day: Double?
+    let spent_today_usd: Double
+    let remaining_usd: Double?
+    let capped: Bool
+    let reset_at: String
+    let wallets: [String]
+    var id: String { app }
+    var resetDate: Date? { ISO8601DateFormatter().date(from: reset_at) }
+}
+
+struct AlertsInfo: Decodable {
+    let apns_configured: Bool
+    let apns_key_id: String?
+    let kinds: [AlertKind]
+    let recent: [AlertEntry]
+}
+struct AlertKind: Decodable, Identifiable, Hashable {
+    let id: String
+    let label: String
+    let debounce_minutes: Int
+}
+struct AlertEntry: Decodable, Hashable {
+    let kind: String
+    let title: String
+    let body: String
+    let at: String
+    let devices: Int?
+    let pushed: Int?
+    var date: Date? { ISO8601DateFormatter.withFraction.date(from: at) ?? ISO8601DateFormatter().date(from: at) }
+}
+struct TestPush: Decodable { let results: [String] }
+
+extension ISO8601DateFormatter {
+    static let withFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 }
 
 extension String {

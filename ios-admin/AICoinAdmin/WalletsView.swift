@@ -159,7 +159,6 @@ struct ActivityView: View {
     @State private var error: String?
 
     var body: some View {
-        NavigationStack {
             List {
                 ForEach(Array(entries.enumerated()), id: \.offset) { _, e in
                     VStack(alignment: .leading, spacing: 2) {
@@ -172,7 +171,6 @@ struct ActivityView: View {
             .navigationTitle("Activity")
             .refreshable { await load() }
             .task { await load() }
-        }
     }
 
     private func load() async {

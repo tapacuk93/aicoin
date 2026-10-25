@@ -19,13 +19,18 @@ struct SettingsView: View {
                 Section {
                     SecureField(client.hasToken ? "Saved - paste to replace" : "Admin token", text: $token)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    Button("Save token") { client.setToken(token); token = ""; message = "Token saved" }
+                    Button("Save token") { client.setToken(token); token = ""; message = "Token saved"; Task { await PushManager.shared.sync() } }
                         .disabled(token.isEmpty)
                     if client.hasToken {
                         Button("Forget token", role: .destructive) { client.setToken(""); message = "Token removed" }
                     }
                 } header: { Text("Admin token") } footer: {
                     Text("Kept in this device's Keychain only. It is AICOIN_PROXY_ADMIN_TOKEN on the server.")
+                }
+                Section {
+                    NavigationLink("Notifications") { NotificationsView() }
+                } footer: {
+                    Text("Push alerts from the proxy: capped apps, the budget, provider credit, low wallets, purchases, errors and deploys.")
                 }
                 Section {
                     TextField("Wallet address", text: $wallet)

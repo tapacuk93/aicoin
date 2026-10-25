@@ -8,7 +8,9 @@
 
 /* Begin PBXBuildFile section */
 		07D2CD044B6CB0E91E589210 /* SalesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC2FB69D489379F9D7A7E09C /* SalesView.swift */; };
+		084B104D26233C6BCE0B7419 /* Push.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496D8C70F619BD55516BF2A4 /* Push.swift */; };
 		1669CC86E792482096E154B4 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F6566FCD566B410DFADFC35 /* Keychain.swift */; };
+		3AB2A067980FD5FEB8A781F1 /* AppsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2545FE5FB8CB2981D5B9F6E /* AppsView.swift */; };
 		53B0D38376A6705786EDB00B /* WalletsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F60364AC6311FE26E6DB4C1E /* WalletsView.swift */; };
 		801C43005DD83C0A8EFAD759 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4C3424E5FEDD067AAF5767A /* SettingsView.swift */; };
 		D6CE52105B4EFF290625B8D3 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CC34E2318326E11F4B4A81A /* App.swift */; };
@@ -18,13 +20,16 @@
 
 /* Begin PBXFileReference section */
 		1CC34E2318326E11F4B4A81A /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		496D8C70F619BD55516BF2A4 /* Push.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Push.swift; sourceTree = "<group>"; };
 		49C23C5826E8E5A552A01080 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		4F6566FCD566B410DFADFC35 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		6A7C4DF6B4CD37C9A69F169A /* AICoinAdmin.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AICoinAdmin.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7E0437FECE8F4BE508264295 /* AdminClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminClient.swift; sourceTree = "<group>"; };
 		A4C3424E5FEDD067AAF5767A /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		C91E72F1007F4D344B175A0A /* OverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewView.swift; sourceTree = "<group>"; };
+		D938B651CFA72DC222F07745 /* AICoinAdmin.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AICoinAdmin.entitlements; sourceTree = "<group>"; };
 		DC2FB69D489379F9D7A7E09C /* SalesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SalesView.swift; sourceTree = "<group>"; };
+		F2545FE5FB8CB2981D5B9F6E /* AppsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppsView.swift; sourceTree = "<group>"; };
 		F60364AC6311FE26E6DB4C1E /* WalletsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -49,10 +54,13 @@
 			isa = PBXGroup;
 			children = (
 				7E0437FECE8F4BE508264295 /* AdminClient.swift */,
+				D938B651CFA72DC222F07745 /* AICoinAdmin.entitlements */,
 				1CC34E2318326E11F4B4A81A /* App.swift */,
+				F2545FE5FB8CB2981D5B9F6E /* AppsView.swift */,
 				49C23C5826E8E5A552A01080 /* Info.plist */,
 				4F6566FCD566B410DFADFC35 /* Keychain.swift */,
 				C91E72F1007F4D344B175A0A /* OverviewView.swift */,
+				496D8C70F619BD55516BF2A4 /* Push.swift */,
 				DC2FB69D489379F9D7A7E09C /* SalesView.swift */,
 				A4C3424E5FEDD067AAF5767A /* SettingsView.swift */,
 				F60364AC6311FE26E6DB4C1E /* WalletsView.swift */,
@@ -120,8 +128,10 @@
 			files = (
 				EC5FB872D7FBD1C641C7EBBA /* AdminClient.swift in Sources */,
 				D6CE52105B4EFF290625B8D3 /* App.swift in Sources */,
+				3AB2A067980FD5FEB8A781F1 /* AppsView.swift in Sources */,
 				1669CC86E792482096E154B4 /* Keychain.swift in Sources */,
 				DFF180C62B716077E7CE970D /* OverviewView.swift in Sources */,
+				084B104D26233C6BCE0B7419 /* Push.swift in Sources */,
 				07D2CD044B6CB0E91E589210 /* SalesView.swift in Sources */,
 				801C43005DD83C0A8EFAD759 /* SettingsView.swift in Sources */,
 				53B0D38376A6705786EDB00B /* WalletsView.swift in Sources */,
@@ -135,6 +145,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = AICoinAdmin/AICoinAdmin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AICoinAdmin/Info.plist;
@@ -152,6 +163,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = AICoinAdmin/AICoinAdmin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AICoinAdmin/Info.plist;

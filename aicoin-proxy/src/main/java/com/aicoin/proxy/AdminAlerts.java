@@ -282,7 +282,9 @@ final class AdminAlerts {
             if (apps.isEmpty()) {
                 return;
             }
+            java.util.Set<String> configured = new java.util.HashSet<>();
             for (AppCaps.AppStatus app : apps.get()) {
+                configured.add(app.getConfig().getApp());
                 for (String wallet : app.getConfig().getWallets()) {
                     ledger.getBalance(wallet, balance -> balance.ifPresent(b -> {
                         if (b < walletLowCoins) {
@@ -295,17 +297,20 @@ final class AdminAlerts {
                     }));
                 }
             }
-        });
-        if (redis == null) {
-            return;
-        }
-        LocalDate yesterday = AppCaps.dayOf(now).minusDays(1);
-        redis.smembers(cappedDayKey(yesterday)).thenAccept(apps -> {
-            for (String app : apps) {
-                fire(Kind.APP_CAP_RESET, app + ":" + yesterday, app + "'s cap reset",
-                        app + " was capped on " + yesterday + "; its calls are allowed again for today.");
+            if (redis == null) {
+                return;
             }
-        }).exceptionally(err -> null);
+            // Only apps that still exist: a deleted app's reset is nobody's news.
+            LocalDate yesterday = AppCaps.dayOf(now).minusDays(1);
+            redis.smembers(cappedDayKey(yesterday)).thenAccept(capped -> {
+                for (String app : capped) {
+                    if (configured.contains(app)) {
+                        fire(Kind.APP_CAP_RESET, app + ":" + yesterday, app + "'s cap reset",
+                                app + " was capped on " + yesterday + "; its calls are allowed again for today.");
+                    }
+                }
+            }).exceptionally(err -> null);
+        });
     }
 
     private static String cappedDayKey(LocalDate day) {
