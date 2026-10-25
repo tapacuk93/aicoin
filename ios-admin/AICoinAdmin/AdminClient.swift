@@ -66,8 +66,13 @@ final class AdminClient: ObservableObject {
     func health() async throws -> Health { try await get("/health") }
     func packages() async throws -> [Package] { (try await get("/iap/packages") as Packages).packages }
     func offer() async throws -> Offer? { (try await get("/iap/offer") as OfferEnvelope).offer }
-    func wallets() async throws -> [WalletSummary] {
-        (try await get("/admin/wallets", admin: true) as Wallets).wallets
+    /// One page of wallets, richest first, filtered by address substring.
+    func wallets(offset: Int, limit: Int, query: String) async throws -> Wallets {
+        var c = URLComponents()
+        c.queryItems = [URLQueryItem(name: "offset", value: String(offset)),
+                        URLQueryItem(name: "limit", value: String(limit))]
+        if !query.isEmpty { c.queryItems?.append(URLQueryItem(name: "q", value: query)) }
+        return try await get("/admin/wallets?" + (c.percentEncodedQuery ?? ""), admin: true)
     }
     func transactions(_ address: String) async throws -> [Transaction] {
         let a = address.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? address
@@ -164,7 +169,11 @@ struct Offer: Decodable {
     let set_at: Double?
 }
 
-struct Wallets: Decodable { let wallets: [WalletSummary] }
+struct Wallets: Decodable {
+    /// Absent from a proxy that predates paging, which sends every wallet at once.
+    let total: Int?
+    let wallets: [WalletSummary]
+}
 struct WalletSummary: Decodable, Identifiable, Hashable {
     let address: String
     let balance: Double

@@ -824,8 +824,9 @@ back would be a debit with no call behind it.
   require an `X-Admin-Token` header matching `aicoin.adminToken` (empty by
   default, which disables the whole surface with a `503` — see
   `AdminHandler`):
-  - `GET /admin/wallets` → `{"wallets":[{"address":"...","balance":N,"transaction_count":N}, ...]}`,
-    sorted by balance descending, backed by `AicoinLedger.listWalletSummaries`.
+  - `GET /admin/wallets` → `{"total":N,"wallets":[{"address":"...","balance":N,"transaction_count":N}, ...]}`,
+    sorted by balance descending, backed by `AicoinLedger.listWalletSummaries`. Optional
+    `?q=` (address substring), `?offset=` and `?limit=` page it; `total` counts matches before paging.
   - `GET /admin/wallets/{address}/transactions` → `{"address":"...","transactions":[{...}, ...]}`,
     most-recent first, backed by `AicoinLedger.getTransactions` — each entry
     is the raw JSON object the mutating Lua script `cjson.encode`d at the

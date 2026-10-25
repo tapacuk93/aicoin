@@ -556,8 +556,10 @@ history, so it needs its own, separate auth.
   build step), same posture as `GET /wallet`: no auth on the page markup
   itself, just an input for the admin token and a table. The page stores the
   token in `localStorage` and sends it as `X-Admin-Token` on every data call.
-- `GET /admin/wallets` → `{"wallets":[{"address":"...","balance":N,"transaction_count":N}, ...]}`,
-  every address in `aicoin:known-wallets`, sorted by balance descending.
+- `GET /admin/wallets` → `{"total":N,"wallets":[{"address":"...","balance":N,"transaction_count":N}, ...]}`,
+  every address in `aicoin:known-wallets`, sorted by balance descending. Optional `?q=` keeps
+  addresses containing it (case-insensitive), then `?offset=`/`?limit=` page the result; `total`
+  counts the matches before paging. With no `limit` the whole list comes back.
 - `GET /admin/wallets/{address}/transactions` → `{"address":"...","transactions":[{...}, ...]}`,
   the full contents of `aicoin:tx:{address}` (see the Ledger table above),
   most-recent first. Each entry is one of:

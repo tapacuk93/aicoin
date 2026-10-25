@@ -10,11 +10,15 @@ import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http.QueryStringDecoder;
 import io.netty.util.CharsetUtil;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -60,15 +64,31 @@ final class AdminHandler {
         if (!isAuthorized(request, config, ctx)) {
             return;
         }
+        // Optional ?q= (address substring), ?offset= and ?limit= page the richest-first list; with
+        // none of them the whole list comes back, as it always did. total counts after q.
+        Map<String, List<String>> params = new QueryStringDecoder(request.uri()).parameters();
+        String q = firstParam(params, "q");
+        int offset = Math.max(0, intParam(params, "offset", 0));
+        int limit = intParam(params, "limit", -1);
         ledger.listWalletSummaries(summaries -> {
             if (!summaries.isPresent()) {
                 sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not list wallets");
                 return;
             }
+            List<AicoinLedger.WalletSummary> matching = summaries.get();
+            if (q != null && !q.isEmpty()) {
+                String needle = q.toLowerCase(Locale.ROOT);
+                matching = matching.stream()
+                        .filter(w -> w.getAddress().toLowerCase(Locale.ROOT).contains(needle))
+                        .toList();
+            }
+            int total = matching.size();
+            int from = Math.min(offset, total);
+            int to = limit < 0 ? total : Math.min(total, from + limit);
             StringBuilder sb = new StringBuilder();
-            sb.append("{\"wallets\":[");
+            sb.append("{\"total\":").append(total).append(",\"wallets\":[");
             boolean first = true;
-            for (AicoinLedger.WalletSummary summary : summaries.get()) {
+            for (AicoinLedger.WalletSummary summary : matching.subList(from, to)) {
                 if (!first) {
                     sb.append(",");
                 }
@@ -80,6 +100,23 @@ final class AdminHandler {
             sb.append("]}");
             sendJson(ctx, sb.toString());
         });
+    }
+
+    private static String firstParam(Map<String, List<String>> params, String name) {
+        List<String> values = params.get(name);
+        return values == null || values.isEmpty() ? null : values.get(0);
+    }
+
+    private static int intParam(Map<String, List<String>> params, String name, int fallback) {
+        String value = firstParam(params, name);
+        if (value == null) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
     /**
