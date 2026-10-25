@@ -6,9 +6,9 @@ A local Swift Package providing everything an iOS/macOS app needs to integrate w
 redemption per app.
 
 It replaces the bespoke, near-duplicate integration code that three apps
-(**InfiniteAIRadio**, **All Languages Learner**, **Learn It**) each grew independently:
+(**InfiniteAIRadio**, **All Languages Learner**, **All AI Learn**) each grew independently:
 - All Languages Learner's `AICoinGateway`
-- Learn It's `AIcoinWalletRouter` + `HTTPTransport`
+- All AI Learn's `AIcoinWalletRouter` + `HTTPTransport`
 - The crypto/keychain core of the standalone `AICoinWallet` prototype app (`../../ios/AICoinWallet`)
 
 This package generalizes the real, working logic from all three into one place, and makes one
@@ -220,7 +220,7 @@ has no offer set. Both credit via the catalog's `coins` for the purchased produc
   `freeCoinsAvailable()`, `currentOffer()`, `checkOffer()`.
 - `AICoinPackage` — `/iap/packages` model, plus `[AICoinPackage].filtered(byBundleIDPrefix:)`.
 - `AICoinOffer` — `/iap/offer` model, plus `productID(forBundleID:)`; `AICoinProductID.prefix(forBundleID:)`
-  derives the product-id prefix from a bundle ID (they differ for Learn It — Apple forbids the hyphen).
+  derives the product-id prefix from a bundle ID (they differ for All AI Learn — Apple forbids the hyphen).
 - `IAPManager` — `loadOffer()`, `purchaseCurrentOffer(address:confirmedCoins:)`, `loadPackages()`,
   `purchase(_:address:)`, `startObservingUnfinishedTransactions(address:)`.
 - `WalletBalanceStore`, `CoinBalanceBadge`, `BuyAICoinSheet`, `SendReceiveView` — SwiftUI layer.

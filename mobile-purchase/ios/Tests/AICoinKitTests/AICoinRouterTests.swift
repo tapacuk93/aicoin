@@ -2,7 +2,7 @@ import XCTest
 @testable import AICoinKit
 
 /// Records every request it's given and replays canned responses in order — same shape as the
-/// mock transports already used in All Languages Learner's and Learn It's own router tests, so
+/// mock transports already used in All Languages Learner's and All AI Learn's own router tests, so
 /// this suite reads the same way.
 private final class MockHTTPTransport: HTTPTransport, @unchecked Sendable {
     private let lock = NSLock()

@@ -71,7 +71,7 @@ final class AICoinOfferTests: XCTestCase {
             "com.tarasmaslov.alllanguageslearner.aicoin.large")
     }
 
-    /// The same hyphen trap as the package catalog: Learn It's bundle ID can't be matched raw.
+    /// The same hyphen trap as the package catalog: All AI Learn's bundle ID can't be matched raw.
     func testLearnItsHyphenatedBundleIDResolvesToItsHyphenFreeProduct() throws {
         let offer = try decodeOffer()
 

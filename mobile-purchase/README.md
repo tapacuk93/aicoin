@@ -32,7 +32,7 @@ the catalog `coins` of the product charged.
 
 The product IDs are per-app and per-store, so an Android build registers its own alongside the iOS
 ones in `aicoin-proxy/src/main/resources/application.yaml`. Note a store's product-id alphabet may
-not match a bundle ID: Apple forbids hyphens, so Learn It's `com.tarasmaslov.learn-it` bundle uses
+not match a bundle ID: Apple forbids hyphens, so All AI Learn's `com.tarasmaslov.learn-it` bundle uses
 `com.tarasmaslov.learnit.*` product IDs, and a client must derive the prefix rather than matching
 its raw bundle ID (`AICoinProductID.prefix(forBundleID:)` in the iOS package).
 

@@ -67,7 +67,7 @@ final class AICoinPackageTests: XCTestCase {
         XCTAssertTrue(mine.allSatisfy { $0.productId.hasPrefix("com.tarasmaslov.learnit") })
     }
 
-    /// Learn It's real bundle ID carries a hyphen its product IDs cannot (Apple's product-id
+    /// All AI Learn's real bundle ID carries a hyphen its product IDs cannot (Apple's product-id
     /// alphabet excludes it), so filtering the live catalog by a raw `Bundle.main.bundleIdentifier`
     /// used to match nothing at all and leave that one app's paywall permanently empty. The
     /// fixture above deliberately carries the *server's* real, hyphen-free product IDs — matching

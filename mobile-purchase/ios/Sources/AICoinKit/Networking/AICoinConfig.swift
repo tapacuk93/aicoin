@@ -8,7 +8,7 @@ import Foundation
 /// already-shipped builds but no longer the address anything should be written against.
 ///
 /// Note for anyone diffing this against the three apps' existing bespoke integrations: All
-/// Languages Learner's `AICoinGateway` and Learn It's `AIcoinWalletRouter` hardcoded
+/// Languages Learner's `AICoinGateway` and All AI Learn's `AIcoinWalletRouter` hardcoded
 /// `https://aicoin.oeaio.com` as the proxy host. Those are stale placeholders that should be
 /// dropped once each app adopts this package.
 public enum AICoinConfig {

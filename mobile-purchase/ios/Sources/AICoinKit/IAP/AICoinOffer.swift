@@ -3,7 +3,7 @@ import Foundation
 /// Derives the **product-id prefix** an app's IAP products use from its bundle ID.
 ///
 /// These are not always the same string. Per CONTRACT.md's IAP section, Apple in-app purchase
-/// product IDs may contain only alphanumerics, underscores and periods — no hyphen — so Learn It,
+/// product IDs may contain only alphanumerics, underscores and periods — no hyphen — so All AI Learn,
 /// whose real bundle ID is `com.tarasmaslov.learn-it`, has to name its products
 /// `com.tarasmaslov.learnit.aicoin.*`. Matching product IDs against a raw `Bundle.main
 /// .bundleIdentifier` therefore finds nothing at all for that app; every lookup has to go through

@@ -37,7 +37,7 @@ public extension Array where Element == AICoinPackage {
     /// silently show none if the bundle ID couldn't be determined).
     ///
     /// The prefix is run through `AICoinProductID.prefix(forBundleID:)` first, because a bundle ID
-    /// is not always a legal product-id prefix: Learn It's `com.tarasmaslov.learn-it` has to name
+    /// is not always a legal product-id prefix: All AI Learn's `com.tarasmaslov.learn-it` has to name
     /// its products `com.tarasmaslov.learnit.*` (Apple forbids the hyphen), so matching the raw
     /// bundle ID against the real server catalog would find nothing and leave that app's paywall
     /// permanently empty.

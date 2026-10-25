@@ -34,7 +34,7 @@ public enum AIProviderRoute: String, CaseIterable, Sendable {
 /// CONTRACT.md's "Auth for AI-proxy calls" — never a bare address; the generic path only accepts
 /// tokens).
 ///
-/// This generalizes All Languages Learner's `AICoinGateway` and Learn It's `AIcoinWalletRouter`
+/// This generalizes All Languages Learner's `AICoinGateway` and All AI Learn's `AIcoinWalletRouter`
 /// into one host-routing table (now covering every provider CONTRACT.md's proxy config lists,
 /// including `cohere`/`stability`, which neither existing app's table had), but makes one
 /// deliberate behavior change from both of them: **there is no bring-your-own-key fallback**. Per

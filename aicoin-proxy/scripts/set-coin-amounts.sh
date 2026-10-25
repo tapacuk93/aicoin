@@ -26,7 +26,7 @@
 #         <app-prefix>.aicoin.<suffix>). Repeatable.
 #   --app <product-id-prefix>
 #         Only touch this app's products; repeatable. Default: every app. Note the prefix is the
-#         product-id prefix, which for Learn It is com.tarasmaslov.learnit (Apple forbids the
+#         product-id prefix, which for All AI Learn is com.tarasmaslov.learnit (Apple forbids the
 #         hyphen in its real bundle id com.tarasmaslov.learn-it).
 #   --dry-run
 #         Print the before/after table and exit without writing anything.

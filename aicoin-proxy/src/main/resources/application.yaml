@@ -354,6 +354,7 @@ iap:
     - { productId: com.tarasmaslov.alllanguageslearner.aicoin.medium,  coins: 200,  usdPriceHint: 2.99 }
     - { productId: com.tarasmaslov.alllanguageslearner.aicoin.large,   coins: 1000, usdPriceHint: 9.99 }
     - { productId: com.tarasmaslov.alllanguageslearner.aicoin.xl,      coins: 5000, usdPriceHint: 44.99 }
+    # All AI Learn (formerly Learn Its): its products keep the old learnit prefix.
     - { productId: com.tarasmaslov.learnit.aicoin.small,               coins: 50,   usdPriceHint: 0.99 }
     - { productId: com.tarasmaslov.learnit.aicoin.medium,              coins: 200,  usdPriceHint: 2.99 }
     - { productId: com.tarasmaslov.learnit.aicoin.large,               coins: 1000, usdPriceHint: 9.99 }

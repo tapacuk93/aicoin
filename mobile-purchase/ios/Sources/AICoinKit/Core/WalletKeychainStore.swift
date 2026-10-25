@@ -6,7 +6,7 @@ import Security
 /// key/address is always re-derived from it on load.
 ///
 /// By default each app gets its own independent wallet (a private, per-app Keychain item). If the
-/// three consuming apps (InfiniteAIRadio, All Languages Learner, Learn It) want to share a single
+/// three consuming apps (InfiniteAIRadio, All Languages Learner, All AI Learn) want to share a single
 /// aicoin balance across all three, pass a common `accessGroup` — a Keychain Sharing access group
 /// configured identically in each app's entitlements (same team ID, same group string) — so the
 /// same seed round-trips across apps. That capability entitlement is a per-app Xcode project

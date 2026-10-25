@@ -60,7 +60,7 @@ public struct SendReceiveView: View {
 
     public var body: some View {
         // The gate lives here, in the view itself, and not only in
-        // `BuyAICoinSheet`'s tab picker: All Languages Learner and Learn It
+        // `BuyAICoinSheet`'s tab picker: All Languages Learner and All AI Learn
         // both present this view straight from their own Settings screens,
         // bypassing that picker entirely, so gating only the picker would have
         // left the transfer form fully reachable in two of the three apps that

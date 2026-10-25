@@ -32,7 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # App Store Connect numeric app ids, keyed by the product-id prefix each app's packages use.
 # Note learnit (no hyphen) vs the real bundle id com.tarasmaslov.learn-it — Apple forbids hyphens
-# in productId, so the two genuinely differ for that one app. See CONTRACT.md's IAP section.
+# in productId, so the two genuinely differ for that one app (All AI Learn, formerly Learn Its). See CONTRACT.md's IAP section.
 asc_app_id_for_product() {
   case "$1" in
     com.tarasmaslov.infiniteairadio.*)     echo "6788594796" ;;

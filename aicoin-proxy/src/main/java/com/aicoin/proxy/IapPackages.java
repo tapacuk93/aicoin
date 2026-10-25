@@ -26,6 +26,7 @@ final class IapPackages {
     private static final Set<String> KNOWN_BUNDLE_IDS = Set.of(
             "com.tarasmaslov.infiniteairadio",
             "com.tarasmaslov.alllanguageslearner",
+            // All AI Learn (formerly Learn Its); the bundle id predates the rename.
             "com.tarasmaslov.learn-it",
             // Infinite AI Book, the first app built on AICoinKit's shared app runtime.
             "com.oeaio.infiniteaibook");
