@@ -1,0 +1,317 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		07D2CD044B6CB0E91E589210 /* SalesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC2FB69D489379F9D7A7E09C /* SalesView.swift */; };
+		1669CC86E792482096E154B4 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F6566FCD566B410DFADFC35 /* Keychain.swift */; };
+		53B0D38376A6705786EDB00B /* WalletsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F60364AC6311FE26E6DB4C1E /* WalletsView.swift */; };
+		801C43005DD83C0A8EFAD759 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4C3424E5FEDD067AAF5767A /* SettingsView.swift */; };
+		D6CE52105B4EFF290625B8D3 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CC34E2318326E11F4B4A81A /* App.swift */; };
+		DFF180C62B716077E7CE970D /* OverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C91E72F1007F4D344B175A0A /* OverviewView.swift */; };
+		EC5FB872D7FBD1C641C7EBBA /* AdminClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E0437FECE8F4BE508264295 /* AdminClient.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		1CC34E2318326E11F4B4A81A /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		49C23C5826E8E5A552A01080 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		4F6566FCD566B410DFADFC35 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		6A7C4DF6B4CD37C9A69F169A /* AICoinAdmin.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AICoinAdmin.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7E0437FECE8F4BE508264295 /* AdminClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminClient.swift; sourceTree = "<group>"; };
+		A4C3424E5FEDD067AAF5767A /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		C91E72F1007F4D344B175A0A /* OverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewView.swift; sourceTree = "<group>"; };
+		DC2FB69D489379F9D7A7E09C /* SalesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SalesView.swift; sourceTree = "<group>"; };
+		F60364AC6311FE26E6DB4C1E /* WalletsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletsView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		41B96E2862CEB89403DD3F9D = {
+			isa = PBXGroup;
+			children = (
+				7CEEEDB7A16DE129FEFAA12B /* AICoinAdmin */,
+				72053E5C26481CE7B0A1513E /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		72053E5C26481CE7B0A1513E /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				6A7C4DF6B4CD37C9A69F169A /* AICoinAdmin.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		7CEEEDB7A16DE129FEFAA12B /* AICoinAdmin */ = {
+			isa = PBXGroup;
+			children = (
+				7E0437FECE8F4BE508264295 /* AdminClient.swift */,
+				1CC34E2318326E11F4B4A81A /* App.swift */,
+				49C23C5826E8E5A552A01080 /* Info.plist */,
+				4F6566FCD566B410DFADFC35 /* Keychain.swift */,
+				C91E72F1007F4D344B175A0A /* OverviewView.swift */,
+				DC2FB69D489379F9D7A7E09C /* SalesView.swift */,
+				A4C3424E5FEDD067AAF5767A /* SettingsView.swift */,
+				F60364AC6311FE26E6DB4C1E /* WalletsView.swift */,
+			);
+			path = AICoinAdmin;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E2CEE5BC4349F5B7CFB972F0 /* AICoinAdmin */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 658203687301B3E417028E11 /* Build configuration list for PBXNativeTarget "AICoinAdmin" */;
+			buildPhases = (
+				856580161772E685ABAA0B7F /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AICoinAdmin;
+			packageProductDependencies = (
+			);
+			productName = AICoinAdmin;
+			productReference = 6A7C4DF6B4CD37C9A69F169A /* AICoinAdmin.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		F20BF60F8A33142FD62A3808 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					E2CEE5BC4349F5B7CFB972F0 = {
+						DevelopmentTeam = HTS38ZPRVH;
+					};
+				};
+			};
+			buildConfigurationList = FDDC1918AADD2AB3D6602A0C /* Build configuration list for PBXProject "AICoinAdmin" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 41B96E2862CEB89403DD3F9D;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 72053E5C26481CE7B0A1513E /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E2CEE5BC4349F5B7CFB972F0 /* AICoinAdmin */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		856580161772E685ABAA0B7F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EC5FB872D7FBD1C641C7EBBA /* AdminClient.swift in Sources */,
+				D6CE52105B4EFF290625B8D3 /* App.swift in Sources */,
+				1669CC86E792482096E154B4 /* Keychain.swift in Sources */,
+				DFF180C62B716077E7CE970D /* OverviewView.swift in Sources */,
+				07D2CD044B6CB0E91E589210 /* SalesView.swift in Sources */,
+				801C43005DD83C0A8EFAD759 /* SettingsView.swift in Sources */,
+				53B0D38376A6705786EDB00B /* WalletsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		295BC2A032F0DF422D249801 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AICoinAdmin/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tarasmaslov.aicoinadmin;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		3B6B42353448048C978DA2EF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AICoinAdmin/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tarasmaslov.aicoinadmin;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		512220C4B71C1CCD7C94AB84 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = HTS38ZPRVH;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		51E93FC6086C0236CDE2B60E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = HTS38ZPRVH;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		658203687301B3E417028E11 /* Build configuration list for PBXNativeTarget "AICoinAdmin" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3B6B42353448048C978DA2EF /* Debug */,
+				295BC2A032F0DF422D249801 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FDDC1918AADD2AB3D6602A0C /* Build configuration list for PBXProject "AICoinAdmin" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				512220C4B71C1CCD7C94AB84 /* Debug */,
+				51E93FC6086C0236CDE2B60E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = F20BF60F8A33142FD62A3808 /* Project object */;
+}
