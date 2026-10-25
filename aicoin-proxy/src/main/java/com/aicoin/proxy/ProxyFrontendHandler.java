@@ -124,6 +124,15 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             IapPackagesHandler.serveAdminSet(ctx, request, ledger, config);
             return;
         }
+        if (request.method() == HttpMethod.GET && "/admin/apps".equals(path)) {
+            AppCapsHandler.serveList(ctx, request, ledger, config);
+            return;
+        }
+        if (path.startsWith("/admin/apps/")
+                && (request.method() == HttpMethod.PUT || request.method() == HttpMethod.DELETE)) {
+            AppCapsHandler.serveWrite(ctx, request, ledger, config, path.substring("/admin/apps/".length()));
+            return;
+        }
         if (request.method() == HttpMethod.GET && "/admin/budget".equals(path)) {
             BudgetHandler.serveBudget(ctx, request, ledger, config);
             return;
@@ -405,7 +414,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                     walletAddress, FREE_TARGET_COST_AICOIN, hook);
             return;
         }
-        ledger.debitForCall(walletAddress, CALL_COST_AICOIN, provider, debit -> {
+        withinAppCap(ctx, walletAddress, () -> ledger.debitForCall(walletAddress, CALL_COST_AICOIN, provider, debit -> {
             if (!debit.isReachable()) {
                 sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
             } else if (!debit.isSuccess()) {
@@ -415,6 +424,23 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                         finalHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
                         walletAddress, CALL_COST_AICOIN, hook);
             }
+        }));
+    }
+
+    /**
+     * The per-app daily cap, checked before any coin is held: a wallet whose app is at its cap
+     * gets {@code 429 app_daily_cap_reached} and is never charged. See {@link AppCaps}.
+     */
+    private void withinAppCap(ChannelHandlerContext ctx, String walletAddress, Runnable onAllowed) {
+        Instant now = Instant.now();
+        ledger.appCaps().gate(walletAddress, now, onAllowed, decision -> {
+            byte[] bytes = decision.errorJson().getBytes(CharsetUtil.UTF_8);
+            FullHttpResponse response = new DefaultFullHttpResponse(
+                    HttpVersion.HTTP_1_1, HttpResponseStatus.TOO_MANY_REQUESTS, Unpooled.wrappedBuffer(bytes));
+            response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
+            response.headers().set(HttpHeaderNames.RETRY_AFTER, Long.toString(decision.retryAfterSeconds(now)));
+            HttpUtil.setContentLength(response, bytes.length);
+            ctx.writeAndFlush(response);
         });
     }
 
@@ -542,7 +568,9 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, authResult.getFailureReason());
                 return;
             }
-            onVerified.accept(authResult.getAddress());
+            // Every caller of this spends coins, so the app's daily cap applies before it runs.
+            String address = authResult.getAddress();
+            withinAppCap(ctx, address, () -> onVerified.accept(address));
         });
     }
 

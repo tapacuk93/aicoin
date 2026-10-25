@@ -667,6 +667,45 @@ correctness invariant.
 Exhaustion stops *sales*, not *service*: coins already bought still pay for calls. Refusing those
 would be taking money for a service and then declining to render it.
 
+### Per-app daily caps
+
+A ceiling, in US dollars per UTC day, on what one app's AI calls may cost. The proxy has no notion
+of an app on the wire — every caller is a wallet proven by its API token — so an **app is an
+operator-side name for a set of wallets** (typically the app's server wallet). A client cannot say
+which app it is, for the same reason it cannot exempt itself from the spend budget.
+
+Spend is the proxy's own cost accounting: the same `costUsd` each priced call writes into the price
+signal (`AicoinLedger.recordEvent`), added to the app of the wallet that made the call. It is kept
+per UTC day, so the cap **resets at UTC midnight** without anything having to reset it.
+
+Redis (all under the ledger's `{aicoin}` hash tag): hash `aicoin:{aicoin}:apps` (app → `{"usd_per_day":20.0,"wallets":[...]}`),
+hash `aicoin:{aicoin}:app-wallets` (wallet → app), and `aicoin:{aicoin}:app-spend:<app>:<yyyy-mm-dd>`
+(that day's USD, expiring after 8 days).
+
+**Enforcement.** Before a paid call holds its coin — the `X-AI` path, `/text`, `/image`, `/audio`
+and `/consortium` — the caller's app is looked up. If the app has a cap and today's spend is at or
+over it, the request gets
+
+```
+429 Retry-After: <seconds to reset>
+{"error":"app_daily_cap_reached","message":"...","app":"earth-empire","usd_per_day":20.0,"spent_today_usd":20.01,"reset_at":"2026-10-26T00:00:00Z"}
+```
+
+and **nothing is charged**: no coin is held, no provider is called. Free targets are not gated
+(they cost nothing). The check is per client request, so requests already in flight when the cap is
+crossed finish, and a day can end slightly over the cap by what those cost (a consortium request
+counts as one request). A Redis failure during the check lets the call through — the wallet's own
+balance gate still applies.
+
+- `GET /admin/apps` → `{"apps":[{"app":"earth-empire","usd_per_day":20.0,"spent_today_usd":1.23,"remaining_usd":18.77,"capped":false,"reset_at":"2026-10-26T00:00:00Z","wallets":["bd08…"]}]}`
+- `PUT /admin/apps/{app}` — body `{"usd_per_day":20,"wallets":["<64 hex>"]}`. `usd_per_day` absent
+  keeps the cap, `null` removes it (spend is still tracked), otherwise a positive number. `wallets`
+  absent keeps the mapping, otherwise replaces it. A wallet already in another app is `409` and
+  nothing is written. App names: `[a-z0-9][a-z0-9._-]{0,63}`. Returns the app as `GET` lists it.
+- `DELETE /admin/apps/{app}` — removes the app and unmaps its wallets; `404` if there is none.
+
+All three are `X-Admin-Token` gated.
+
 ### The current offer
 
 The packages list above is the **catalog**: which products exist and what each one costs. What is actually *for sale* is a single number — **the current offer** — set by the operator and identical in every app. An app displays that one amount, re-checks it immediately before charging, and buys whichever product covers it. Coin amounts are decoupled from products entirely: the four products are four **fixed price points**, and the offer is what a purchase at one of them credits. A `.large` purchase credits the offer's amount, not the `coins` on `.large`'s catalog entry.

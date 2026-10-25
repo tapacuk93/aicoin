@@ -220,6 +220,7 @@ final class AicoinLedger implements AutoCloseable {
     private final RedisClient client;
     private final StatefulRedisConnection<String, String> connection;
     private final RedisAsyncCommands<String, String> commands;
+    private final AppCaps appCaps;
 
     AicoinLedger(String host, int port, String password, boolean ssl) {
         this(host, port, "", password, ssl);
@@ -236,6 +237,12 @@ final class AicoinLedger implements AutoCloseable {
         this.client = RedisClient.create(buildRedisUri(host, port, username, password, ssl));
         this.connection = client.connect();
         this.commands = connection.async();
+        this.appCaps = new AppCaps(new AppCaps.RedisStore(commands));
+    }
+
+    /** Per-app daily spend caps, kept in this ledger's Redis — see {@link AppCaps}. */
+    AppCaps appCaps() {
+        return appCaps;
     }
 
     /** Package-visible, pure (no connection opened), so the username/password branching is unit-testable on its own. */
@@ -575,6 +582,8 @@ final class AicoinLedger implements AutoCloseable {
      * exactly how a usage-less response reads too.
      */
     void recordEvent(String provider, double costUsd, long tokens, Instant timestamp, String walletAddress) {
+        // Every priced call passes through here, so this is where an app's daily spend is counted.
+        appCaps.recordSpend(walletAddress, costUsd, timestamp);
         String id = UUID.randomUUID().toString();
         String size = tokens >= 0 ? "|t" + tokens : "";
         commands.sismember(INTERNAL_WALLETS_KEY, walletAddress == null ? "" : walletAddress)
