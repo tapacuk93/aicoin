@@ -34,6 +34,12 @@ public final class ProxyMain {
         // Null when accessLog.path is empty, or when the file couldn't be opened — an unwritable
         // log is reported and then ignored, never a reason to refuse to serve traffic.
         AccessLog accessLog = AccessLog.create(config);
+        // Push notifications to the admin app — see AdminAlerts. Without an APNs key they are
+        // still recorded for GET /admin/alerts.
+        AdminAlerts alerts = new AdminAlerts(ledger.redis(), ledger, Apns.fromEnv(System.getenv()), System.getenv());
+        AdminAlerts.install(alerts);
+        alerts.startMonitor();
+        alerts.proxyStarted();
 
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
         EventLoopGroup workerGroup = new NioEventLoopGroup();
@@ -50,6 +56,7 @@ public final class ProxyMain {
             channel.closeFuture().sync();
         } finally {
             liveness.stop();
+            alerts.stop();
             bossGroup.shutdownGracefully();
             workerGroup.shutdownGracefully();
             ledger.close();

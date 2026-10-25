@@ -140,11 +140,11 @@ final class AppCapsHandler {
         });
     }
 
-    private static String error(String message) {
+    static String error(String message) {
         return "{\"error\":" + Json.string(message) + "}";
     }
 
-    private static boolean isAuthorized(FullHttpRequest request, ProxyConfig config, ChannelHandlerContext ctx) {
+    static boolean isAuthorized(FullHttpRequest request, ProxyConfig config, ChannelHandlerContext ctx) {
         String configuredToken = config.getAdminToken();
         if (configuredToken == null || configuredToken.isEmpty()) {
             send(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, error("admin disabled"));
@@ -158,7 +158,7 @@ final class AppCapsHandler {
         return true;
     }
 
-    private static void send(ChannelHandlerContext ctx, HttpResponseStatus status, String json) {
+    static void send(ChannelHandlerContext ctx, HttpResponseStatus status, String json) {
         byte[] bytes = json.getBytes(CharsetUtil.UTF_8);
         FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status, Unpooled.wrappedBuffer(bytes));
         response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");

@@ -674,6 +674,16 @@ of an app on the wire — every caller is a wallet proven by its API token — s
 operator-side name for a set of wallets** (typically the app's server wallet). A client cannot say
 which app it is, for the same reason it cannot exempt itself from the spend budget.
 
+**Naming the app: `X-AICoin-App`.** An app may send `X-AICoin-App: <app>` (e.g.
+`X-AICoin-App: earth-empire`) on every call, alongside its API token. When the calling wallet is
+not assigned to any app, the call counts toward the app the header names — but only an app the
+operator has configured with `PUT /admin/apps/{app}`; an unknown name is ignored, so callers cannot
+invent apps. A wallet that **is** assigned to an app always counts toward that app, whatever the
+header says, so a header can never move a capped wallet out of its cap. The header is matched
+case-insensitively and is never forwarded to a provider. The wallet mapping is the fallback for
+callers that send no header. (A wallet that sends different app names on concurrent calls has each
+call's cost attributed to the app it named most recently.)
+
 Spend is the proxy's own cost accounting: the same `costUsd` each priced call writes into the price
 signal (`AicoinLedger.recordEvent`), added to the app of the wallet that made the call. It is kept
 per UTC day, so the cap **resets at UTC midnight** without anything having to reset it.
@@ -705,6 +715,44 @@ balance gate still applies.
 - `DELETE /admin/apps/{app}` — removes the app and unmaps its wallets; `404` if there is none.
 
 All three are `X-Admin-Token` gated.
+
+### Admin alerts (push notifications)
+
+The proxy pushes the operator's AICoin Admin app (`com.tarasmaslov.aicoinadmin`) through APNs with
+token-based auth. Kinds, each debounced per subject through Redis (`aicoin:{aicoin}:alert-sent:<kind>:<subject>`, `SET NX EX`):
+
+| kind | when | debounce |
+|---|---|---|
+| `app_cap` | an app's request is refused at its daily cap | once per app per day |
+| `app_cap_reset` | the UTC day after an app was capped | once per app per day |
+| `budget` | production spend reaches 90% (`near`) or 100% (`exhausted`) of the spend budget | 6 h per level |
+| `provider_credit` | a provider answers with a credit/quota error (402, Anthropic "credit balance is too low", OpenAI `insufficient_quota`, Google `RESOURCE_EXHAUSTED`, …) | 1 h per provider |
+| `provider_down` | 5+ upstream 5xx from one provider in a minute | 30 min per provider |
+| `wallet_low` | a wallet assigned to an app holds fewer than `AICOIN_PROXY_ALERT_WALLET_LOW_COINS` (default 1000) coins, or none | 6 h per wallet and level |
+| `iap_purchase` | a purchase is redeemed and credited | none (one per transaction) |
+| `iap_failure` | `redeem-iap` refuses a transaction (bad signature, unknown bundle/product, Sandbox refused) | 30 min per reason |
+| `errors_spike` | 5+ client responses in a minute were 5xx, and at least 20% of them | 30 min |
+| `deploy` | the proxy process starts | none |
+
+The monitor runs every minute (budget, wallets and resets every fifth). `AICOIN_PROXY_ALERT_DEBOUNCE_SCALE`
+multiplies every window (0 disables debouncing). Every alert is also kept in `aicoin:{aicoin}:admin-alerts`
+(newest 200), pushed or not.
+
+APNs config (env, `.env.prod`): `AICOIN_PROXY_APNS_KEY` (the .p8 PEM, `\n`-escaped on one line) or
+`AICOIN_PROXY_APNS_KEY_FILE`, `AICOIN_PROXY_APNS_KEY_ID`, `AICOIN_PROXY_APNS_TEAM_ID` (default
+`HTS38ZPRVH`), `AICOIN_PROXY_APNS_TOPIC` (default `com.tarasmaslov.aicoinadmin`). Without a key,
+alerts are recorded and not pushed. Each device is sent to the APNs host of its own environment:
+`development` → `api.sandbox.push.apple.com` (development-signed builds), `production` →
+`api.push.apple.com` (TestFlight and App Store). A token APNs reports dead (410, `BadDeviceToken`)
+is forgotten.
+
+Endpoints, all `X-Admin-Token` gated:
+- `POST /admin/devices` — `{"token":"<hex>","environment":"development"|"production","disabled":["deploy",...]}`
+  registers or updates a device (hash `aicoin:{aicoin}:admin-devices`); `disabled` lists the kinds
+  this device does not want.
+- `GET /admin/devices` → `{"devices":[{"token","environment","disabled"}]}`; `DELETE /admin/devices/{token}`.
+- `GET /admin/alerts` → `{"apns_configured":true,"apns_key_id":"…","wallet_low_coins":1000,"kinds":[{"id","label","debounce_minutes"}],"recent":[{"kind","title","body","at","devices","pushed"}]}`.
+- `POST /admin/alerts/test` — pushes a test notification to every device now → `{"results":["<token prefix>: sent"]}`.
 
 ### The current offer
 

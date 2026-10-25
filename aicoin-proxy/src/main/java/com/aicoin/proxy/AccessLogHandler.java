@@ -107,6 +107,7 @@ final class AccessLogHandler extends ChannelDuplexHandler {
 
     private void log(int status, int responseBytes, String coins, String outcome, long[] timing) {
         pending = false;
+        AdminAlerts.get().clientResponse(status);
         if (accessLog == null) {
             return;
         }

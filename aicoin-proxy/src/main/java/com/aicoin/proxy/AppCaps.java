@@ -232,7 +232,47 @@ final class AppCaps {
      * balance gate still applies, and a Redis blip should not take every capped app offline.
      */
     void check(String wallet, Instant now, Consumer<Decision> onDecision) {
-        store.appForWallet(wallet).thenCompose(app -> {
+        check(wallet, null, now, onDecision);
+    }
+
+    /** HTTP header an app sends to name itself — see {@link #resolveApp}. */
+    static final String APP_HEADER = "X-AICoin-App";
+
+    /**
+     * The wallet each {@code X-AICoin-App} header was last seen with, so a call's cost — recorded
+     * later, by wallet only — lands on the app its request named. Bounded; cleared when full.
+     */
+    private final Map<String, String> headerAppByWallet = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int HEADER_APP_MEMORY = 10_000;
+
+    /**
+     * Which app a request counts toward. A wallet the operator assigned to an app always counts
+     * toward that app, so a header can never move a capped wallet out of its cap. Otherwise the
+     * {@code X-AICoin-App} header names the app — but only one the operator has configured; an
+     * unknown name is ignored, so a caller cannot invent apps.
+     */
+    CompletionStage<Optional<String>> resolveApp(String wallet, String headerApp) {
+        return store.appForWallet(wallet).thenCompose(mapped -> {
+            if (mapped.isPresent() || headerApp == null || !isValidAppName(headerApp.trim().toLowerCase(java.util.Locale.ROOT))) {
+                return CompletableFuture.completedFuture(mapped);
+            }
+            String named = headerApp.trim().toLowerCase(java.util.Locale.ROOT);
+            return store.getApp(named).thenApply(config -> {
+                if (config.isEmpty()) {
+                    return Optional.<String>empty();
+                }
+                if (headerAppByWallet.size() > HEADER_APP_MEMORY) {
+                    headerAppByWallet.clear();
+                }
+                headerAppByWallet.put(wallet.toLowerCase(java.util.Locale.ROOT), named);
+                return Optional.of(named);
+            });
+        });
+    }
+
+    /** As {@link #check(String, Instant, Consumer)}, with the request's {@code X-AICoin-App} header (may be null). */
+    void check(String wallet, String headerApp, Instant now, Consumer<Decision> onDecision) {
+        resolveApp(wallet, headerApp).thenCompose(app -> {
             if (app.isEmpty()) {
                 return CompletableFuture.completedFuture(Decision.allowed());
             }
@@ -261,7 +301,11 @@ final class AppCaps {
      * is never charged, because the charge lives inside {@code onAllowed}.
      */
     void gate(String wallet, Instant now, Runnable onAllowed, Consumer<Decision> onCapped) {
-        check(wallet, now, decision -> {
+        gate(wallet, null, now, onAllowed, onCapped);
+    }
+
+    void gate(String wallet, String headerApp, Instant now, Runnable onAllowed, Consumer<Decision> onCapped) {
+        check(wallet, headerApp, now, decision -> {
             if (decision.isCapped()) {
                 onCapped.accept(decision);
             } else {
@@ -276,6 +320,8 @@ final class AppCaps {
             return;
         }
         store.appForWallet(wallet)
+                .thenApply(app -> app.or(() -> Optional.ofNullable(
+                        headerAppByWallet.get(wallet.toLowerCase(java.util.Locale.ROOT)))))
                 .thenCompose(app -> app.isEmpty()
                         ? CompletableFuture.<Void>completedFuture(null)
                         : store.addSpend(app.get(), dayOf(at), costUsd))

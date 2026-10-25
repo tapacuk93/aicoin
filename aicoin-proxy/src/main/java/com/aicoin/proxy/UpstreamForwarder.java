@@ -367,6 +367,7 @@ final class UpstreamForwarder {
             byte[] bodyBytes = ByteBufUtil.getBytes(response.content());
 
             healthTracker.record(provider, status.code());
+            AdminAlerts.get().upstreamResponse(provider, status.code(), bodyBytes);
 
             FullHttpResponse toClient = new DefaultFullHttpResponse(
                     HttpVersion.HTTP_1_1, statusForClient(status), Unpooled.wrappedBuffer(bodyBytes));

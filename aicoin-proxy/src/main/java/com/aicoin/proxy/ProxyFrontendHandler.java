@@ -124,6 +124,26 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             IapPackagesHandler.serveAdminSet(ctx, request, ledger, config);
             return;
         }
+        if (request.method() == HttpMethod.GET && "/admin/alerts".equals(path)) {
+            AlertsHandler.serveAlerts(ctx, request, config);
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/admin/alerts/test".equals(path)) {
+            AlertsHandler.serveTest(ctx, request, config);
+            return;
+        }
+        if (request.method() == HttpMethod.GET && "/admin/devices".equals(path)) {
+            AlertsHandler.serveDevices(ctx, request, config);
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/admin/devices".equals(path)) {
+            AlertsHandler.serveRegister(ctx, request, config);
+            return;
+        }
+        if (request.method() == HttpMethod.DELETE && path.startsWith("/admin/devices/")) {
+            AlertsHandler.serveUnregister(ctx, request, config, path.substring("/admin/devices/".length()));
+            return;
+        }
         if (request.method() == HttpMethod.GET && "/admin/apps".equals(path)) {
             AppCapsHandler.serveList(ctx, request, ledger, config);
             return;
@@ -302,6 +322,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
 
+        String appHeader = request.headers().get(AppCaps.APP_HEADER);
         Optional<String> providerOpt = ProviderRouting.resolve(request.headers().get(X_AI_HEADER));
         if (!providerOpt.isPresent()) {
             sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "missing or unknown X-AI header");
@@ -335,6 +356,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             String name = h.getKey();
             if (name.equalsIgnoreCase(X_AI_HEADER)
                     || name.equalsIgnoreCase(X_API_KEY_HEADER)
+                    || name.equalsIgnoreCase(AppCaps.APP_HEADER)
                     || name.equalsIgnoreCase(HttpHeaderNames.HOST.toString())
                     || name.equalsIgnoreCase(HttpHeaderNames.CONTENT_LENGTH.toString())
                     || name.equalsIgnoreCase(HttpHeaderNames.AUTHORIZATION.toString())
@@ -372,7 +394,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 Optional<String> deleted = VoiceOwnership.deletedVoice(provider, method.name(), path);
                 if (!deleted.isPresent()) {
                     forwardPaid(ctx, method, finalForwardUri, forwardHeaders, bodyBytes, providerConfig, provider,
-                            walletAddress, freeTarget, voiceHook(provider, method.name(), path, walletAddress, null));
+                            walletAddress, freeTarget, voiceHook(provider, method.name(), path, walletAddress, null), appHeader);
                     return;
                 }
                 // Only the wallet that made a voice may delete it; see VoiceOwnership for why a
@@ -385,7 +407,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                     } else {
                         forwardPaid(ctx, method, finalForwardUri, forwardHeaders, bodyBytes, providerConfig, provider,
                                 walletAddress, freeTarget, voiceHook(provider, method.name(), path, walletAddress,
-                                        deleted.get()));
+                                        deleted.get()), appHeader);
                     }
                 });
             });
@@ -396,7 +418,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
     private void forwardPaid(ChannelHandlerContext ctx, HttpMethod method, String forwardUri,
                              List<Map.Entry<String, String>> forwardHeaders, byte[] bodyBytes,
                              ProviderConfig providerConfig, String provider, String walletAddress, boolean freeTarget,
-                             UpstreamForwarder.ResponseHook hook) {
+                             UpstreamForwarder.ResponseHook hook, String appHeader) {
         List<Map.Entry<String, String>> headers = forwardHeaders;
         if (hook != null) {
             // The hook reads the answer, so ask for it unencoded.
@@ -414,7 +436,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                     walletAddress, FREE_TARGET_COST_AICOIN, hook);
             return;
         }
-        withinAppCap(ctx, walletAddress, () -> ledger.debitForCall(walletAddress, CALL_COST_AICOIN, provider, debit -> {
+        withinAppCap(ctx, walletAddress, appHeader, () -> ledger.debitForCall(walletAddress, CALL_COST_AICOIN, provider, debit -> {
             if (!debit.isReachable()) {
                 sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
             } else if (!debit.isSuccess()) {
@@ -431,9 +453,10 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
      * The per-app daily cap, checked before any coin is held: a wallet whose app is at its cap
      * gets {@code 429 app_daily_cap_reached} and is never charged. See {@link AppCaps}.
      */
-    private void withinAppCap(ChannelHandlerContext ctx, String walletAddress, Runnable onAllowed) {
+    private void withinAppCap(ChannelHandlerContext ctx, String walletAddress, String appHeader, Runnable onAllowed) {
         Instant now = Instant.now();
-        ledger.appCaps().gate(walletAddress, now, onAllowed, decision -> {
+        ledger.appCaps().gate(walletAddress, appHeader, now, onAllowed, decision -> {
+            AdminAlerts.get().appCapReached(decision.getStatus());
             byte[] bytes = decision.errorJson().getBytes(CharsetUtil.UTF_8);
             FullHttpResponse response = new DefaultFullHttpResponse(
                     HttpVersion.HTTP_1_1, HttpResponseStatus.TOO_MANY_REQUESTS, Unpooled.wrappedBuffer(bytes));
@@ -550,6 +573,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
      * that cost it money.
      */
     private void requireApiToken(ChannelHandlerContext ctx, FullHttpRequest request, Consumer<String> onVerified) {
+        String appHeader = request.headers().get(AppCaps.APP_HEADER);
         Optional<String> apiKeyOpt = WalletValidation.extractWalletId(request.headers().get(X_API_KEY_HEADER));
         if (!apiKeyOpt.isPresent()) {
             sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, "missing X-Api-Key (API token)");
@@ -570,7 +594,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             }
             // Every caller of this spends coins, so the app's daily cap applies before it runs.
             String address = authResult.getAddress();
-            withinAppCap(ctx, address, () -> onVerified.accept(address));
+            withinAppCap(ctx, address, appHeader, () -> onVerified.accept(address));
         });
     }
 
@@ -695,10 +719,12 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         AppleJwsVerifier.VerifyResult verified = AppleJwsVerifier.verify(
                 (String) signedTransactionRaw, Instant.now().toEpochMilli());
         if (!verified.isValid()) {
+            AdminAlerts.get().iapFailed("verification failed: " + verified.getFailureReason(), null);
             sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, verified.getFailureReason());
             return;
         }
         if (!IapPackages.isKnownBundleId(verified.getBundleId())) {
+            AdminAlerts.get().iapFailed("unknown bundleId " + verified.getBundleId(), verified.getProductId());
             sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "unknown bundleId");
             return;
         }
@@ -710,6 +736,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             LOG.log(Level.WARNING, "rejected a Sandbox purchase for product {0} (transaction {1}) — "
                     + "set iap.acceptSandboxPurchases only on a non-production deployment",
                     new Object[] {verified.getProductId(), verified.getTransactionId()});
+            AdminAlerts.get().iapFailed("sandbox purchase refused", verified.getProductId());
             sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "sandbox purchases are not accepted");
             return;
         }
@@ -725,6 +752,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 return;
             }
             if (!lookup.isFound()) {
+                AdminAlerts.get().iapFailed("unknown productId", verified.getProductId());
                 sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "unknown productId");
                 return;
             }
@@ -735,6 +763,9 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                     return;
                 }
                 double credited = redeemResult.isFreshCredit() ? coins : 0.0;
+                if (redeemResult.isFreshCredit()) {
+                    AdminAlerts.get().iapCredited(verified.getProductId(), coins, toUserId, verified.getTransactionId());
+                }
                 byte[] bytes = ("{\"credited\":" + formatNumber(credited)
                         + ",\"balance\":" + formatNumber(redeemResult.getBalance()) + "}").getBytes(CharsetUtil.UTF_8);
                 sendJson(ctx, HttpResponseStatus.OK, bytes);

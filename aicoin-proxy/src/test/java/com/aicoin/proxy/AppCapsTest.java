@@ -227,4 +227,37 @@ class AppCapsTest {
         assertFalse(AppCaps.isValidAppName("-x"));
         assertFalse(AppCaps.isValidAppName(""));
     }
+
+    private AppCaps.Decision decide(String wallet, String header, Instant now) {
+        AtomicReference<AppCaps.Decision> out = new AtomicReference<>();
+        caps.check(wallet, header, now, out::set);
+        return out.get();
+    }
+
+    @Test
+    void theAppHeaderCountsAnUnmappedWalletTowardTheNamedApp() {
+        caps.put("earth-empire", true, 20.0, List.of(), MORNING, r -> { });
+        assertFalse(decide(OTHER_WALLET, "earth-empire", MORNING).isCapped());
+        // The call's cost is recorded by wallet alone; it lands on the app the request named.
+        caps.recordSpend(OTHER_WALLET, 20.5, MORNING);
+        assertEquals(20.5, store.spend.get("earth-empire:2026-10-25"), 1e-9);
+        assertTrue(decide(OTHER_WALLET, "Earth-Empire", MORNING).isCapped());
+        // Without the header an unmapped wallet is in no app.
+        assertFalse(decide(OTHER_WALLET, MORNING).isCapped());
+    }
+
+    @Test
+    void anUnknownAppInTheHeaderIsIgnored() {
+        assertFalse(decide(OTHER_WALLET, "made-up", MORNING).isCapped());
+        caps.recordSpend(OTHER_WALLET, 5, MORNING);
+        assertTrue(store.spend.isEmpty());
+    }
+
+    @Test
+    void aMappedWalletCannotEscapeItsCapByNamingAnotherApp() {
+        putEarthEmpire(1);
+        caps.put("roomy", true, 1000.0, List.of(), MORNING, r -> { });
+        caps.recordSpend(EE_WALLET, 2, MORNING);
+        assertTrue(decide(EE_WALLET, "roomy", MORNING).isCapped());
+    }
 }

@@ -231,7 +231,9 @@ final class UpstreamCall {
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, FullHttpResponse response) {
             healthTracker.record(provider, response.status().code());
-            once.accept(Result.of(response.status().code(), ByteBufUtil.getBytes(response.content())));
+            byte[] body = ByteBufUtil.getBytes(response.content());
+            AdminAlerts.get().upstreamResponse(provider, response.status().code(), body);
+            once.accept(Result.of(response.status().code(), body));
             ctx.close();
         }
 

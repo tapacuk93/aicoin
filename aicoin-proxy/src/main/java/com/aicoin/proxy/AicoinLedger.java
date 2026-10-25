@@ -240,6 +240,11 @@ final class AicoinLedger implements AutoCloseable {
         this.appCaps = new AppCaps(new AppCaps.RedisStore(commands));
     }
 
+    /** The ledger's Redis connection, shared with {@link AdminAlerts} so alerts need no second one. */
+    RedisAsyncCommands<String, String> redis() {
+        return commands;
+    }
+
     /** Per-app daily spend caps, kept in this ledger's Redis — see {@link AppCaps}. */
     AppCaps appCaps() {
         return appCaps;
