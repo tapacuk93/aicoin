@@ -25,7 +25,7 @@ public enum AICoinPurchaseError: Error, LocalizedError, Sendable {
         case .verificationFailed:
             return "Apple could not verify this purchase."
         case .redeemFailed:
-            return "Your purchase went through, but we couldn't credit your AICoin wallet yet. It will be retried automatically."
+            return "Payment received — your aicoins are on their way. Crediting is retried automatically, and you won't be charged again."
         case .offerUnavailable:
             return "AICoin isn't available to buy right now. Please try again later."
         case .offerChanged(_, let to):

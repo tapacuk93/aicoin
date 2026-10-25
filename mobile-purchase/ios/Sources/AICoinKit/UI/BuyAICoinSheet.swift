@@ -72,6 +72,7 @@ public struct BuyAICoinSheet: View {
     @State private var selectedTab: Tab = .buy
     @State private var purchasingProductId: String?
     @State private var errorMessage: String?
+    @State private var purchaseError: Error?
 
     public init(
         iapManager: IAPManager,
@@ -161,31 +162,28 @@ public struct BuyAICoinSheet: View {
     }
 
     private var buyTab: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("aicoins pay for AI calls")
-                .font(.title3.bold())
-                .padding(.horizontal)
-                // The heading is the first thing in the tab and was sitting flush against the
-                // top edge, which reads as clipped rather than as a title.
-                .padding(.top)
-                .accessibilityIdentifier(Identifiers.exchangeRate)
-            Text("A call costs from 1 aicoin, more if it's a long one — you're charged what it costs to run, never a subscription and never your own API key.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("aicoins pay for AI calls")
+                    .font(.title3.bold())
+                    .accessibilityIdentifier(Identifiers.exchangeRate)
+                Text("Every AI call costs at least 1 aicoin; longer ones cost what they take to run. No subscription, no API key of your own.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal)
+            // The heading is the first thing in the tab and was sitting flush against the
+            // top edge, which reads as clipped rather than as a title.
+            .padding(.top)
 
             if let balance = walletStore.balance {
-                Text("Current balance: \(balance.formatted(.number.precision(.fractionLength(0...1)))) aicoins")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                balanceCard(balance)
                     .padding(.horizontal)
-                    .accessibilityIdentifier(Identifiers.balance)
             }
 
             if let errorMessage {
-                Text(errorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+                notice(errorMessage)
                     .padding(.horizontal)
                     .accessibilityIdentifier(Identifiers.error)
             }
@@ -217,13 +215,98 @@ public struct BuyAICoinSheet: View {
                     .accessibilityIdentifier(Identifiers.emptyPackages)
                 Spacer()
             } else {
-                List(iapManager.purchasablePackages) { package in
-                    packageRow(package)
+                let packages = iapManager.purchasablePackages
+                let savings = Self.savings(for: packages) { unitPrice($0, storeKit: $1) }
+                List(packages) { package in
+                    packageRow(package, saving: savings[package.productId])
                 }
                 .listStyle(.plain)
                 .accessibilityIdentifier(Identifiers.packageList)
             }
         }
+    }
+
+    /// The balance as the sheet's one number to look at. A negative balance is a real state —
+    /// a metered call can run past what was left — so it is explained rather than shown as a
+    /// bare minus sign.
+    private func balanceCard(_ balance: Double) -> some View {
+        let amount = balance.formatted(.number.precision(.fractionLength(0...1)))
+        return HStack(spacing: 10) {
+            AICoinMark()
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Balance: \(amount) aicoins")
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+                if balance < 0 {
+                    Text("A call cost more than you had left. The shortfall comes out of your next purchase.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(balance < 0 ? Color.orange.opacity(0.12) : Color.secondary.opacity(0.08))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(Identifiers.balance)
+    }
+
+    /// A paid-but-not-yet-credited purchase is not a failure the user has to act on, so it reads
+    /// as a pending notice; anything else is an error.
+    private func notice(_ message: String) -> some View {
+        let pending = isPendingCredit
+        return Label {
+            Text(message).fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: pending ? "clock.arrow.circlepath" : "exclamationmark.triangle.fill")
+        }
+        .font(.footnote)
+        .foregroundStyle(pending ? Color.orange : Color.red)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill((pending ? Color.orange : Color.red).opacity(0.1))
+        )
+    }
+
+    /// What one coin costs in this package, from StoreKit's localized price when it has resolved
+    /// and the server's USD hint otherwise. Only ever compared within one sheet, so mixing the
+    /// two would be wrong — `savings` uses StoreKit only when every row has it.
+    private func unitPrice(_ package: AICoinPackage, storeKit: Bool) -> Double? {
+        guard package.coins > 0 else { return nil }
+        if storeKit {
+            guard let product = iapManager.products[package.productId] else { return nil }
+            return NSDecimalNumber(decimal: product.price).doubleValue / Double(package.coins)
+        }
+        return package.usdPriceHint / Double(package.coins)
+    }
+
+    /// Whole-percent saving per coin against the smallest package, keyed by product ID. Savings
+    /// under 5% are left out: "save 2%" is noise, not a reason to buy the bigger one.
+    static func savings(
+        for packages: [AICoinPackage],
+        unitPrice: (AICoinPackage, Bool) -> Double?
+    ) -> [String: Int] {
+        let storeKit = packages.allSatisfy { unitPrice($0, true) != nil }
+        guard let base = packages.min(by: { $0.coins < $1.coins }),
+              let baseUnit = unitPrice(base, storeKit), baseUnit > 0 else { return [:] }
+        var out: [String: Int] = [:]
+        for package in packages where package.productId != base.productId {
+            guard let unit = unitPrice(package, storeKit) else { continue }
+            let percent = Int(((1 - unit / baseUnit) * 100).rounded())
+            if percent >= 5 { out[package.productId] = percent }
+        }
+        return out
+    }
+
+    private var isPendingCredit: Bool {
+        if case .redeemFailed = purchaseError as? AICoinPurchaseError { return true }
+        return false
     }
 
     private func offerButton(_ offer: AICoinOffer) -> some View {
@@ -259,6 +342,7 @@ public struct BuyAICoinSheet: View {
     private func buyOffer(_ offer: AICoinOffer) async {
         purchasingProductId = iapManager.offerProduct?.id ?? offer.tier
         errorMessage = nil
+        purchaseError = nil
         defer { purchasingProductId = nil }
         do {
             // Passing the displayed amount as `confirmedCoins` is what turns a mid-purchase offer
@@ -268,33 +352,55 @@ public struct BuyAICoinSheet: View {
                 address: identity.address, confirmedCoins: offer.coins)
             await handle(outcome)
         } catch {
+            purchaseError = error
             errorMessage = error.localizedDescription
         }
     }
 
-    private func packageRow(_ package: AICoinPackage) -> some View {
+    private func packageRow(_ package: AICoinPackage, saving: Int?) -> some View {
         Button {
             Task { await buy(package) }
         } label: {
-            HStack {
+            HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(package.coins) aicoins")
-                        .font(.body.weight(.semibold))
-                    Text("from \(package.coins) AI calls")
+                    HStack(spacing: 6) {
+                        Text("\(package.coins.formatted()) aicoins")
+                            .font(.body.weight(.semibold))
+                        if let saving {
+                            Text("Save \(saving)%")
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.green.opacity(0.18)))
+                                .foregroundStyle(Color.green)
+                        }
+                    }
+                    // Every call costs at least one coin, so the coin count is a ceiling on
+                    // calls, not a floor — "from N calls" said the opposite.
+                    Text("up to \(package.coins.formatted()) AI calls")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if purchasingProductId == package.productId {
-                    ProgressView()
-                } else if let product = iapManager.products[package.productId] {
-                    Text(product.displayPrice)
-                        .font(.body.weight(.semibold))
-                } else {
-                    Text(package.usdPriceHint, format: .currency(code: "USD"))
-                        .foregroundStyle(.secondary)
+                Group {
+                    if purchasingProductId == package.productId {
+                        ProgressView().controlSize(.small)
+                    } else if let product = iapManager.products[package.productId] {
+                        Text(product.displayPrice)
+                    } else {
+                        Text(package.usdPriceHint, format: .currency(code: "USD"))
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .font(.body.weight(.semibold))
+                .monospacedDigit()
+                // Price in a capsule so the row reads as something to tap, not a table line.
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .frame(minWidth: 88)
+                .background(Capsule().fill(Color.accentColor.opacity(0.14)))
             }
+            .padding(.vertical, 4)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -307,10 +413,12 @@ public struct BuyAICoinSheet: View {
     private func buy(_ package: AICoinPackage) async {
         purchasingProductId = package.productId
         errorMessage = nil
+        purchaseError = nil
         defer { purchasingProductId = nil }
         do {
             await handle(try await iapManager.purchase(package, address: identity.address))
         } catch {
+            purchaseError = error
             errorMessage = error.localizedDescription
         }
     }
