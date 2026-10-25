@@ -633,8 +633,8 @@ A ceiling, in dollars, on what ordinary users' AI calls may cost the operator in
 the Redis string `aicoin:budget`; **unset means no ceiling**, which is the state the proxy shipped
 in before this existed and remains the default.
 
-- `GET /budget` → `{"budget_usd":200.0,"spend_usd":41.7,"internal_spend_usd":7.8,"remaining_usd":158.3,"exhausted":false}` —
-  public, `Access-Control-Allow-Origin: *`, same posture as `GET /price`. `budget_usd` and
+- `GET /admin/budget` → `{"budget_usd":200.0,"spend_usd":41.7,"internal_spend_usd":7.8,"remaining_usd":158.3,"exhausted":false}` —
+  `X-Admin-Token` gated, like every other admin path; the ceiling is not public. `budget_usd` and
   `remaining_usd` are `null` when no ceiling is set.
 - `POST /admin/budget` — `X-Admin-Token` gated. Body `{"usd":N}` sets the ceiling; `{"usd":0}`
   removes it. Admin script: **`aicoin-proxy/scripts/set-budget.sh 200`** (`--show`, `--clear`).

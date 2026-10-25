@@ -58,12 +58,22 @@ struct OverviewView: View {
                 Section("Providers") {
                     ForEach(providers) { p in
                         HStack {
-                            Image(systemName: p.healthy ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                                .foregroundStyle(p.healthy ? .green : .red)
+                            Image(systemName: !p.enabled ? "minus.circle.fill" : p.healthy ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                                .foregroundStyle(!p.enabled ? .gray : p.healthy ? .green : .red)
                             VStack(alignment: .leading) {
                                 Text(p.name)
                                 Text([p.state, p.detail].compactMap { $0 }.joined(separator: " - "))
                                     .font(.caption).foregroundStyle(.secondary)
+                                // healthy is inferred from recent forwarded calls, so a provider can answer
+                                // its probe and still be red; say which calls failed
+                                if p.overBudget == true {
+                                    Text("recent calls got 402/403 (out of credit or refused)")
+                                        .font(.caption).foregroundStyle(.red)
+                                }
+                                if p.rateLimited == true {
+                                    Text("recent calls got 429 (rate limited)")
+                                        .font(.caption).foregroundStyle(.red)
+                                }
                             }
                             Spacer()
                             if let ms = p.latencyMs { Text("\(ms) ms").font(.caption).foregroundStyle(.secondary) }

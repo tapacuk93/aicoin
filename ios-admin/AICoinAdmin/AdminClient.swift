@@ -61,7 +61,7 @@ final class AdminClient: ObservableObject {
 
     // MARK: reads
 
-    func budget() async throws -> Budget { try await get("/budget") }
+    func budget() async throws -> Budget { try await get("/admin/budget", admin: true) }
     func price() async throws -> Price { try await get("/price") }
     func health() async throws -> Health { try await get("/health") }
     func packages() async throws -> [Package] { (try await get("/iap/packages") as Packages).packages }

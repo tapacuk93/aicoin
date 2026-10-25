@@ -55,9 +55,7 @@ done
 
 [[ -n "$ACTION" ]] || die "nothing to do — pass a dollar amount, --show, --clear or --internal (see --help)"
 
-if [[ "$ACTION" != "show" ]]; then
-    [[ -n "${AICOIN_PROXY_ADMIN_TOKEN:-}" ]] || die "AICOIN_PROXY_ADMIN_TOKEN is not set"
-fi
+[[ -n "${AICOIN_PROXY_ADMIN_TOKEN:-}" ]] || die "AICOIN_PROXY_ADMIN_TOKEN is not set"
 
 # Turns "a,b c" into the JSON array body the admin endpoint takes.
 json_array() {
@@ -70,7 +68,7 @@ json_array() {
 
 case "$ACTION" in
     show)
-        curl -fsS "$URL/budget"; echo
+        curl -fsS "$URL/admin/budget" -H "X-Admin-Token: $AICOIN_PROXY_ADMIN_TOKEN"; echo
         ;;
     set)
         [[ "$VALUE" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "ceiling must be a non-negative number, got '$VALUE'"

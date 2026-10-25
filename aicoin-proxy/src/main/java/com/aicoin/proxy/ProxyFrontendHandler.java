@@ -124,8 +124,8 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             IapPackagesHandler.serveAdminSet(ctx, request, ledger, config);
             return;
         }
-        if (request.method() == HttpMethod.GET && "/budget".equals(path)) {
-            BudgetHandler.serveBudget(ctx, ledger);
+        if (request.method() == HttpMethod.GET && "/admin/budget".equals(path)) {
+            BudgetHandler.serveBudget(ctx, request, ledger, config);
             return;
         }
         if (request.method() == HttpMethod.POST && "/admin/budget".equals(path)) {

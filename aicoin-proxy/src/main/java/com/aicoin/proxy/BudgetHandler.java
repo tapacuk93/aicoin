@@ -18,10 +18,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * The operator's total spend ceiling, per CONTRACT.md's "Spend budget": {@code GET /budget}
- * (public, {@code Access-Control-Allow-Origin: *}, same posture as {@code GET /price} — the
- * landing page and any dashboard read it cross-origin), {@code POST /admin/budget} (the one write
- * path for the ceiling), and {@code POST /admin/internal-wallets} (which wallets are exempt).
+ * The operator's total spend ceiling, per CONTRACT.md's "Spend budget": {@code GET /admin/budget}
+ * (the ceiling and spend against it — operator business, so {@code X-Admin-Token} gated like every
+ * other admin path), {@code POST /admin/budget} (the one write path for the ceiling), and
+ * {@code POST /admin/internal-wallets} (which wallets are exempt).
  *
  * <p>The ceiling exists to bound what the operator can be billed by upstream providers. When
  * production spend reaches it, {@code GET /iap/packages} serves an empty catalog and the paywall
@@ -36,11 +36,14 @@ final class BudgetHandler {
     private BudgetHandler() {
     }
 
-    /** Public, {@code Access-Control-Allow-Origin: *} — same posture as {@code GET /price}. */
-    static void serveBudget(ChannelHandlerContext ctx, AicoinLedger ledger) {
+    /** {@code GET /admin/budget} — {@code X-Admin-Token} gated; the ceiling is not for the public. */
+    static void serveBudget(ChannelHandlerContext ctx, FullHttpRequest request, AicoinLedger ledger, ProxyConfig config) {
+        if (!isAuthorized(request, config, ctx)) {
+            return;
+        }
         ledger.computeBudget(result -> {
             if (!result.isReachable()) {
-                sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not load budget", true);
+                sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not load budget", false);
                 return;
             }
             Double limit = result.getLimitUsd();
@@ -49,7 +52,7 @@ final class BudgetHandler {
                     + ",\"spend_usd\":" + result.getProductionSpendUsd()
                     + ",\"internal_spend_usd\":" + result.getInternalSpendUsd()
                     + ",\"remaining_usd\":" + remaining
-                    + ",\"exhausted\":" + result.isExhausted() + "}", true);
+                    + ",\"exhausted\":" + result.isExhausted() + "}", false);
         });
     }
 
