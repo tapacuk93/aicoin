@@ -38,9 +38,14 @@ asc_app_id_for_product() {
     com.tarasmaslov.infiniteairadio.*)     echo "6788594796" ;;
     com.tarasmaslov.alllanguageslearner.*) echo "6796105967" ;;
     com.tarasmaslov.learnit.*)             echo "6797492573" ;;
+    com.oeaio.infiniteaibook.*)            echo "6825120517" ;;
     *)                                     echo "" ;;
   esac
 }
+
+# Numbers are formatted and parsed with a point: under a locale whose decimal separator is a
+# comma (uk_UA, de_DE…) awk printed "$199,00" and the report compared nonsense.
+export LC_ALL=C
 
 APPLE_CUT="0.30"
 FEE_MARGIN="0.50"
