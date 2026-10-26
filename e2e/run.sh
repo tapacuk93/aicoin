@@ -273,6 +273,17 @@ fi
 bal_carol_after_call=$(balance_of "$ADDR_CAROL")
 [ "$bal_carol_after_call" = "$((CLAIM_AMOUNT - 1))" ] && pass "carol's paid call debited exactly 1 aicoin (balance $CLAIM_AMOUNT -> $((CLAIM_AMOUNT - 1)))" || fail "expected carol balance $((CLAIM_AMOUNT - 1)) after the call, got $bal_carol_after_call"
 
+log "carol reads her own history (live-signed GET /wallet/api/transactions): the debit, then the claim"
+code=$(live_signed_request "$KEY_CAROL" "$ADDR_CAROL" "GET" "/wallet/api/transactions" "" "$WORKDIR/carol-tx.json")
+if [ "$code" = "200" ]; then
+  types=$(python3 -c "import json;print(','.join(t['type'] for t in json.load(open('$WORKDIR/carol-tx.json'))['transactions']))")
+  [ "$types" = "debit,claim" ] && pass "carol's history is her debit then her claim, most recent first" || fail "expected debit,claim, got $types"
+else
+  fail "expected 200 for carol's own history, got $code: $(cat "$WORKDIR/carol-tx.json")"
+fi
+code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PROXY_PORT/wallet/api/transactions" -H "X-Api-Key: $ADDR_CAROL")
+[ "$code" = "401" ] && pass "history without a live signature is refused (401)" || fail "expected 401 for an unsigned history read, got $code"
+
 log "--- test 4: proxy /health lists every configured provider, and says which are alive ---"
 health=$(curl -s "http://127.0.0.1:$PROXY_PORT/health")
 count=$(echo "$health" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['providers']))")

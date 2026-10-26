@@ -38,8 +38,12 @@ final class ScreenshotTests: XCTestCase {
         create.tap()
         let saved = app.switches["savedToggle"]
         XCTAssertTrue(saved.waitForExistence(timeout: 10))
-        saved.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
-        app.buttons["continueButton"].tap()
+        let continueButton = app.buttons["continueButton"]
+        for _ in 0..<3 where !continueButton.isEnabled {
+            saved.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+            _ = continueButton.wait(for: \.isEnabled, toEqual: true, timeout: 2)
+        }
+        continueButton.tap()
 
         let balance = app.staticTexts["balanceValue"]
         XCTAssertTrue(balance.waitForExistence(timeout: 15))

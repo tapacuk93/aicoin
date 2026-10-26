@@ -16,9 +16,13 @@ final class AICoinWalletUITests: XCTestCase {
 
         let saved = app.switches["savedToggle"]
         XCTAssertTrue(saved.waitForExistence(timeout: 5))
-        // The switch at the row's trailing edge: tapping a toggle row's label does not flip it.
-        saved.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         let continueButton = app.buttons["continueButton"]
+        // The switch at the row's trailing edge: tapping a toggle row's label does not flip it,
+        // and a tap during the screen's appearance can be dropped, so it is retried.
+        for _ in 0..<3 where !continueButton.isEnabled {
+            saved.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+            _ = continueButton.wait(for: \.isEnabled, toEqual: true, timeout: 2)
+        }
         XCTAssertTrue(continueButton.isEnabled)
         continueButton.tap()
     }

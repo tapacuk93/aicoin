@@ -241,6 +241,16 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                     address -> handleGrantsList(ctx, address));
             return;
         }
+        /*
+         * A wallet's own history, for the wallet app. Live-signed rather than public like a
+         * balance: the log names every counterparty and every provider called, which is more than
+         * an address should give away to whoever types it in.
+         */
+        if (request.method() == HttpMethod.GET && "/wallet/api/transactions".equals(path)) {
+            requireLiveSignature(ctx, request, ByteBufUtil.getBytes(request.content()),
+                    address -> handleOwnTransactions(ctx, address));
+            return;
+        }
         if (request.method() == HttpMethod.POST && "/wallet/api/grants/revoke".equals(path)) {
             byte[] body = ByteBufUtil.getBytes(request.content());
             requireLiveSignature(ctx, request, body,
@@ -1037,6 +1047,18 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 first = false;
             }
             sendJsonText(ctx, HttpResponseStatus.OK, out.append("]}").toString());
+        });
+    }
+
+    /** The signer's own transaction log, most recent first — the same entries the admin sees. */
+    private void handleOwnTransactions(ChannelHandlerContext ctx, String address) {
+        ledger.getTransactions(address, transactions -> {
+            if (transactions.isEmpty()) {
+                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not load transactions");
+                return;
+            }
+            sendJsonText(ctx, HttpResponseStatus.OK,
+                    "{\"transactions\":[" + String.join(",", transactions.get()) + "]}");
         });
     }
 

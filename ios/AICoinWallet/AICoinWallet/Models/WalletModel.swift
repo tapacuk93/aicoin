@@ -10,6 +10,9 @@ final class WalletModel: ObservableObject {
     @Published private(set) var price: ProxyAPI.PriceResponse?
     @Published private(set) var freeClaimsLeft: Int?
     @Published private(set) var standing: ProxyAPI.Reputation?
+    /// `nil` until first fetched; stays at its last value when a refresh fails.
+    @Published private(set) var transactions: [ProxyAPI.Transaction]?
+    @Published private(set) var transactionsFailed = false
     /// Set when the balance — the one number the screen is for — could not be fetched, so a
     /// dash on screen says "unknown" rather than passing for an empty wallet.
     @Published private(set) var balanceFailed = false
@@ -28,12 +31,16 @@ final class WalletModel: ObservableObject {
         async let price = try? ProxyAPI.fetchPrice()
         async let pool = try? ProxyAPI.fetchFreeCoinsAvailable()
         async let standing = try? ProxyAPI.fetchReputation(address: keys.address)
+        async let transactions = try? ProxyAPI.fetchTransactions(keys: keys)
         let fetchedBalance = await balance
         if let fetchedBalance { self.balance = fetchedBalance }
         balanceFailed = fetchedBalance == nil
         if let price = await price { self.price = price }
         if let pool = await pool { freeClaimsLeft = pool }
         if let standing = await standing { self.standing = standing }
+        let fetched = await transactions
+        if let fetched { self.transactions = fetched }
+        transactionsFailed = fetched == nil
     }
 
     func refreshPool() async {

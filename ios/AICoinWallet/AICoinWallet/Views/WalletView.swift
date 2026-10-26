@@ -59,6 +59,8 @@ struct WalletView: View {
                     faucetSection(left: left)
                 }
 
+                activitySection
+
                 Section {
                     NavigationLink {
                         PriceView(current: model.price)
@@ -204,6 +206,31 @@ struct WalletView: View {
                 .accessibilityIdentifier("scanButton")
         }
         .padding(.vertical, 6)
+    }
+
+    // MARK: Activity
+
+    /// The last few entries, with the rest one tap away — as Wallet shows a card's latest.
+    private var activitySection: some View {
+        Section {
+            if let transactions = model.transactions {
+                if transactions.isEmpty {
+                    Text("No activity yet")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(transactions.prefix(4)) { TransactionRow(transaction: $0, showsDate: true) }
+                    NavigationLink("See All Activity") { HistoryView(model: model) }
+                        .accessibilityIdentifier("seeAllActivity")
+                }
+            } else if model.transactionsFailed {
+                Label("Couldn't load activity", systemImage: "wifi.exclamationmark")
+                    .foregroundStyle(.secondary)
+            } else {
+                ProgressView().frame(maxWidth: .infinity)
+            }
+        } header: {
+            Text("Recent Activity")
+        }
     }
 
     // MARK: Faucet

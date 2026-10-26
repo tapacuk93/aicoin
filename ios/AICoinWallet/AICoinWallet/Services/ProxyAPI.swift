@@ -196,6 +196,38 @@ enum ProxyAPI {
         return try JSONDecoder().decode(GrantsResponse.self, from: data).grants
     }
 
+    /// One entry of a wallet's own log — see CONTRACT.md, `GET /wallet/api/transactions`. Which
+    /// fields are present depends on `type`, so all but the type, amount and time are optional.
+    struct Transaction: Decodable, Identifiable, Hashable {
+        let type: String
+        let amount: Double
+        let at: Double
+        let counterparty: String?
+        let provider: String?
+        let product_id: String?
+        let reason: String?
+        let balance_after: Double?
+        let owed: Double?
+
+        var date: Date { Date(timeIntervalSince1970: at / 1000) }
+        var id: String { "\(type)-\(at)-\(amount)-\(counterparty ?? provider ?? "")" }
+    }
+
+    private struct TransactionsResponse: Decodable {
+        let transactions: [Transaction]
+    }
+
+    /// This wallet's last 200 ledger entries, most recent first. Live-signed: the log names every
+    /// counterparty, so it is not public the way a balance is.
+    static func fetchTransactions(keys: WalletKeys) async throws -> [Transaction] {
+        let path = "/wallet/api/transactions"
+        let headers = try WalletSigner.signLiveRequest(keys: keys, method: "GET", path: path, body: Data())
+        let (data, response) = try await send(method: "GET", path: path, body: Data(),
+                                              extraHeaders: headers.httpHeaders)
+        try requireOK(response, data)
+        return try JSONDecoder().decode(TransactionsResponse.self, from: data).transactions
+    }
+
     /// Take one back. Every token that service holds stops working at once -
     /// which is the point, since the tokens it holds are not something this
     /// wallet has a list of.
