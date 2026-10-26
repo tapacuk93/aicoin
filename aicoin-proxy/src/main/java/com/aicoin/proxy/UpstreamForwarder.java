@@ -368,6 +368,11 @@ final class UpstreamForwarder {
 
             healthTracker.record(provider, status.code());
             AdminAlerts.get().upstreamResponse(provider, status.code(), bodyBytes);
+            if (callCostAicoin > 0) {
+                // Only a paid call says whether the account can pay: an empty account still
+                // answers a free one (a models list) with 200, and that must not clear it.
+                ProviderCredit.get().record(provider, status.code(), bodyBytes);
+            }
 
             FullHttpResponse toClient = new DefaultFullHttpResponse(
                     HttpVersion.HTTP_1_1, statusForClient(status), Unpooled.wrappedBuffer(bodyBytes));

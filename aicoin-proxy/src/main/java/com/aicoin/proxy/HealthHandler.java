@@ -24,8 +24,10 @@ import io.netty.util.CharsetUtil;
  * send, so they say nothing at all about a provider nobody has called lately.
  * {@code state} is the answer to the question they cannot answer: it comes from
  * {@link ProviderLiveness}, which asks each provider directly on a timer, and
- * is one of {@code alive}, {@code down}, {@code unconfigured} (no key) or
- * {@code unknown} (not asked yet). {@code detail} says what produced it,
+ * is one of {@code alive}, {@code down}, {@code unconfigured} (no key),
+ * {@code unknown} (not asked yet) or {@code out_of_credit} — a real paid call
+ * was refused because the account cannot pay, which the probe (a free models
+ * list) cannot see; see {@link ProviderCredit}. {@code detail} says what produced it,
  * {@code checkedAt} is when, in epoch millis, and {@code latencyMs} is how long
  * that took.
  */
@@ -59,11 +61,15 @@ final class HealthHandler {
             String apiKey = config.getProvider(provider).getApiKey();
             boolean enabled = apiKey != null && !apiKey.isEmpty();
             ProviderLiveness.Probe probe = liveness.probeFor(provider);
+            // An account that cannot pay is neither healthy nor within budget, whatever the
+            // window of status codes says — Anthropic refuses for credit with a 400, which the
+            // window does not count as a budget error at all.
+            boolean outOfCredit = ProviderLiveness.STATE_OUT_OF_CREDIT.equals(probe.getState());
             sb.append("{\"name\":\"").append(provider).append("\",")
                     .append("\"enabled\":").append(enabled).append(",")
-                    .append("\"healthy\":").append(health.isHealthy()).append(",")
+                    .append("\"healthy\":").append(health.isHealthy() && !outOfCredit).append(",")
                     .append("\"rateLimited\":").append(health.isRateLimited()).append(",")
-                    .append("\"overBudget\":").append(health.isOverBudget()).append(",")
+                    .append("\"overBudget\":").append(health.isOverBudget() || outOfCredit).append(",")
                     .append("\"state\":\"").append(probe.getState()).append("\",")
                     .append("\"detail\":").append(Json.string(probe.getDetail())).append(",")
                     .append("\"checkedAt\":").append(probe.getCheckedAtMillis()).append(",")

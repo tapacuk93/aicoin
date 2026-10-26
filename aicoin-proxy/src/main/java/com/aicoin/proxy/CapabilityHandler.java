@@ -206,11 +206,15 @@ final class CapabilityHandler {
         if (modelFor(config, capability, provider).isEmpty()) {
             return false;
         }
-        // Down is the only state that disqualifies. `unknown` means the proxy restarted a moment
-        // ago and has not asked yet, which is no reason to refuse to route to a provider that has
-        // been fine all week.
+        // Down and out of credit disqualify: either way the call would be refused. `unknown` means
+        // the proxy restarted a moment ago and has not asked yet, which is no reason to refuse to
+        // route to a provider that has been fine all week. Credit is checked even without a
+        // liveness probe, since it is learned from calls, not from probes.
+        if (ProviderCredit.get().isOutOfCredit(provider)) {
+            return false;
+        }
         return liveness == null
-                || !ProviderLiveness.STATE_DOWN.equals(liveness.probeFor(provider).getState());
+                || !ProviderLiveness.isUnavailable(liveness.probeFor(provider).getState());
     }
 
     /** Text answers with the model the consortium would use; media models come from their own config. */

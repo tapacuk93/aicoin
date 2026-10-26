@@ -58,15 +58,26 @@ struct OverviewView: View {
                 Section("Providers") {
                     ForEach(providers) { p in
                         HStack {
-                            Image(systemName: !p.enabled ? "minus.circle.fill" : p.healthy ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                                .foregroundStyle(!p.enabled ? .gray : p.healthy ? .green : .red)
+                            Image(systemName: !p.enabled ? "minus.circle.fill" : p.isWorking ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                                .foregroundStyle(!p.enabled ? .gray : p.isWorking ? .green : .red)
                             VStack(alignment: .leading) {
                                 Text(p.name)
-                                Text([p.state, p.detail].compactMap { $0 }.joined(separator: " - "))
-                                    .font(.caption).foregroundStyle(.secondary)
+                                if p.isOutOfCredit {
+                                    // The probe asks a free question an empty account still answers, so
+                                    // this comes from real calls the provider refused for credit — and
+                                    // routing skips the provider until one succeeds again.
+                                    Text("Out of credit")
+                                        .font(.caption.bold()).foregroundStyle(.red)
+                                    if let detail = p.detail {
+                                        Text(detail).font(.caption).foregroundStyle(.red)
+                                    }
+                                } else {
+                                    Text([p.state, p.detail].compactMap { $0 }.joined(separator: " - "))
+                                        .font(.caption).foregroundStyle(p.state == "down" ? .red : .secondary)
+                                }
                                 // healthy is inferred from recent forwarded calls, so a provider can answer
                                 // its probe and still be red; say which calls failed
-                                if p.overBudget == true {
+                                if p.overBudget == true && !p.isOutOfCredit {
                                     Text("recent calls got 402/403 (out of credit or refused)")
                                         .font(.caption).foregroundStyle(.red)
                                 }

@@ -53,6 +53,21 @@ public final class ProviderLiveness {
     public static final String STATE_DOWN = "down";
     public static final String STATE_UNCONFIGURED = "unconfigured";
     public static final String STATE_UNKNOWN = "unknown";
+    /**
+     * The provider answers, but its account cannot pay: a real call was refused for credit (see
+     * {@link ProviderCredit}). Outranks whatever the probe said, since the probe asks a free
+     * question an empty account still answers.
+     */
+    public static final String STATE_OUT_OF_CREDIT = "out_of_credit";
+
+    /**
+     * Whether a state keeps a provider out of routing. {@code down} is a fact about the provider,
+     * {@code out_of_credit} one about the account behind the key, and either way a call sent
+     * there is refused; {@code unknown} is only the absence of a probe.
+     */
+    public static boolean isUnavailable(String state) {
+        return STATE_DOWN.equals(state) || STATE_OUT_OF_CREDIT.equals(state);
+    }
 
     private final ProxyConfig config;
     private final HttpClient http;
@@ -89,6 +104,10 @@ public final class ProviderLiveness {
 
     /** @return the last probe result for the given provider; {@code unconfigured} or {@code unknown} if it has none. */
     public Probe probeFor(String provider) {
+        ProviderCredit.Failure credit = ProviderCredit.get().failureFor(provider);
+        if (credit != null) {
+            return new Probe(STATE_OUT_OF_CREDIT, credit.status, 0, credit.detail(), credit.lastSeenMillis);
+        }
         Probe probe = probes.get(provider);
         if (probe != null) {
             return probe;

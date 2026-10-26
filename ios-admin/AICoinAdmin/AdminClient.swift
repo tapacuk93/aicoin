@@ -175,6 +175,11 @@ struct Provider: Decodable, Identifiable {
     let detail: String?
     let latencyMs: Int?
     var id: String { name }
+
+    /// The proxy saw a paid call refused because the provider account cannot pay.
+    var isOutOfCredit: Bool { state == "out_of_credit" }
+    /// Green only when recent calls were fine and neither the probe nor real calls say otherwise.
+    var isWorking: Bool { healthy && state != "down" && !isOutOfCredit }
 }
 
 struct Packages: Decodable { let packages: [Package] }

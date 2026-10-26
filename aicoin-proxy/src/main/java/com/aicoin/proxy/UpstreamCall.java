@@ -244,6 +244,8 @@ final class UpstreamCall {
             healthTracker.record(provider, response.status().code());
             byte[] body = ByteBufUtil.getBytes(response.content());
             AdminAlerts.get().upstreamResponse(provider, response.status().code(), body);
+            // Every call made here is paid, so its answer says whether the account can pay.
+            ProviderCredit.get().record(provider, response.status().code(), body);
             once.accept(Result.of(response.status().code(), body));
             ctx.close();
         }

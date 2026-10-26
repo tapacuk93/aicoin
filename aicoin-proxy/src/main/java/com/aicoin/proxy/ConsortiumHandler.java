@@ -136,6 +136,12 @@ final class ConsortiumHandler {
                     && ProviderLiveness.STATE_DOWN.equals(liveness.probeFor(provider).getState())) {
                 continue;
             }
+            // An account that cannot pay is never seated, liveness or not: every turn it was
+            // given would be refused, and as the first-ranked panelist it would be the editor.
+            // Learned from real calls (ProviderCredit), and cleared by the next one that succeeds.
+            if (ProviderCredit.get().isOutOfCredit(provider)) {
+                continue;
+            }
             panel.add(provider);
         }
         if (subject != null) {
@@ -348,6 +354,16 @@ final class ConsortiumHandler {
         }
 
         boolean stream = Boolean.TRUE.equals(body.get("stream"));
+        List<String> skipped = new ArrayList<>();
+        for (String provider : ChatAdapter.CHAT_PROVIDERS) {
+            ProviderCredit.Failure credit = ProviderCredit.get().failureFor(provider);
+            if (credit != null && (requested == null || requested.contains(provider))
+                    && config.getConsortium().modelFor(provider, best) != null
+                    && config.getProvider(provider) != null && config.getProvider(provider).getApiKey() != null
+                    && !config.getProvider(provider).getApiKey().isEmpty()) {
+                skipped.add(provider);
+            }
+        }
         Map<String, List<String>> models = new java.util.LinkedHashMap<>();
         for (String provider : panel) {
             models.put(provider, config.getConsortium().modelsFor(provider, best));
@@ -357,6 +373,10 @@ final class ConsortiumHandler {
                 calls == null ? null : callId, calls == null ? null : calls.store(), prompt, background, panel, editor,
                 models, maxRounds, includeTranscript, lead, poll, subject, null, best, maxOutputTokens, library,
                 UpstreamTimer.of(ctx.channel()), 0, 0, Map.of());
+        for (String provider : skipped) {
+            session.skipped(provider, ProviderCredit.get().failureFor(provider) == null ? "out of credit"
+                    : ProviderCredit.get().failureFor(provider).detail());
+        }
         Runnable begin = () -> {
             if (calls != null) {
                 calls.create(session, new String(requestBody, CharsetUtil.UTF_8), ctx, stream);

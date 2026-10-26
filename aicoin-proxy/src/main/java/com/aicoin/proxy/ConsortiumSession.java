@@ -65,7 +65,14 @@ final class ConsortiumSession {
     private final String storeKey;
     private final ConsortiumStore store;
     private final List<String> panel;
-    private final String editor;
+    /**
+     * Who merges and revises. Not fixed: when the editor cannot do its turn — out of credit, an
+     * error, a timeout, a reply that is not one whole answer — the turn goes to the next-ranked
+     * panelist that can (see {@link #editorTurn}), and that panelist edits from then on.
+     */
+    private String editor;
+    /** Providers left off the panel because their accounts cannot pay, as JSON objects. */
+    private final List<String> skippedJson = new ArrayList<>();
     /**
      * Provider -> the models its turns may use, in the order to try them (see
      * {@link ConsortiumConfig#modelsFor}); fixed when the call starts so a resumed call speaks to
@@ -216,6 +223,7 @@ final class ConsortiumSession {
         state.put("call_id", callId);
         state.put("panel", new ArrayList<>(panel));
         state.put("editor", editor);
+        state.put("skipped", new ArrayList<>(skippedJson));
         state.put("models", new LinkedHashMap<>(models));
         state.put("preferred", new LinkedHashMap<>(preferred));
         state.put("answered_by", new LinkedHashMap<>(answeredBy));
@@ -299,6 +307,7 @@ final class ConsortiumSession {
         session.phase = str(state.get("phase"));
         session.round = num(state.get("round"));
         session.draftProviders.addAll(strings(state.get("draft_providers")));
+        session.skippedJson.addAll(strings(state.get("skipped")));
         session.draftModels.addAll(strings(state.get("draft_models")));
         if (state.get("preferred") instanceof Map) {
             ((Map<?, ?>) state.get("preferred")).forEach((k, v) -> session.preferred.put(str(k), num(v)));
@@ -476,16 +485,28 @@ final class ConsortiumSession {
         return Json.write(snapshot());
     }
 
+    /**
+     * Records a provider kept off the panel because its account cannot pay, for the start event
+     * and the result: a caller that asked for the whole panel should be told it did not get it,
+     * and why.
+     */
+    synchronized void skipped(String provider, String reason) {
+        skippedJson.add("{\"provider\":" + Json.string(provider) + ",\"reason\":" + Json.string(reason) + "}");
+    }
+
     private String startFields(boolean resumed) {
         StringBuilder start = new StringBuilder("\"mode\":").append(Json.string(modeName()))
                 .append(",\"poll\":").append(poll)
                 .append(",\"panel\":").append(ConsortiumHandler.stringList(panel))
-                .append(",\"editor\":").append(Json.string(editor))
+                .append(",\"editor\":").append(Json.string(editor()))
                 .append(",\"subject\":").append(Json.string(subject))
                 .append(",\"quality\":").append(Json.string(best ? "best" : "standard"))
                 .append(",\"models\":").append(modelsJson())
                 .append(",\"max_output_tokens\":").append(maxOutputTokens)
                 .append(",\"max_rounds\":").append(maxRounds);
+        if (!skippedJson.isEmpty()) {
+            start.append(",\"skipped\":[").append(String.join(",", skippedJson)).append("]");
+        }
         if (callId != null) {
             start.append(",\"call_id\":").append(Json.string(callId));
         }
@@ -576,7 +597,7 @@ final class ConsortiumSession {
 
     /** Who writes the first answer: the whole panel, or — in lead mode — the editor alone. */
     private List<String> draftPanel() {
-        return lead ? List.of(editor) : panel;
+        return lead ? List.of(editor()) : panel;
     }
 
     private void beginDrafts() {
@@ -606,6 +627,17 @@ final class ConsortiumSession {
                     draftsFinished.add(provider);
                     last = draftsFinished.containsAll(draftPanel());
                     checkpoint();
+                }
+                if (lead && text == null && !insufficient()) {
+                    // The lead could not write the answer at all. Nothing exists yet for anyone
+                    // to merge or review, so the call would end with no answer: hand the lead to
+                    // the next panelist that can pay instead.
+                    String next = nextEditor(draftsFinished, false);
+                    if (next != null) {
+                        changeEditor(provider, next, error, "draft", 0);
+                        beginDrafts();
+                        return;
+                    }
                 }
                 if (last) {
                     afterDrafts();
@@ -664,15 +696,16 @@ final class ConsortiumSession {
         synchronized (this) {
             draftsSnapshot = new ArrayList<>(drafts);
         }
-        turn(editor, ConsortiumPrompts.mergeSystem(draftsSnapshot.size()),
-                ConsortiumPrompts.mergeTask(), "merge", 0, WHOLE_ANSWER,
+        editorTurn(ConsortiumPrompts.mergeSystem(draftsSnapshot.size()),
+                ConsortiumPrompts.mergeTask(), "merge", 0, new LinkedHashSet<>(),
                 (text, error) -> {
                     // An editor that failed to merge must not sink the call: the first draft is a
                     // real answer to the request, and the review rounds still run over it. A merge
-                    // that is not one whole answer (see editedAnswer) counts as failed.
+                    // that is not one whole answer (see editedAnswer) counts as failed. Reached
+                    // only once every panelist that could have taken the merge over has failed it.
                     String edited = ConsortiumPrompts.editedAnswer(text);
                     if (text != null && edited == null) {
-                        recordError("merge", editor, "reply was not one whole answer");
+                        recordError("merge", editor(), "reply was not one whole answer");
                     }
                     String merged = edited != null ? edited : draftsSnapshot.get(0);
                     synchronized (this) {
@@ -796,14 +829,15 @@ final class ConsortiumSession {
             thisRound = round;
             commentCount = reviseCommentCount;
         }
-        turn(editor, ConsortiumPrompts.reviseSystem(commentCount),
-                ConsortiumPrompts.reviseTask(), "revise", thisRound, WHOLE_ANSWER,
+        editorTurn(ConsortiumPrompts.reviseSystem(commentCount),
+                ConsortiumPrompts.reviseTask(), "revise", thisRound, new LinkedHashSet<>(),
                 (rawText, error) -> {
                     // A revision that is not one whole answer (see editedAnswer) is no revision: the
-                    // answer it would have replaced stands.
+                    // answer it would have replaced stands. Reached only once every panelist that
+                    // could have taken the revision over has failed it too.
                     String text = ConsortiumPrompts.editedAnswer(rawText);
                     if (rawText != null && text == null) {
-                        recordError("revise", editor, "reply was not one whole answer");
+                        recordError("revise", editor(), "reply was not one whole answer");
                     }
                     if (text == null) {
                         // The comments stand unanswered and there is no revised text to review.
@@ -821,6 +855,84 @@ final class ConsortiumSession {
                     }
                     beginReviewRound();
                 });
+    }
+
+    private synchronized String editor() {
+        return editor;
+    }
+
+    /**
+     * A merge or a revision, by the editor — or, when the editor cannot do it, by the next
+     * panelist that can.
+     *
+     * <p>Before failover, an editor that failed a merge left the call on the first draft, and one
+     * that failed a revision ended it with {@code revision_failed} — a chapter's whole review
+     * thrown away because one provider's account ran dry or one reply was malformed, while three
+     * other models that had just read and judged the same text sat idle. The editor is only the
+     * first of them by rank; any panelist that has answered on this call has read the record and
+     * can write the answer. So a failed editor turn is handed on, in rank order, to panelists that
+     * have answered this call and whose accounts can pay, each tried once; the one that succeeds
+     * edits for the rest of the call. A wallet that cannot pay ends it as before — no other editor
+     * changes that.
+     */
+    private void editorTurn(String system, String task, String stage, int round, Set<String> tried,
+                            BiConsumer<String, String> onDone) {
+        String current = editor();
+        tried.add(current);
+        if (ProviderCredit.get().isOutOfCredit(current)) {
+            String next = nextEditor(tried, true);
+            if (next != null) {
+                changeEditor(current, next, ProviderCredit.get().failureFor(current) == null ? "out of credit"
+                        : ProviderCredit.get().failureFor(current).detail(), stage, round);
+                editorTurn(system, task, stage, round, tried, onDone);
+                return;
+            }
+        }
+        turn(current, system, task, stage, round, WHOLE_ANSWER, (text, error) -> {
+            boolean usable = text != null && ConsortiumPrompts.editedAnswer(text) != null;
+            if (!usable && !insufficient() && !isAborted()) {
+                String next = nextEditor(tried, true);
+                if (next != null) {
+                    String reason = text == null ? error : "reply was not one whole answer";
+                    if (text != null) {
+                        recordError(stage, current, reason);
+                    }
+                    changeEditor(current, next, reason, stage, round);
+                    editorTurn(system, task, stage, round, tried, onDone);
+                    return;
+                }
+            }
+            onDone.accept(text, error);
+        });
+    }
+
+    /**
+     * The next panelist in rank order that may take the editor's turn: not tried yet for it, its
+     * account able to pay, and — unless {@code anyone} — one that has answered on this call, so
+     * it is known to be reachable and has read the record.
+     */
+    private synchronized String nextEditor(Set<String> tried, boolean mustHaveAnswered) {
+        for (String provider : panel) {
+            if (tried.contains(provider) || ProviderCredit.get().isOutOfCredit(provider)) {
+                continue;
+            }
+            if (mustHaveAnswered && !answeredBy.containsKey(provider)) {
+                continue;
+            }
+            return provider;
+        }
+        return null;
+    }
+
+    private void changeEditor(String from, String to, String reason, String stage, int round) {
+        synchronized (this) {
+            editor = to;
+            emit("editor_changed", "\"from\":" + Json.string(from) + ",\"to\":" + Json.string(to)
+                    + ",\"reason\":" + Json.string(reason == null ? "failed" : reason)
+                    + ",\"stage\":" + Json.string(stage) + ",\"round\":" + round);
+            checkpoint();
+        }
+        LOG.info("consortium editor " + from + " -> " + to + " at " + stage + ": " + reason);
     }
 
     /**
@@ -898,26 +1010,34 @@ final class ConsortiumSession {
                 checkpoint();
             }
             long startedNanos = System.nanoTime();
+            long startedMillis = System.currentTimeMillis();
             UpstreamCall.post(group, config, healthTracker, provider, path, ChatAdapter.headers(provider), body,
                     timer, config.getConsortium().getTurnReadTimeoutSeconds(), result -> {
                         double seconds = Math.round((System.nanoTime() - startedNanos) / 1e8) / 10.0;
                         if (!result.isOk()) {
                             // Refused or never answered: the provider billed nothing, so neither
                             // does this — and if the provider has another model, the turn is not
-                            // over yet.
+                            // over yet. Unless the account cannot pay: then every model behind it
+                            // refuses alike, and the error says so in the provider's words.
                             ledger.refund(wallet, CALL_COST_AICOIN, provider);
                             synchronized (this) {
                                 pendingHolds.remove(provider);
                             }
-                            if (nextModel != null && !isAborted()) {
+                            String error = result.getError();
+                            ProviderCredit.Failure credit = ProviderCredit.get().failureFor(provider);
+                            boolean outOfCredit = credit != null && credit.lastSeenMillis >= startedMillis;
+                            if (outOfCredit) {
+                                error = "out of credit (HTTP " + credit.status + "): " + credit.message;
+                            }
+                            if (nextModel != null && !outOfCredit && !isAborted()) {
                                 recordError(stage, provider, model + ": " + result.getError()
                                         + " (fell back to " + nextModel + ")");
                                 attempt(provider, system, task, stage, round, rejects, onDone, readsThisTurn,
                                         lastReadNote, index + 1, model, result.getError());
                                 return;
                             }
-                            failTurn(stage, round, provider, model, result.getError());
-                            onDone.accept(null, result.getError());
+                            failTurn(stage, round, provider, model, error);
+                            onDone.accept(null, error);
                             return;
                         }
                         String responseText = result.bodyText();
@@ -1139,7 +1259,7 @@ final class ConsortiumSession {
                     .append(",\"stopped_reason\":").append(Json.string(stoppedReason))
                     .append(",\"rounds\":").append(round)
                     .append(",\"panel\":").append(ConsortiumHandler.stringList(panel))
-                    .append(",\"editor\":").append(Json.string(editor))
+                    .append(",\"editor\":").append(Json.string(editor()))
                     .append(",\"mode\":").append(Json.string(modeName()))
                     .append(",\"quality\":").append(Json.string(best ? "best" : "standard"))
                     .append(",\"models\":").append(modelsJson())
@@ -1156,6 +1276,9 @@ final class ConsortiumSession {
                     .append(",\"reviews\":[").append(String.join(",", reviewJson)).append("]")
                     .append(",\"errors\":[").append(String.join(",", errorJson)).append("]")
                     .append(",\"reads\":[").append(String.join(",", readJson)).append("]");
+            if (!skippedJson.isEmpty()) {
+                json.append(",\"skipped\":[").append(String.join(",", skippedJson)).append("]");
+            }
             if (callId != null) {
                 json.append(",\"call_id\":").append(Json.string(callId));
             }
