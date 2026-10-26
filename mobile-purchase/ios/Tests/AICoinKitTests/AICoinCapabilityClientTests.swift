@@ -449,4 +449,23 @@ final class AICoinCapabilityClientTests: XCTestCase {
         XCTAssertFalse(AICoinCapabilityClient.isStreamStalled(URLError(.networkConnectionLost)))
         XCTAssertFalse(AICoinCapabilityClient.isStreamStalled(AICoinError.malformedResponse))
     }
+
+    func testAnEditorHandOverAndASkippedProviderAreReported() async throws {
+        let transport = LineStubTransport()
+        let log = EventLog()
+        let call = Task { try await client(transport).consortium(prompt: "Q", onEvent: { log.append($0) }) }
+        transport.feed.yield(#"{"event":"start","seq":1,"mode":"panel","panel":["kimi","google"],"editor":"kimi","skipped":[{"provider":"anthropic","reason":"out of credit since 2026-10-27T08:00:00Z (HTTP 400): Your credit balance is too low"}]}"#)
+        transport.feed.yield(#"{"event":"editor_changed","seq":2,"from":"kimi","to":"google","reason":"upstream timed out","stage":"merge","round":0}"#)
+        transport.feed.yield(#"{"event":"result","seq":3,"answer":"a","editor":"google"}"#)
+        transport.feed.finish()
+        let answer = try await call.value
+
+        XCTAssertEqual(answer.provider, "google", "the result names the editor that finished the answer")
+        guard case .start(let start) = log.events.first else { return XCTFail("start first") }
+        XCTAssertEqual(start.skipped.map(\.provider), ["anthropic"])
+        XCTAssertTrue(start.skipped[0].reason.contains("credit balance"))
+        XCTAssertEqual(log.events.last, .editorChanged(.init(seq: 2, from: "kimi", to: "google",
+                                                             reason: "upstream timed out", stage: "merge", round: 0)))
+        XCTAssertEqual(log.events.last?.seq, 2)
+    }
 }

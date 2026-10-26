@@ -63,6 +63,9 @@ public enum ConsortiumEvent: Sendable, Equatable {
     /// The proxy running the call went away and another picked it up from its last checkpoint:
     /// what had finished stands, and the turn that was in flight starts again.
     case resumed(Resumed)
+    /// The editor could not do its merge or revision — out of credit, an error, a reply that was
+    /// not one whole answer — and another panelist took the turn, and edits from now on.
+    case editorChanged(EditorChanged)
 
     /// The event's place in the call, counting from 1 — the same on every attach, so a client
     /// coming back with a `callID` can skip the ones it has already shown. 0 from a proxy that
@@ -73,6 +76,38 @@ public enum ConsortiumEvent: Sendable, Equatable {
         case .turn(let turn): return turn.seq
         case .read(let read): return read.seq
         case .resumed(let resumed): return resumed.seq
+        case .editorChanged(let changed): return changed.seq
+        }
+    }
+
+    public struct EditorChanged: Sendable, Equatable {
+        public let seq: Int
+        public let from: String
+        public let to: String
+        /// Why the editor gave the turn up, in the proxy's words.
+        public let reason: String
+        /// `"draft"` (a lead that could not write), `"merge"` or `"revise"`.
+        public let stage: String
+        public let round: Int
+
+        public init(seq: Int = 0, from: String, to: String, reason: String, stage: String, round: Int) {
+            self.seq = seq
+            self.from = from
+            self.to = to
+            self.reason = reason
+            self.stage = stage
+            self.round = round
+        }
+    }
+
+    /// A provider kept off the panel, and why — today only an account that cannot pay.
+    public struct Skipped: Sendable, Equatable {
+        public let provider: String
+        public let reason: String
+
+        public init(provider: String, reason: String) {
+            self.provider = provider
+            self.reason = reason
         }
     }
 
@@ -104,6 +139,8 @@ public enum ConsortiumEvent: Sendable, Equatable {
         public var callID: String?
         /// True when this call was picked up from a checkpoint after the proxy running it went away.
         public var resumed: Bool = false
+        /// Providers that would have been on the panel but were left off (out of credit).
+        public var skipped: [Skipped] = []
 
         public init(mode: String, panel: [String], editor: String? = nil, subject: String? = nil,
                     quality: String? = nil, models: [String: String] = [:]) {
@@ -193,7 +230,15 @@ public enum ConsortiumEvent: Sendable, Equatable {
             start.seq = int("seq")
             start.callID = string("call_id")
             start.resumed = object["resumed"] as? Bool ?? false
+            start.skipped = (object["skipped"] as? [[String: Any]] ?? []).compactMap { item in
+                guard let provider = item["provider"] as? String else { return nil }
+                return Skipped(provider: provider, reason: item["reason"] as? String ?? "")
+            }
             return .start(start)
+        case "editor_changed":
+            guard let from = string("from"), let to = string("to") else { return nil }
+            return .editorChanged(EditorChanged(seq: int("seq"), from: from, to: to, reason: string("reason") ?? "",
+                                                stage: string("stage") ?? "", round: int("round")))
         case "resumed":
             return .resumed(Resumed(seq: int("seq"), from: string("from") ?? "", round: int("round")))
         case "turn":
