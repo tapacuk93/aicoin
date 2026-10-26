@@ -36,7 +36,12 @@ public final class ProxyMain {
         AccessLog accessLog = AccessLog.create(config);
         // Push notifications to the admin app — see AdminAlerts. Without an APNs key they are
         // still recorded for GET /admin/alerts.
-        AdminAlerts alerts = new AdminAlerts(ledger.redis(), ledger, Apns.fromEnv(System.getenv()), System.getenv());
+        // One APNs sender for both: its key is a team key, good for every app the team ships, so
+        // the admin app's alerts and the book app's "Chapter ready" go out through the same one.
+        Apns apns = Apns.fromEnv(System.getenv());
+        AdminAlerts alerts = new AdminAlerts(ledger.redis(), ledger, apns, System.getenv());
+        PushDevices.install(new PushDevices(new PushDevices.Redis(ledger.redis()),
+                (device, payload) -> apns.send(device.token(), device.sandbox(), device.topic(), payload), accessLog));
         AdminAlerts.install(alerts);
         alerts.startMonitor();
         alerts.proxyStarted();

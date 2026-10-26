@@ -153,6 +153,11 @@ final class ConsortiumSession {
     private String finalLine;
 
     private final List<ConsortiumClient> clients = new ArrayList<>();
+    /** The caller's {@code notify}: topic, title, body, data, failure_title, failure_body. */
+    private Map<String, Object> notify;
+    private boolean notified;
+    /** What each device's push came to, once sent. */
+    private final List<String> pushResults = new ArrayList<>();
     /** Only for a call without an id: its one connection went away, so the rounds stop. */
     private boolean aborted;
     private Runnable onFinished = () -> { };
@@ -263,6 +268,9 @@ final class ConsortiumSession {
         state.put("final_status", finalStatus);
         state.put("final_body", finalBody);
         state.put("final_line", finalLine);
+        state.put("notify", notify);
+        state.put("notified", notified);
+        state.put("push_results", new ArrayList<>(pushResults));
         return state;
     }
 
@@ -339,6 +347,12 @@ final class ConsortiumSession {
         session.reviewersFinished.addAll(strings(state.get("reviewers_finished")));
         session.reviseCommentCount = num(state.get("revise_comment_count"));
         session.pendingHolds.addAll(strings(state.get("pending_holds")));
+        if (state.get("notify") instanceof Map) {
+            Map<String, Object> notify = new LinkedHashMap<>();
+            ((Map<?, ?>) state.get("notify")).forEach((k, v) -> notify.put(String.valueOf(k), v));
+            session.notify = notify;
+        }
+        session.notified = Boolean.TRUE.equals(state.get("notified"));
         session.events.addAll(storedEvents);
         // The events list can run ahead of the checkpoint (a "started" goes out before the turn's
         // result is checkpointed), so numbering carries on from whichever is further.
@@ -1316,9 +1330,32 @@ final class ConsortiumSession {
      * coming back for a finished call is given exactly this, at no charge.
      */
     private void complete(HttpResponseStatus status, String json) {
+        String pushTitle = null;
+        String pushBody = null;
         synchronized (this) {
             if (finished) {
                 return;
+            }
+            // Told by push only when nobody is watching: a reader with the stream open is looking
+            // at the result as it lands, and a banner on top of it would be noise. A client that
+            // comes back later for a call that already pushed is sent nothing more — the push
+            // happens here, once, when the call ends.
+            boolean watched = false;
+            for (ConsortiumClient client : clients) {
+                watched |= client.isOpen();
+            }
+            if (notify != null && !watched && PushDevices.get() != null) {
+                if (status.code() == 200) {
+                    pushTitle = str(notify.get("title"));
+                    pushBody = str(notify.get("body"));
+                } else if (notify.get("failure_title") instanceof String) {
+                    pushTitle = str(notify.get("failure_title"));
+                    pushBody = str(notify.get("failure_body"));
+                }
+            }
+            if (pushTitle != null) {
+                notified = true;
+                json = json.substring(0, json.length() - 1) + ",\"notified\":true}";
             }
             seq++;
             String line = status.code() == 200
@@ -1341,6 +1378,26 @@ final class ConsortiumSession {
             clients.clear();
         }
         LOG.log(Level.FINE, "consortium finished: {0} calls, {1} coins", new Object[] {calls, coinsCharged});
+        if (pushTitle != null) {
+            String payload = PushDevices.payload(pushTitle, pushBody,
+                    notify.get("data") instanceof Map ? (Map<?, ?>) notify.get("data") : null, callId);
+            PushDevices.get().push(wallet, str(notify.get("topic")), payload, results -> {
+                synchronized (this) {
+                    pushResults.clear();
+                    pushResults.addAll(results);
+                    checkpoint();
+                }
+                PushDevices.get().log(wallet, callId, results);
+            });
+        }
         onFinished.run();
+    }
+
+    /**
+     * What to push when this call ends with nobody watching — see {@link #complete}. Only a
+     * durable call can be told about later, so a call without an id never pushes.
+     */
+    synchronized void notifyOnFinish(Map<String, Object> notify) {
+        this.notify = callId == null ? null : notify;
     }
 }

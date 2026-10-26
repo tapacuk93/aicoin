@@ -307,6 +307,16 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
 
+        if ((request.method() == HttpMethod.POST || request.method() == HttpMethod.DELETE)
+                && "/push/devices".equals(path)) {
+            // Free, but the wallet's own: a device registered here is told about this wallet's
+            // calls, so it takes the same token a paid call does. No app cap — it spends nothing.
+            byte[] pushBody = ByteBufUtil.getBytes(request.content());
+            boolean register = request.method() == HttpMethod.POST;
+            requireApiToken(ctx, request, false, walletAddress -> PushHandler.serve(ctx, pushBody, register, walletAddress));
+            return;
+        }
+
         if (request.method() == HttpMethod.POST && "/consortium".equals(path)) {
             if (!config.getConsortium().isEnabled()) {
                 sendJsonError(ctx, HttpResponseStatus.NOT_FOUND, "consortium is not enabled");
@@ -583,6 +593,12 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
      * that cost it money.
      */
     private void requireApiToken(ChannelHandlerContext ctx, FullHttpRequest request, Consumer<String> onVerified) {
+        requireApiToken(ctx, request, true, onVerified);
+    }
+
+    /** @param spends whether the call spends coins, and so is held to the app's daily cap */
+    private void requireApiToken(ChannelHandlerContext ctx, FullHttpRequest request, boolean spends,
+                                  Consumer<String> onVerified) {
         String appHeader = request.headers().get(AppCaps.APP_HEADER);
         Optional<String> apiKeyOpt = WalletValidation.extractWalletId(request.headers().get(X_API_KEY_HEADER));
         if (!apiKeyOpt.isPresent()) {
@@ -602,8 +618,12 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, authResult.getFailureReason());
                 return;
             }
-            // Every caller of this spends coins, so the app's daily cap applies before it runs.
+            // A call that spends coins is held to the app's daily cap before it runs.
             String address = authResult.getAddress();
+            if (!spends) {
+                onVerified.accept(address);
+                return;
+            }
             withinAppCap(ctx, address, appHeader, () -> onVerified.accept(address));
         });
     }

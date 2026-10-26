@@ -373,6 +373,18 @@ final class ConsortiumHandler {
                 calls == null ? null : callId, calls == null ? null : calls.store(), prompt, background, panel, editor,
                 models, maxRounds, includeTranscript, lead, poll, subject, null, best, maxOutputTokens, library,
                 UpstreamTimer.of(ctx.channel()), 0, 0, Map.of());
+        // Told by push when it ends with nobody watching — durable calls only, since only those run
+        // on without a client; a `notify` on a call without an id is ignored.
+        if (callId != null && body.get("notify") != null) {
+            Object notify = parseNotify(body.get("notify"));
+            if (notify instanceof String) {
+                sendError(ctx, HttpResponseStatus.BAD_REQUEST, (String) notify);
+                return;
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> parsed = (Map<String, Object>) notify;
+            session.notifyOnFinish(parsed);
+        }
         for (String provider : skipped) {
             session.skipped(provider, ProviderCredit.get().failureFor(provider) == null ? "out of credit"
                     : ProviderCredit.get().failureFor(provider).detail());
@@ -446,6 +458,48 @@ final class ConsortiumHandler {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** Largest {@code notify.data}, as JSON: APNs takes 4 KB in all, and the alert needs room too. */
+    static final int MAX_NOTIFY_DATA_CHARS = 1024;
+
+    /**
+     * A request's {@code notify}, checked: a map of exactly the fields a push needs, or the reason
+     * it is not one. {@code topic} is the app's bundle id; {@code title} is required, the rest
+     * optional; {@code data} is the caller's, opaque, and goes into the push beside {@code aps}.
+     */
+    static Object parseNotify(Object raw) {
+        if (!(raw instanceof Map)) {
+            return "notify must be an object";
+        }
+        Map<?, ?> notify = (Map<?, ?>) raw;
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        Object topic = notify.get("topic");
+        if (!(topic instanceof String) || !((String) topic).matches("[A-Za-z0-9][A-Za-z0-9.\\-]{0,199}")) {
+            return "notify.topic must be the app's bundle id";
+        }
+        out.put("topic", topic);
+        for (String field : List.of("title", "body", "failure_title", "failure_body")) {
+            Object value = notify.get(field);
+            if (value == null) {
+                continue;
+            }
+            if (!(value instanceof String) || ((String) value).length() > 500) {
+                return "notify." + field + " must be text of at most 500 characters";
+            }
+            out.put(field, value);
+        }
+        if (!(out.get("title") instanceof String) || ((String) out.get("title")).isBlank()) {
+            return "notify.title is required";
+        }
+        Object data = notify.get("data");
+        if (data != null) {
+            if (!(data instanceof Map) || Json.write(data).length() > MAX_NOTIFY_DATA_CHARS) {
+                return "notify.data must be an object of at most " + MAX_NOTIFY_DATA_CHARS + " characters as JSON";
+            }
+            out.put("data", data);
+        }
+        return out;
     }
 
     static void sendError(ChannelHandlerContext ctx, HttpResponseStatus status, String message) {

@@ -219,7 +219,11 @@ Auth is the same API token as any AI-proxy call (`X-Api-Key`, never a bare addre
     ]
   },
   "stream": true,                       // optional; NDJSON events as the panel works, see "Streaming"
-  "call_id": "6f1c…"                    // optional; makes the call durable, see "Durable calls"
+  "call_id": "6f1c…",                   // optional; makes the call durable, see "Durable calls"
+  "notify": {                           // optional, with call_id only; see "Push when a call ends unwatched"
+    "topic": "com.oeaio.infiniteaibook", "title": "Chapter ready", "body": "Trade routes",
+    "data": {"book": "salt-road", "ref": "3.2"}, "failure_title": "Chapter failed", "failure_body": "Tap to try again"
+  }
 }
 ```
 Every field after `include_transcript` is additive: a caller that sends none of them gets exactly the call it always got (its response gains `quality`, `models`, `max_output_tokens` and `reads`, which it can ignore).
@@ -342,6 +346,15 @@ A request whose `call_id` this wallet has already used is a client coming back f
 What can be lost: a turn whose answer had arrived and been settled but not yet checkpointed when the process died (a window of milliseconds) is run, and billed, again; a coin held a moment before a crash, before the hold was recorded, is not refunded. Both are the cost of a crash at the worst instant, not of a restart. A call with an id that Redis cannot reach still runs, just not durably.
 
 The `start` event and the result carry the `call_id`.
+
+**Push when a call ends unwatched — `notify`.** An app waiting on a ten-minute call used to keep itself running with iOS's background-task allowance, which iOS ends when it likes (32 seconds once, seven minutes another time) and then reports as a task error. A durable call does not need the app running — it finishes on the proxy regardless — so all the app still needs is the news, and a push carries that without the app running at all.
+
+- **Devices.** `POST /push/devices` with `{"token":"<APNs device token, hex>","topic":"<the app's bundle id>","environment":"sandbox"|"production"}` registers a device for the wallet; `DELETE /push/devices` with the same body forgets it. Both take the same API token as a paid call (`X-Api-Key`), cost nothing, are not held to an app's daily cap, and answer `204` (`400` for a malformed token, topic or environment; `401` without a valid token). `environment` is which APNs host can reach the device: `sandbox` for a development-signed build, `production` for TestFlight and the App Store. Kept per wallet in Redis (`aicoin:push:devices:<wallet>`), newest first; registering again makes a device the newest, and past 10 the oldest are dropped. A device APNs reports dead (`410`, `BadDeviceToken`, `DeviceTokenNotForTopic`, `Unregistered`) is removed when a push to it is refused.
+- **`notify`** (only with a `call_id`; ignored on a call without one, which cannot run on unwatched): `topic` (required, the app's bundle id), `title` (required), `body`, `data` (an object, at most 1,024 characters as JSON, opaque to the proxy), `failure_title`, `failure_body` — text fields at most 500 characters. Malformed is `400`. It is stored with the call, so a call resumed after a restart still pushes.
+- **When.** At the moment the call ends — its `result`, or an `error` after it started — if **no client is attached** to it (no streamed or plain connection open). A reader with the stream open is looking at the result as it arrives, so it gets no banner. A result pushes `title`/`body`; an error pushes `failure_title`/`failure_body`, or nothing if `failure_title` was not given. The decision is made once, at the end: a client that attaches afterwards — to read the finished call — causes nothing more to be sent.
+- **What.** One alert push (`apns-push-type: alert`, priority 10, `sound: default`) to each of the wallet's devices registered for that `topic`, at the device's own APNs host: `{"aps":{"alert":{"title":…,"body":…},"sound":"default"}, …data keys…, "call_id":"<id>"}` — the caller's `data` keys beside `aps` (an `aps` or `call_id` key in it is ignored), and `call_id` so a tap can re-attach.
+- **Record.** The result of a call that ended unwatched with something to push carries `"notified": true` (also on replay) — it says a push was attempted; whether each device took it is in the next two; the stored checkpoint keeps what each device's push came to; and each push writes an access-log line `{"method":"PUSH","path":"/consortium/<call_id>","provider":"apns","status":200|502|204,"outcome":"notified:<per-device results>"}` — 200 when any device took it, 502 when none did, 204 when the wallet had none for the topic. No event is streamed for it, since nobody is attached to receive one.
+- **Sender.** The admin alerts' APNs sender (see "Admin alerts"), whose key is a team key and so signs for every bundle id the team ships: the topic comes from the request, the host from the device's `environment`. Nothing beyond the admin alerts' `AICOIN_PROXY_APNS_KEY` (or `_KEY_FILE`) and `AICOIN_PROXY_APNS_KEY_ID` is needed. Without them, `notify` is still accepted, and each push is recorded as failed with `APNs not configured`.
 
 Config (`consortium`, all env-overridable — `AICOIN_PROXY_CONSORTIUM_ENABLED`, `_MAX_ROUNDS`, `_MAX_OUTPUT_TOKENS`, `_MAX_OUTPUT_TOKENS_CEILING`, `_TURN_READ_TIMEOUT_SECONDS`, `_MAX_LIBRARY_CHARS`, `_MAX_LIBRARY_ENTRIES`, `_MAX_READS_PER_TURN`, `_MAX_LIBRARY_READS`, `_CALL_RETENTION_HOURS`, `_CALL_LEASE_SECONDS`, `_EDITOR`, `_<PROVIDER>_MODEL`, `_<PROVIDER>_BEST_MODEL`):
 ```yaml

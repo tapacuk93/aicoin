@@ -121,6 +121,15 @@ final class Apns {
     }
 
     CompletableFuture<SendResult> send(String deviceToken, boolean development, String title, String body, String kind) {
+        return send(deviceToken, development, topic, payload(title, body, kind));
+    }
+
+    /**
+     * One alert push to any app. The key is a team key, so it signs for every bundle id the team
+     * owns: the topic is the app's, per push, and the host follows the device's build —
+     * {@code development} for a development-signed one, production for TestFlight and the store.
+     */
+    CompletableFuture<SendResult> send(String deviceToken, boolean development, String topic, String payload) {
         if (!isConfigured()) {
             return CompletableFuture.completedFuture(new SendResult(false, false, "APNs not configured"));
         }
@@ -138,7 +147,7 @@ final class Apns {
                 .header("apns-topic", topic)
                 .header("apns-push-type", "alert")
                 .header("apns-priority", "10")
-                .POST(HttpRequest.BodyPublishers.ofString(payload(title, body, kind)))
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
                 .build();
         return http.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .thenApply(response -> {
@@ -148,7 +157,8 @@ final class Apns {
                     }
                     String reason = response.body();
                     boolean dead = status == 410 || (status == 400 && reason != null
-                            && (reason.contains("BadDeviceToken") || reason.contains("DeviceTokenNotForTopic")));
+                            && (reason.contains("BadDeviceToken") || reason.contains("DeviceTokenNotForTopic")
+                                    || reason.contains("Unregistered")));
                     LOG.warning("APNs refused a push (" + status + "): " + reason);
                     return new SendResult(false, dead, status + " " + reason);
                 })
