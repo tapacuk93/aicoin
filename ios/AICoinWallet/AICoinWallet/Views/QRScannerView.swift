@@ -49,6 +49,7 @@ struct QRScannerView: UIViewControllerRepresentable {
     final class ScannerViewController: UIViewController {
         var coordinator: Coordinator?
         private let session = AVCaptureSession()
+        private var preview: AVCaptureVideoPreviewLayer?
 
         override func viewDidLoad() {
             super.viewDidLoad()
@@ -70,16 +71,28 @@ struct QRScannerView: UIViewControllerRepresentable {
             output.setMetadataObjectsDelegate(coordinator, queue: .main)
             output.metadataObjectTypes = [.qr]
 
+            if AVCaptureDevice.authorizationStatus(for: .video) == .denied
+                || AVCaptureDevice.authorizationStatus(for: .video) == .restricted {
+                showUnavailable("Camera access is off. Turn it on for AICoin Wallet in Settings.")
+                return
+            }
+
             let preview = AVCaptureVideoPreviewLayer(session: session)
             preview.frame = view.layer.bounds
             preview.videoGravity = .resizeAspectFill
             view.layer.addSublayer(preview)
+            self.preview = preview
 
             // Off the main thread: starting a capture session blocks for long enough to drop frames
             // from the presentation animation.
             DispatchQueue.global(qos: .userInitiated).async { [session] in
                 session.startRunning()
             }
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            preview?.frame = view.layer.bounds
         }
 
         override func viewWillDisappear(_ animated: Bool) {
@@ -91,9 +104,9 @@ struct QRScannerView: UIViewControllerRepresentable {
 
         /// No camera — the simulator, a denied permission, a device without one. Says so rather
         /// than showing a black rectangle that looks broken.
-        private func showUnavailable() {
+        private func showUnavailable(_ text: String = "No camera available. Paste the code's text instead.") {
             let label = UILabel()
-            label.text = "No camera available — paste the address instead"
+            label.text = text
             label.textColor = .white
             label.numberOfLines = 0
             label.textAlignment = .center
@@ -104,6 +117,42 @@ struct QRScannerView: UIViewControllerRepresentable {
                 label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
                 label.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.8),
             ])
+        }
+    }
+}
+
+/// The scanner as a sheet: full-bleed camera, a viewfinder to aim with, and a way out.
+struct ScannerSheet: View {
+    let title: String
+    let onScan: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            QRScannerView(onScan: onScan, onCancel: { dismiss() })
+                .ignoresSafeArea()
+                .overlay {
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .strokeBorder(.white.opacity(0.9), lineWidth: 3)
+                        .frame(width: 250, height: 250)
+                        .allowsHitTesting(false)
+                }
+                .overlay(alignment: .bottom) {
+                    Text("Point the camera at a QR code")
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.bottom, 40)
+                }
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
+                }
         }
     }
 }

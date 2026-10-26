@@ -22,6 +22,8 @@
 	<string>1</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan a wallet address to pay it, or a service's code to let it make AI calls billed to this wallet.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

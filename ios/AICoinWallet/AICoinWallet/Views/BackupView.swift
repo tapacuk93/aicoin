@@ -1,47 +1,52 @@
 import SwiftUI
 import UIKit
 
-/// Mirrors wallet.html's `#backupScreen`: shown once, right after generating
-/// a brand-new wallet, before it's ever persisted.
+/// Shown once, right after generating a brand-new wallet and before it is kept: the only moment the
+/// key is offered without being asked for.
 struct BackupView: View {
     @ObservedObject var store: WalletStore
     let keys: WalletKeys
+    @State private var saved = false
+    @State private var copied = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                WalletCard(title: "Save your private key") {
-                    Text("This is the **only** copy of your private key. Anyone who has it can spend and send your coins. If you lose it, there is no way to recover this wallet — save it somewhere safe before continuing.")
-                        .font(.caption)
-                        .foregroundColor(.primary)
-                        .padding(10)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WalletTheme.danger))
-
-                    Text("Private key (back this up now)")
-                        .font(.caption)
-                        .foregroundColor(WalletTheme.muted)
-
-                    Text(keys.backupBlob)
-                        .font(.system(.footnote, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(WalletTheme.background)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WalletTheme.border))
-                        .accessibilityIdentifier("backupOutput")
-
-                    SecondaryButton(title: "Copy to clipboard") {
-                        UIPasteboard.general.string = keys.backupBlob
-                    }
-
-                    PrimaryButton(title: "I've saved it — continue") {
-                        store.continueFromBackup()
+        NavigationStack {
+            Form {
+                Section {
+                    Label {
+                        Text("This is the only copy of your private key. Anyone who has it can spend your coins, and if you lose it there is no way to recover this wallet.")
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
                 }
+                Section("Private Key") {
+                    Text(keys.backupBlob)
+                        .font(.callout.monospaced())
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("backupOutput")
+                    Button(copied ? "Copied" : "Copy Private Key",
+                           systemImage: copied ? "checkmark" : "doc.on.doc") {
+                        UIPasteboard.general.string = keys.backupBlob
+                        copied = true
+                    }
+                }
+                Section {
+                    Toggle("I've saved my private key somewhere safe", isOn: $saved)
+                        .accessibilityIdentifier("savedToggle")
+                }
+                Section {
+                    Button {
+                        store.continueFromBackup()
+                    } label: {
+                        Text("Continue").frame(maxWidth: .infinity)
+                    }
+                    .disabled(!saved)
+                    .accessibilityIdentifier("continueButton")
+                }
             }
-            .padding(20)
+            .navigationTitle("Back Up Your Wallet")
+            .sensoryFeedback(.success, trigger: copied)
         }
-        .background(WalletTheme.background)
         .accessibilityIdentifier("backupScreen")
     }
 }

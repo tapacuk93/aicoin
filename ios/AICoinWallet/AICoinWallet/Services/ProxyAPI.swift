@@ -17,6 +17,27 @@ enum ProxyAPI {
     struct PriceResponse: Decodable {
         let price_usd: Double
         let total_spend_usd: Double
+        let half_life_days: Double?
+    }
+
+    /// One sample of how the price arrived where it is — see CONTRACT.md, `GET /price/history`.
+    struct PricePoint: Decodable, Identifiable {
+        let at: Int64
+        let price_usd: Double
+        var id: Int64 { at }
+        var date: Date { Date(timeIntervalSince1970: TimeInterval(at) / 1000) }
+    }
+
+    private struct PriceHistoryResponse: Decodable {
+        let points: [PricePoint]
+    }
+
+    static func fetchPriceHistory(points: Int = 120) async throws -> [PricePoint] {
+        var components = URLComponents(url: baseURL.appendingPathComponent("price/history"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "points", value: String(points))]
+        let (data, response) = try await URLSession.shared.data(from: components.url!)
+        try requireOK(response, data)
+        return try JSONDecoder().decode(PriceHistoryResponse.self, from: data).points
     }
 
     static func fetchPrice() async throws -> PriceResponse {
@@ -47,16 +68,23 @@ enum ProxyAPI {
         return try JSONDecoder().decode(BalanceResponse.self, from: data).balance
     }
 
-    /// A wallet's standing: what it owes, what it has been caught at, and a rating out of five —
-    /// with the reasons, which are the part worth showing.
+    /// A wallet's standing: what it owes, how much it has done, and a rating out of five — with the
+    /// reasons, which are the part worth showing.
+    ///
+    /// Everything but the rating and its reasons is optional: the server has added and dropped
+    /// fields over time (`double_spends` went, the counterparty counts came), and one missing
+    /// field failing the whole decode is how the rating silently stopped showing at all.
     struct Reputation: Decodable {
         let address: String
-        let balance: Double
-        let owed: Double
-        let double_spends: Int
+        let balance: Double?
+        let owed: Double?
         let rating: Int
-        let purchases: Int
-        let calls: Int
+        let purchases: Int?
+        let calls: Int?
+        let counterparties: Int?
+        let solid_counterparties: Int?
+        /// Epoch millis of the oldest record still held; 0 when there is none.
+        let first_seen: Int64?
         let reasons: [String]
     }
 
@@ -71,7 +99,8 @@ enum ProxyAPI {
 
     enum ClaimOutcome {
         case granted(amount: Double)
-        case cooldown(nextEligibleAt: String)
+        /// `nil` when the server's timestamp could not be read.
+        case cooldown(nextEligibleAt: Date?)
         case poolExhausted
     }
 
@@ -89,7 +118,7 @@ enum ProxyAPI {
             return .poolExhausted
         }
         if httpResponse?.statusCode == 429, let json, let nextEligibleAt = json["next_eligible_at"] as? String {
-            return .cooldown(nextEligibleAt: nextEligibleAt)
+            return .cooldown(nextEligibleAt: parseInstant(nextEligibleAt))
         }
         throw APIError(message: (json?["error"] as? String) ?? "Claim failed.")
     }
@@ -150,6 +179,7 @@ enum ProxyAPI {
     struct Grant: Decodable, Identifiable {
         let id: String
         let service: String
+        /// Epoch seconds; 0 when the record predates it.
         let granted: Int64
     }
 
@@ -179,6 +209,15 @@ enum ProxyAPI {
     }
 
     // ---- plumbing ----
+
+    /// A Java `Instant.toString()`: ISO 8601, with fractional seconds only when there are any.
+    static func parseInstant(_ text: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: text) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: text)
+    }
 
     private static func send(method: String, path: String, body: Data, extraHeaders: [String: String]) async throws -> (Data, URLResponse) {
         guard let url = URL(string: baseURL.absoluteString + path) else {

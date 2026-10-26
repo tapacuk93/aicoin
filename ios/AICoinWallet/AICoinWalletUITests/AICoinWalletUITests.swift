@@ -5,52 +5,68 @@ final class AICoinWalletUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    func testGenerateWalletReachesTheWalletScreenWithAnAddressShown() throws {
-        let app = XCUIApplication()
+    /// Create → back up → the wallet, with its address and the live balance shown.
+    private func createWallet(_ app: XCUIApplication) {
         app.launchArguments = ["UITEST_RESET_WALLET"]
         app.launch()
 
-        let generateButton = app.buttons["Generate new wallet"]
-        XCTAssertTrue(generateButton.waitForExistence(timeout: 5))
-        generateButton.tap()
+        let create = app.buttons["Create New Wallet"]
+        XCTAssertTrue(create.waitForExistence(timeout: 5))
+        create.tap()
 
-        let continueButton = app.buttons["I've saved it — continue"]
-        XCTAssertTrue(continueButton.waitForExistence(timeout: 5))
+        let saved = app.switches["savedToggle"]
+        XCTAssertTrue(saved.waitForExistence(timeout: 5))
+        // The switch at the row's trailing edge: tapping a toggle row's label does not flip it.
+        saved.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        let continueButton = app.buttons["continueButton"]
+        XCTAssertTrue(continueButton.isEnabled)
         continueButton.tap()
+    }
+
+    func testCreatingAWalletReachesTheWalletWithItsAddressAndBalance() throws {
+        let app = XCUIApplication()
+        createWallet(app)
 
         let addressLabel = app.staticTexts["addressLabel"]
         XCTAssertTrue(addressLabel.waitForExistence(timeout: 5))
         XCTAssertEqual(addressLabel.label.count, 64)
 
-        XCTAssertTrue(app.buttons["claimBtn"].waitForExistence(timeout: 5))
+        // Fetched from the live proxy: a brand-new wallet holds nothing.
+        let balance = app.staticTexts["balanceValue"]
+        expectation(for: NSPredicate(format: "label == '0'"), evaluatedWith: balance)
+        waitForExpectations(timeout: 15)
     }
 
-    /// Exercises a real live-signed claim against the production proxy
-    /// (proxy.aicoin.oeaio.com) — confirms the app's Ed25519 signing and
-    /// networking layer actually interoperate with the real server, not
-    /// just unit-tested logic in isolation.
-    func testClaimingFreeCoinsAgainstTheLiveProxyUpdatesBalanceAndPool() throws {
+    func testReceiveShowsTheSameAddressAsTheWallet() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["UITEST_RESET_WALLET"]
-        app.launch()
+        createWallet(app)
 
-        app.buttons["Generate new wallet"].tap()
-        let continueButton = app.buttons["I've saved it — continue"]
-        XCTAssertTrue(continueButton.waitForExistence(timeout: 5))
-        continueButton.tap()
+        let address = app.staticTexts["addressLabel"]
+        XCTAssertTrue(address.waitForExistence(timeout: 5))
+        let expected = address.label
+        app.buttons["receiveButton"].tap()
+        let shown = app.staticTexts["receiveAddress"]
+        XCTAssertTrue(shown.waitForExistence(timeout: 5))
+        XCTAssertEqual(shown.label, expected)
+        XCTAssertTrue(app.images["addressQRCode"].exists)
+    }
 
-        let poolLabel = app.staticTexts["freeCoinsRemainingValue"]
-        XCTAssertTrue(poolLabel.waitForExistence(timeout: 10))
-        XCTAssertTrue(poolLabel.label.contains("free coins left in the pool"))
-        XCTAssertFalse(poolLabel.label.contains("\u{2026}"), "pool count never loaded from the live server")
+    /// Against the live proxy, so it only runs while the shared pool has claims left; with the pool
+    /// empty the faucet is not shown at all.
+    func testClaimingFreeCoinsAgainstTheLiveProxyUpdatesTheBalance() throws {
+        let app = XCUIApplication()
+        createWallet(app)
 
-        let claimButton = app.buttons["claimBtn"]
-        XCTAssertTrue(claimButton.waitForExistence(timeout: 5))
-        claimButton.tap()
-
-        let balanceValue = app.staticTexts["balanceValue"]
-        let balanceUpdated = NSPredicate(format: "label == '10'")
-        expectation(for: balanceUpdated, evaluatedWith: balanceValue, handler: nil)
-        waitForExpectations(timeout: 10)
+        let claim = app.buttons["claimBtn"]
+        guard claim.waitForExistence(timeout: 10) else {
+            throw XCTSkip("the free-coin pool is empty, so the faucet is hidden")
+        }
+        claim.tap()
+        let ok = app.alerts.buttons["OK"]
+        XCTAssertTrue(ok.waitForExistence(timeout: 15))
+        ok.tap()
+        let balance = app.staticTexts["balanceValue"]
+        expectation(for: NSPredicate(format: "label == '100'"), evaluatedWith: balance)
+        waitForExpectations(timeout: 15)
     }
 }

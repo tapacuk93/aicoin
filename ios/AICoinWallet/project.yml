@@ -43,6 +43,8 @@ targets:
         # Ed25519 signing + HTTPS only — exempt, so uploads skip the
         # export-compliance prompt.
         ITSAppUsesNonExemptEncryption: false
+        # Without it, iOS terminates the app the moment the QR scanner opens the camera.
+        NSCameraUsageDescription: "Scan a wallet address to pay it, or a service's code to let it make AI calls billed to this wallet."
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oeaio.aicoin.wallet

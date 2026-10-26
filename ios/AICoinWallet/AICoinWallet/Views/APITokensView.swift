@@ -1,92 +1,113 @@
 import SwiftUI
 import UIKit
 
-/// Mirrors wallet.html's "API tokens" card: client-side-only token
-/// issuance (the server never sees the private key or has an "issue
-/// token" endpoint) plus revocation.
+/// Tokens for scripts: minted here with the private key (the proxy has no "issue token" endpoint
+/// and never sees the key), and all withdrawn at once.
 struct APITokensView: View {
     let keys: WalletKeys
 
     private static let expiryOptions: [(label: String, days: Int)] = [
-        ("1 day", 1), ("7 days", 7), ("30 days", 30), ("90 days", 90)
+        ("1 Day", 1), ("7 Days", 7), ("30 Days", 30), ("90 Days", 90)
     ]
 
     @State private var expiryDays = 7
     @State private var token = ""
-    @State private var tokenMessage = ""
-    @State private var tokenIsError = false
-    @State private var revokeMessage = ""
-    @State private var revokeIsError = false
+    @State private var copied = false
+    @State private var isConfirmingRevoke = false
     @State private var isRevoking = false
+    @State private var revoked = false
+    @State private var error: String?
 
     var body: some View {
-        WalletCard(title: "API tokens") {
-            Text("A token lets whoever holds it make AI-proxy calls billed to this wallet — use it as your X-Api-Key in scripts, no signing needed per call. A token **cannot** claim free coins or send coins; only your private key can do that.")
-                .font(.caption)
-                .foregroundColor(WalletTheme.muted)
-
-            Text("Expires after").font(.caption).foregroundColor(WalletTheme.muted)
-            Picker("Expires after", selection: $expiryDays) {
-                ForEach(Self.expiryOptions, id: \.days) { option in
-                    Text(option.label).tag(option.days)
+        Form {
+            Section {
+                Picker("Expires After", selection: $expiryDays) {
+                    ForEach(Self.expiryOptions, id: \.days) { option in
+                        Text(option.label).tag(option.days)
+                    }
                 }
+                Button("Generate Token", systemImage: "plus.circle") { generate() }
+                    .accessibilityIdentifier("generateTokenButton")
+            } footer: {
+                Text("Whoever holds a token can make AI calls billed to this wallet — send it as X-Api-Key, with no signing per call. A token can't send coins or claim free coins.")
             }
-            .pickerStyle(.segmented)
-
-            PrimaryButton(title: "Generate token") {
-                generateToken()
-            }
-
-            StatusMessage(text: tokenMessage, isError: tokenIsError)
 
             if !token.isEmpty {
-                Text(token)
-                    .font(.system(.caption2, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(WalletTheme.background)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(WalletTheme.border))
-
-                SecondaryButton(title: "Copy to clipboard") {
-                    UIPasteboard.general.string = token
-                    tokenMessage = "Copied."
-                    tokenIsError = false
+                Section {
+                    Text(token)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("tokenOutput")
+                    Button(copied ? "Copied" : "Copy Token", systemImage: copied ? "checkmark" : "doc.on.doc") {
+                        UIPasteboard.general.string = token
+                        copied = true
+                    }
+                    ShareLink(item: token) {
+                        Label("Share Token", systemImage: "square.and.arrow.up")
+                    }
+                } header: {
+                    Text("New Token")
+                } footer: {
+                    Text("Shown once. This app doesn't keep a copy.")
                 }
             }
 
-            DangerButton(title: "Revoke all tokens", disabled: isRevoking) {
-                revokeTokens()
+            Section {
+                Button(role: .destructive) {
+                    isConfirmingRevoke = true
+                } label: {
+                    HStack {
+                        Label("Revoke All Tokens", systemImage: "xmark.octagon")
+                        Spacer()
+                        if isRevoking { ProgressView() }
+                    }
+                }
+                .foregroundStyle(.red)
+                .disabled(isRevoking)
+            } footer: {
+                if revoked {
+                    Label("Every token issued before now has stopped working.", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Text("Stops every token this wallet has issued, including those held by authorised services. To cut off one service only, revoke it under Authorised Services.")
+                }
             }
-            StatusMessage(text: revokeMessage, isError: revokeIsError)
+        }
+        .navigationTitle("API Tokens")
+        .navigationBarTitleDisplayMode(.inline)
+        .sensoryFeedback(.success, trigger: copied)
+        .confirmationDialog("Revoke all tokens?", isPresented: $isConfirmingRevoke, titleVisibility: .visible) {
+            Button("Revoke All Tokens", role: .destructive) { revokeAll() }
+        } message: {
+            Text("Scripts and services using any existing token will stop working immediately.")
+        }
+        .alert("Something Went Wrong", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(error ?? "")
         }
     }
 
-    private func generateToken() {
+    private func generate() {
         do {
             token = try WalletSigner.buildToken(keys: keys, expiresInSeconds: expiryDays * 86400)
-            tokenMessage = "Token generated — use it as your X-Api-Key."
-            tokenIsError = false
+            copied = false
+            revoked = false
         } catch {
-            tokenMessage = "Could not generate a token: \(error.localizedDescription)"
-            tokenIsError = true
+            self.error = "Couldn't generate a token: \(error.localizedDescription)"
         }
     }
 
-    private func revokeTokens() {
+    private func revokeAll() {
         isRevoking = true
-        revokeMessage = "Revoking..."
-        revokeIsError = false
         Task {
             defer { isRevoking = false }
             do {
                 try await ProxyAPI.revokeTokens(keys: keys)
-                revokeMessage = "All previously issued tokens are now revoked."
-                revokeIsError = false
                 token = ""
+                revoked = true
             } catch {
-                revokeMessage = error.localizedDescription
-                revokeIsError = true
+                self.error = error.localizedDescription
             }
         }
     }

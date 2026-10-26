@@ -1,119 +1,302 @@
 import SwiftUI
+import UIKit
 
-/// Mirrors wallet.html's `#walletScreen`: balance/price/address, the free
-/// coin faucet, send coins, and API token issuance — all in one scroll view.
+/// The open wallet: balance, the three things done most (send, receive, scan), and everything else
+/// one row away.
 struct WalletView: View {
     @ObservedObject var store: WalletStore
     let keys: WalletKeys
+    @StateObject private var model: WalletModel
 
-    @State private var balance: Double?
-    @State private var priceUsd: Double?
-    @State private var freeCoinsRemaining: Int?
-    @State private var showBackup = false
-    @State private var standing: ProxyAPI.Reputation?
+    /// What is presented over the wallet. One item rather than a flag per sheet, so a scan can
+    /// hand straight over to what it found.
+    enum Sheet: Identifiable {
+        case send(to: String)
+        case receive
+        case scan
+        case authorise(id: String)
+
+        var id: String {
+            switch self {
+            case .send: return "send"
+            case .receive: return "receive"
+            case .scan: return "scan"
+            case .authorise(let id): return "authorise-\(id)"
+            }
+        }
+    }
+
+    @State private var sheet: Sheet?
+    @State private var claim: ClaimState = .idle
+    @State private var claimMessage: ClaimMessage?
+    @State private var confirmingRemoval = false
+    @State private var scanProblem: String?
+
+    enum ClaimState { case idle, claiming }
+
+    struct ClaimMessage: Identifiable {
+        let id = UUID()
+        let title: String
+        let detail: String
+    }
+
+    init(store: WalletStore, keys: WalletKeys) {
+        self.store = store
+        self.keys = keys
+        _model = StateObject(wrappedValue: WalletModel(keys: keys))
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                balanceCard
-                privateKeyCard
-                FaucetSectionView(keys: keys, freeCoinsRemaining: $freeCoinsRemaining, onClaimed: { refreshBalance() })
-                SendCoinsView(keys: keys, onSent: { refreshBalance() })
-                AuthorisedServicesView(keys: keys)
-                APITokensView(keys: keys)
-            }
-            .padding(20)
-        }
-        .background(WalletTheme.background)
-        .accessibilityIdentifier("walletScreen")
-        .task {
-            refreshBalance()
-            refreshPrice()
-            refreshFreeCoinsRemaining()
-        }
-    }
-
-    private var balanceCard: some View {
-        WalletCard(title: "Balance") {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(balance.map(formatNumber) ?? "—")
-                    .font(.system(size: 34, weight: .bold))
-                    .accessibilityIdentifier("balanceValue")
-                Text("aicoin").font(.subheadline).foregroundColor(WalletTheme.muted)
-            }
-            Text("1 aicoin \u{2248} $\(priceUsd.map { String(format: "%.6f", $0) } ?? "—")")
-                .font(.caption)
-                .foregroundColor(WalletTheme.muted)
-            Text("your address (safe to share — used to receive coins):")
-                .font(.caption2)
-                .foregroundColor(WalletTheme.muted)
-            // Shown as a code and as text: the code is for scanning, the text is so anybody can
-            // check that the code says what it claims to.
-            QRCodeView(text: keys.address)
-                .frame(maxWidth: .infinity, alignment: .center)
-            Text(keys.address)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .accessibilityIdentifier("addressLabel")
-            // Your own standing, because it is what the person you are about to receive from will
-            // be shown about you.
-            if let standing {
-                RatingView(rating: standing.rating, reasons: standing.reasons, compact: true)
-            }
-            Button("use a different wallet") {
-                store.useADifferentWallet()
-            }
-            .font(.caption)
-            .foregroundColor(WalletTheme.muted)
-        }
-    }
-
-    private var privateKeyCard: some View {
-        WalletCard(title: "Private key") {
-            DisclosureGroup("Show / re-save backup", isExpanded: $showBackup) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Never share this. Anyone with it controls this wallet.")
-                        .font(.caption2)
-                        .padding(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WalletTheme.danger))
-                    Text(keys.backupBlob)
-                        .font(.system(.caption2, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(WalletTheme.background)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WalletTheme.border))
+        NavigationStack {
+            List {
+                Section {
+                    balanceHeader
+                    actions
                 }
-                .padding(.top, 8)
+                .listRowSeparator(.hidden)
+
+                if let left = model.freeClaimsLeft, left > 0 {
+                    faucetSection(left: left)
+                }
+
+                Section {
+                    NavigationLink {
+                        PriceView(current: model.price)
+                    } label: {
+                        LabeledContent {
+                            Text(model.price.map { Coins.price($0.price_usd) } ?? "—")
+                        } label: {
+                            Label("Price", systemImage: "chart.xyaxis.line")
+                        }
+                    }
+                    NavigationLink {
+                        StandingView(standing: model.standing)
+                    } label: {
+                        LabeledContent {
+                            if let standing = model.standing {
+                                Stars(rating: standing.rating)
+                            }
+                        } label: {
+                            Label("Your Standing", systemImage: "star.leadinghalf.filled")
+                        }
+                    }
+                }
+
+                Section {
+                    NavigationLink {
+                        AuthorisedServicesView(keys: keys)
+                    } label: {
+                        Label("Authorised Services", systemImage: "checkmark.shield")
+                    }
+                    NavigationLink {
+                        APITokensView(keys: keys)
+                    } label: {
+                        Label("API Tokens", systemImage: "key.horizontal")
+                    }
+                } header: {
+                    Text("Access")
+                } footer: {
+                    Text("Let apps and scripts make AI calls billed to this wallet, and take that back.")
+                }
+
+                Section {
+                    NavigationLink {
+                        PrivateKeyView(keys: keys)
+                    } label: {
+                        Label("Back Up Private Key", systemImage: "lock.doc")
+                    }
+                    Button(role: .destructive) {
+                        confirmingRemoval = true
+                    } label: {
+                        Label("Remove Wallet from iPhone", systemImage: "trash")
+                    }
+                    .foregroundStyle(.red)
+                }
             }
-            .font(.caption)
-            .foregroundColor(WalletTheme.muted)
+            .navigationTitle("Wallet")
+            .refreshable { await model.refresh() }
+            .task { await model.refresh() }
+            .accessibilityIdentifier("walletScreen")
+            .sheet(item: $sheet) { sheet in
+                switch sheet {
+                case .send(let to):
+                    SendView(model: model, initialRecipient: to) {
+                        Task { await model.refresh() }
+                    }
+                case .receive:
+                    ReceiveView(address: keys.address)
+                case .scan:
+                    ScannerSheet(title: "Scan Code") { scanned in
+                        route(scanned)
+                    }
+                case .authorise(let id):
+                    AuthorisationRequestView(keys: keys, id: id)
+                }
+            }
+            .alert(item: $claimMessage) { message in
+                Alert(title: Text(message.title), message: Text(message.detail))
+            }
+            .alert("Unrecognised Code", isPresented: Binding(
+                get: { scanProblem != nil }, set: { if !$0 { scanProblem = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(scanProblem ?? "")
+            }
+            .confirmationDialog("Remove this wallet from this iPhone?", isPresented: $confirmingRemoval,
+                                titleVisibility: .visible) {
+                Button("Remove Wallet", role: .destructive) { store.useADifferentWallet() }
+            } message: {
+                Text("The coins stay with the wallet, but you'll need its private key to open it again. Make sure you've backed it up.")
+            }
         }
     }
 
-    private func refreshBalance() {
-        Task {
-            balance = try? await ProxyAPI.fetchBalance(address: keys.address)
-            standing = try? await ProxyAPI.fetchReputation(address: keys.address)
+    // MARK: Balance
+
+    private var balanceHeader: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Balance")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(model.balance.map(Coins.format) ?? "—")
+                    .font(.system(size: 44, weight: .semibold, design: .rounded))
+                    .contentTransition(.numericText())
+                    .animation(.default, value: model.balance)
+                    .accessibilityIdentifier("balanceValue")
+                Text(Coins.symbol)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            if let usd = model.usdValue {
+                Text("≈ \(Coins.usd(usd))")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else if model.balanceFailed {
+                Label("Couldn't reach the AICoin server", systemImage: "wifi.exclamationmark")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Text(keys.address)
+                .font(.caption.monospaced())
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .accessibilityIdentifier("addressLabel")
+                .contextMenu {
+                    Button("Copy Address", systemImage: "doc.on.doc") {
+                        UIPasteboard.general.string = keys.address
+                    }
+                }
+                .padding(.top, 2)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var actions: some View {
+        HStack {
+            ActionButton(title: "Send", systemImage: "arrow.up") { sheet = .send(to: "") }
+                .accessibilityIdentifier("sendButton")
+            ActionButton(title: "Receive", systemImage: "arrow.down") { sheet = .receive }
+                .accessibilityIdentifier("receiveButton")
+            ActionButton(title: "Scan", systemImage: "qrcode.viewfinder") { sheet = .scan }
+                .accessibilityIdentifier("scanButton")
+        }
+        .padding(.vertical, 6)
+    }
+
+    // MARK: Faucet
+
+    /// Shown only while the shared pool has claims left: a button that can only ever answer
+    /// "the pool is empty" is not a feature.
+    private func faucetSection(left: Int) -> some View {
+        Section {
+            Button {
+                claimFreeCoins()
+            } label: {
+                HStack {
+                    Label("Claim Free Coins", systemImage: "gift")
+                    Spacer()
+                    if claim == .claiming { ProgressView() }
+                }
+            }
+            .disabled(claim == .claiming)
+            .accessibilityIdentifier("claimBtn")
+        } footer: {
+            Text("Once an hour per wallet, while the shared pool lasts. \(left) \(left == 1 ? "claim" : "claims") left in the pool.")
+                .accessibilityIdentifier("freeCoinsRemainingValue")
         }
     }
 
-    private func refreshPrice() {
+    private func claimFreeCoins() {
+        claim = .claiming
         Task {
-            priceUsd = try? await ProxyAPI.fetchPrice().price_usd
+            defer { claim = .idle }
+            do {
+                switch try await ProxyAPI.claim(keys: keys) {
+                case .granted(let amount):
+                    claimMessage = ClaimMessage(title: "Coins Claimed",
+                                                detail: "\(Coins.format(amount)) \(Coins.symbol) added to your wallet.")
+                case .poolExhausted:
+                    claimMessage = ClaimMessage(title: "Pool Empty",
+                                                detail: "The shared free-coin pool has run out.")
+                case .cooldown(let next):
+                    let when = next.map { $0.formatted(.relative(presentation: .named)) } ?? "later"
+                    claimMessage = ClaimMessage(title: "Not Yet",
+                                                detail: "This wallet can claim again \(when).")
+                }
+            } catch {
+                claimMessage = ClaimMessage(title: "Couldn't Claim", detail: error.localizedDescription)
+            }
+            await model.refresh()
         }
     }
 
-    private func refreshFreeCoinsRemaining() {
-        Task {
-            freeCoinsRemaining = try? await ProxyAPI.fetchFreeCoinsAvailable()
+    // MARK: Scanning
+
+    /// A scanned code is either somebody's address (pay them) or a service asking to be
+    /// authorised. Anything else is said to be unrecognised rather than guessed at.
+    private func route(_ scanned: String) {
+        let text = scanned.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let next: Sheet
+        if Coins.isAddress(text) {
+            next = .send(to: text)
+        } else {
+            let id = AuthorisedServicesView.identifier(in: scanned)
+            guard !id.isEmpty else {
+                sheet = nil
+                scanProblem = "That code is neither a wallet address nor a service asking for access."
+                return
+            }
+            next = .authorise(id: id)
         }
+        sheet = nil
+        // Presented after the scanner has gone: replacing a sheet in the same update drops the
+        // second presentation.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { sheet = next }
     }
 }
 
-func formatNumber(_ value: Double) -> String {
-    if value == value.rounded() {
-        return String(Int(value))
+/// A round icon over a caption — the Send / Receive / Scan row.
+struct ActionButton: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.title3.weight(.semibold))
+                    .frame(width: 52, height: 52)
+                    .background(Circle().fill(.tint.opacity(0.15)))
+                Text(title)
+                    .font(.footnote)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(title)
     }
-    return String(value)
 }

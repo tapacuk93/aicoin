@@ -7,17 +7,18 @@ struct RootView: View {
         Group {
             switch store.screen {
             case .connect:
-                ConnectView(store: store)
+                OnboardingView(store: store)
             case .backup(let keys, _):
                 BackupView(store: store, keys: keys)
             case .wallet:
                 if let keys = store.keys {
                     WalletView(store: store, keys: keys)
+                        .id(keys.address)
                 } else {
-                    ConnectView(store: store)
+                    OnboardingView(store: store)
                 }
             }
         }
-        .preferredColorScheme(.dark)
+        .animation(.default, value: store.keys?.address)
     }
 }

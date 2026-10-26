@@ -22,7 +22,7 @@ struct QRCodeView: View {
                 // Never a blank square pretending to be scannable.
                 Text("could not draw a QR code")
                     .font(.caption)
-                    .foregroundColor(WalletTheme.muted)
+                    .foregroundStyle(.secondary)
                     .frame(width: size, height: size)
             }
         }

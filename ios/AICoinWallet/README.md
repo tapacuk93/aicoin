@@ -28,10 +28,17 @@ are the client-side counterparts of
   message construction + signing, and client-side API token issuance.
 - `AICoinWallet/Services/ProxyAPI.swift` — the networking layer against
   `/price`, `/free-coins/available`, `/wallet/api/balance/{address}`,
-  `/wallet/api/claim`, `/wallet/api/transfer`, `/wallet/api/revoke-tokens`.
-- `AICoinWallet/Views/` — SwiftUI screens: `ConnectView` (generate/import),
-  `BackupView` (one-time private key reveal), `WalletView` plus its
-  `FaucetSectionView`/`SendCoinsView`/`APITokensView` subsections.
+  `/wallet/api/claim`, `/wallet/api/transfer`, `/wallet/api/revoke-tokens`,
+  `/wallet/api/reputation/{address}`, `/price/history`, and the
+  `/wallet/api/authorize`/`grants` routes.
+- `AICoinWallet/Models/WalletModel.swift` — what the wallet screen shows
+  (balance, price, faucet pool, standing), refreshed together.
+- `AICoinWallet/Views/` — native SwiftUI screens in system styles (light and
+  dark): `OnboardingView` (create/import), `BackupView` (one-time key reveal),
+  `WalletView` (balance, Send/Receive/Scan, faucet while the pool lasts),
+  `SendView`, `ReceiveView`, `PriceView` (Swift Charts over `/price/history`),
+  `StandingView`, `AuthorisedServicesView` + `AuthorisationRequestView`,
+  `APITokensView`, `PrivateKeyView`, and `ScannerSheet` (camera QR).
 
 ## Building
 
