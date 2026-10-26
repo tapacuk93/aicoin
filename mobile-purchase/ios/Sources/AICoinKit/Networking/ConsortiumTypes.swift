@@ -71,6 +71,16 @@ public enum ConsortiumEvent: Sendable, Equatable {
         public let quality: String?
         /// Provider -> model id, for every panelist.
         public let models: [String: String]
+
+        public init(mode: String, panel: [String], editor: String? = nil, subject: String? = nil,
+                    quality: String? = nil, models: [String: String] = [:]) {
+            self.mode = mode
+            self.panel = panel
+            self.editor = editor
+            self.subject = subject
+            self.quality = quality
+            self.models = models
+        }
     }
 
     public struct Turn: Sendable, Equatable {
@@ -93,6 +103,20 @@ public enum ConsortiumEvent: Sendable, Equatable {
         public let comments: String?
         /// `failed` only: why.
         public let error: String?
+
+        /// Public so an app can describe or replay events in its own tests.
+        public init(stage: String, round: Int, provider: String, model: String? = nil, status: Status,
+                    seconds: Double? = nil, clean: Bool? = nil, comments: String? = nil, error: String? = nil) {
+            self.stage = stage
+            self.round = round
+            self.provider = provider
+            self.model = model
+            self.status = status
+            self.seconds = seconds
+            self.clean = clean
+            self.comments = comments
+            self.error = error
+        }
     }
 
     public struct Read: Sendable, Equatable {
@@ -104,6 +128,15 @@ public enum ConsortiumEvent: Sendable, Equatable {
         public let titles: [String]
         /// The refs actually added to the record — not those already there, unwritten or unknown.
         public let added: [String]
+
+        public init(stage: String, round: Int, provider: String, refs: [String], titles: [String], added: [String]) {
+            self.stage = stage
+            self.round = round
+            self.provider = provider
+            self.refs = refs
+            self.titles = titles
+            self.added = added
+        }
     }
 
     /// One NDJSON line as an event, or nil for a line that is not one of these (a ping, the
