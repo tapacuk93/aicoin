@@ -381,4 +381,72 @@ final class AICoinCapabilityClientTests: XCTestCase {
         inner.feed.finish()
         _ = try await call.value
     }
+
+    // MARK: - Durable calls
+
+    func testACallIDIsSentAndResumedCallsAreReportedWithTheirNumbers() async throws {
+        let transport = LineStubTransport()
+        let log = EventLog()
+        let call = Task {
+            try await client(transport).consortium(prompt: "Q", callID: "chapter-7", onEvent: { log.append($0) })
+        }
+        transport.feed.yield(#"{"event":"start","seq":1,"mode":"panel","panel":["kimi"],"call_id":"chapter-7","resumed":true}"#)
+        transport.feed.yield(#"{"event":"turn","seq":2,"stage":"draft","round":0,"provider":"kimi","model":"kimi-k3.1-pro","status":"started","fell_back_from":"kimi-k3.1-pro-highspeed"}"#)
+        transport.feed.yield(#"{"event":"resumed","seq":3,"from":"review","round":2}"#)
+        transport.feed.yield(#"{"event":"result","seq":4,"answer":"done","call_id":"chapter-7"}"#)
+        transport.feed.finish()
+        _ = try await call.value
+
+        XCTAssertEqual(sentBody(transport.requests.first)["call_id"] as? String, "chapter-7")
+        let events = log.events
+        XCTAssertEqual(events.map(\.seq), [1, 2, 3], "a client that comes back skips what it has shown by seq")
+        guard case .start(let start) = events[0] else { return XCTFail("start first") }
+        XCTAssertTrue(start.resumed)
+        XCTAssertEqual(start.callID, "chapter-7")
+        guard case .turn(let turn) = events[1] else { return XCTFail("then a turn") }
+        XCTAssertEqual(turn.fellBackFrom, "kimi-k3.1-pro-highspeed")
+        XCTAssertEqual(turn.model, "kimi-k3.1-pro", "model is the one that answered")
+        XCTAssertEqual(events[2], .resumed(.init(seq: 3, from: "review", round: 2)))
+    }
+
+    func testAStreamThatGoesSilentIsAStalledConnectionNotAnEndlessWait() async {
+        // After a proxy restart the phone saw a stream go quiet without closing, and sat on stale
+        // progress for good. The proxy pings every 15 s, so silence past the idle timeout means
+        // the connection is gone.
+        let transport = LineStubTransport()
+        let log = EventLog()
+        transport.feed.yield(startLine)
+        let started = Date()
+        do {
+            _ = try await client(transport).consortium(prompt: "Q", callID: "c1", idleTimeout: 0.3,
+                                                       onEvent: { log.append($0) })
+            XCTFail("a silent stream must not wait forever")
+        } catch {
+            XCTAssertTrue(AICoinCapabilityClient.isStreamStalled(error), "\(error)")
+            XCTAssertEqual((error as? URLError)?.code, .networkConnectionLost,
+                           "a transport error retry policies already treat as transient")
+            XCTAssertFalse(AICoinError.isTerminal(error))
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        XCTAssertEqual(log.events.count, 1, "what arrived before the silence was delivered")
+    }
+
+    func testPingsKeepAStreamAlive() async throws {
+        let transport = LineStubTransport()
+        let call = Task { try await client(transport).consortium(prompt: "Q", idleTimeout: 0.4, onEvent: { _ in }) }
+        transport.feed.yield(startLine)
+        for _ in 0..<6 {
+            try await Task.sleep(nanoseconds: 150_000_000)
+            transport.feed.yield(#"{"event":"ping"}"#)
+        }
+        transport.feed.yield(resultLine)
+        transport.feed.finish()
+        let answer = try await call.value
+        XCTAssertEqual(answer.answer, "<p>Chapter</p>", "0.9 s of pings is not 0.4 s of silence")
+    }
+
+    func testNotStalledIsNotMistakenForStalled() {
+        XCTAssertFalse(AICoinCapabilityClient.isStreamStalled(URLError(.networkConnectionLost)))
+        XCTAssertFalse(AICoinCapabilityClient.isStreamStalled(AICoinError.malformedResponse))
+    }
 }

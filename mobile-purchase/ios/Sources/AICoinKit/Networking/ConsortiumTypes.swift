@@ -60,6 +60,34 @@ public enum ConsortiumEvent: Sendable, Equatable {
     case turn(Turn)
     /// A panelist asked to read parts of the library; they are now in the panel's record.
     case read(Read)
+    /// The proxy running the call went away and another picked it up from its last checkpoint:
+    /// what had finished stands, and the turn that was in flight starts again.
+    case resumed(Resumed)
+
+    /// The event's place in the call, counting from 1 — the same on every attach, so a client
+    /// coming back with a `callID` can skip the ones it has already shown. 0 from a proxy that
+    /// does not number events.
+    public var seq: Int {
+        switch self {
+        case .start(let start): return start.seq
+        case .turn(let turn): return turn.seq
+        case .read(let read): return read.seq
+        case .resumed(let resumed): return resumed.seq
+        }
+    }
+
+    public struct Resumed: Sendable, Equatable {
+        public let seq: Int
+        /// The stage the call was in: `"draft"`, `"merge"`, `"review"` or `"revise"`.
+        public let from: String
+        public let round: Int
+
+        public init(seq: Int = 0, from: String, round: Int) {
+            self.seq = seq
+            self.from = from
+            self.round = round
+        }
+    }
 
     public struct Start: Sendable, Equatable {
         /// `"panel"` or `"lead"`.
@@ -69,8 +97,13 @@ public enum ConsortiumEvent: Sendable, Equatable {
         public let subject: String?
         /// `"standard"` or `"best"`.
         public let quality: String?
-        /// Provider -> model id, for every panelist.
+        /// Provider -> model id, for every panelist: the first each will try.
         public let models: [String: String]
+        public var seq: Int = 0
+        /// The call's id, when it was given one.
+        public var callID: String?
+        /// True when this call was picked up from a checkpoint after the proxy running it went away.
+        public var resumed: Bool = false
 
         public init(mode: String, panel: [String], editor: String? = nil, subject: String? = nil,
                     quality: String? = nil, models: [String: String] = [:]) {
@@ -103,6 +136,10 @@ public enum ConsortiumEvent: Sendable, Equatable {
         public let comments: String?
         /// `failed` only: why.
         public let error: String?
+        public var seq: Int = 0
+        /// When this turn's first model failed and another of the provider's models took it over:
+        /// the one it gave up on. `model` is the one that answered.
+        public var fellBackFrom: String?
 
         /// Public so an app can describe or replay events in its own tests.
         public init(stage: String, round: Int, provider: String, model: String? = nil, status: Status,
@@ -128,6 +165,7 @@ public enum ConsortiumEvent: Sendable, Equatable {
         public let titles: [String]
         /// The refs actually added to the record — not those already there, unwritten or unknown.
         public let added: [String]
+        public var seq: Int = 0
 
         public init(stage: String, round: Int, provider: String, refs: [String], titles: [String], added: [String]) {
             self.stage = stage
@@ -147,25 +185,36 @@ public enum ConsortiumEvent: Sendable, Equatable {
         func int(_ key: String) -> Int { (object[key] as? NSNumber)?.intValue ?? 0 }
         switch string("event") {
         case "start":
-            return .start(Start(
+            var start = Start(
                 mode: string("mode") ?? "panel", panel: strings("panel"), editor: string("editor"),
                 subject: string("subject"), quality: string("quality"),
                 models: (object["models"] as? [String: Any])?.compactMapValues { $0 as? String } ?? [:]
-            ))
+            )
+            start.seq = int("seq")
+            start.callID = string("call_id")
+            start.resumed = object["resumed"] as? Bool ?? false
+            return .start(start)
+        case "resumed":
+            return .resumed(Resumed(seq: int("seq"), from: string("from") ?? "", round: int("round")))
         case "turn":
             guard let provider = string("provider"), let status = string("status").flatMap(Turn.Status.init)
             else { return nil }
-            return .turn(Turn(
+            var turn = Turn(
                 stage: string("stage") ?? "", round: int("round"), provider: provider, model: string("model"),
                 status: status, seconds: (object["seconds"] as? NSNumber)?.doubleValue,
                 clean: object["clean"] as? Bool, comments: string("comments"), error: string("error")
-            ))
+            )
+            turn.seq = int("seq")
+            turn.fellBackFrom = string("fell_back_from")
+            return .turn(turn)
         case "read":
             guard let provider = string("provider") else { return nil }
-            return .read(Read(
+            var read = Read(
                 stage: string("stage") ?? "", round: int("round"), provider: provider,
                 refs: strings("refs"), titles: strings("titles"), added: strings("added")
-            ))
+            )
+            read.seq = int("seq")
+            return .read(read)
         default:
             return nil
         }

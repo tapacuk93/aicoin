@@ -133,14 +133,28 @@ public struct AICoinCapabilityClient: Sendable {
     ///   - onEvent: given, the call is streamed and each step of the panel's work is delivered as
     ///     it happens, on whatever task reads the stream; the return value is the same either way.
     ///     With streaming the timeout is the longest silence allowed — the proxy pings every 15 s.
+    ///   - callID: makes the call durable. The proxy runs it to the end whether or not anyone is
+    ///     listening, and survives its own restarts; calling again with the same id — after the
+    ///     app was frozen in the background, or the stream dropped — attaches to that call instead
+    ///     of starting a new one: its events so far are replayed (each with its `seq`, so ones
+    ///     already shown can be skipped), then the rest arrive live, or the stored result comes
+    ///     back at once if it has finished. Nothing is charged again. Generate it once per piece of
+    ///     work (a UUID) and keep it until the result is in hand. The other arguments are ignored
+    ///     when the id already names a call.
+    ///   - idleTimeout: streaming only. The proxy sends a line at least every 15 s, so this long
+    ///     with none means the connection is dead even if nothing said so (a proxy restart can
+    ///     leave a stream silent rather than closed). It then throws an error
+    ///     `isStreamStalled(_:)` recognises — a `URLError(.networkConnectionLost)`, which retry
+    ///     policies already treat as transient. With a `callID`, retrying simply re-attaches.
     public func consortium(
         prompt: String, context: String? = nil, mode: String = "auto",
         maxRounds: Int? = nil, timeout: TimeInterval = 600,
         library: ConsortiumLibrary? = nil, quality: ConsortiumQuality? = nil,
-        maxOutputTokens: Int? = nil,
+        maxOutputTokens: Int? = nil, callID: String? = nil, idleTimeout: TimeInterval = 45,
         onEvent: (@Sendable (ConsortiumEvent) -> Void)? = nil
     ) async throws -> TextAnswer {
         var body: [String: Any] = ["prompt": prompt, "mode": mode]
+        if let callID { body["call_id"] = callID }
         if let context, !context.isEmpty { body["context"] = context }
         if let maxRounds { body["max_rounds"] = maxRounds }
         if let library { body["library"] = library.json }
@@ -151,7 +165,24 @@ public struct AICoinCapabilityClient: Sendable {
             return try decodeAnswer(data)
         }
         body["stream"] = true
-        return try await streamConsortium(body: body, timeout: timeout, onEvent: onEvent)
+        return try await streamConsortium(body: body, timeout: timeout, idleTimeout: idleTimeout, onEvent: onEvent)
+    }
+
+    /// The `userInfo` key marking the `URLError` a silent stream is reported with.
+    public static let streamStalledKey = "AICoinStreamStalled"
+
+    /// Whether `error` is a streamed consortium that went silent past its `idleTimeout`. Also a
+    /// `URLError(.networkConnectionLost)`, so code that only knows transport errors retries it.
+    public static func isStreamStalled(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        return urlError.code == .networkConnectionLost && urlError.userInfo[streamStalledKey] as? Bool == true
+    }
+
+    static func streamStalled(after seconds: TimeInterval) -> URLError {
+        URLError(.networkConnectionLost, userInfo: [
+            streamStalledKey: true,
+            NSLocalizedDescriptionKey: "The consortium stream went silent for \(Int(seconds)) seconds.",
+        ])
     }
 
     /// A streamed consortium: NDJSON, one event per line, ending in a `result` line carrying the
@@ -159,7 +190,8 @@ public struct AICoinCapabilityClient: Sendable {
     /// Refusals decided before the panel starts (no token, an empty wallet, a bad body) are
     /// ordinary HTTP errors, exactly as without streaming.
     private func streamConsortium(
-        body: [String: Any], timeout: TimeInterval, onEvent: @Sendable (ConsortiumEvent) -> Void
+        body: [String: Any], timeout: TimeInterval, idleTimeout: TimeInterval,
+        onEvent: @escaping @Sendable (ConsortiumEvent) -> Void
     ) async throws -> TextAnswer {
         let request = try makeRequest("consortium", body: body, timeout: timeout)
         let lines: AsyncThrowingStream<String, Error>
@@ -180,28 +212,56 @@ public struct AICoinCapabilityClient: Sendable {
             try check(status: status, data: collected)
             throw AICoinError.server(status: status, message: Self.errorMessage(from: collected))
         }
-        for try await line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8),
-                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            else { continue }
-            switch object["event"] as? String {
-            case "result":
-                let answer = try decodeAnswer(data)
-                eventBus.events.send(.paidCallSucceeded)
-                return answer
-            case "error":
-                let failed = (object["status"] as? NSNumber)?.intValue ?? 502
-                try check(status: failed, data: data)
-                // Coins were spent on the turns that ran before it failed.
-                eventBus.events.send(.paidCallSucceeded)
-                throw AICoinError.server(status: failed, message: Self.errorMessage(from: data))
-            default:
-                if let event = ConsortiumEvent.parse(object) { onEvent(event) }
+        // The reader and a watchdog race: whichever finishes first decides. The watchdog only
+        // fires after `idleTimeout` with no line at all — pings count — and cancelling the reader
+        // ends the underlying request.
+        let clock = LastLineClock()
+        return try await withThrowingTaskGroup(of: TextAnswer.self) { group in
+            group.addTask {
+                for try await line in lines {
+                    clock.touch()
+                    if let answer = try self.handleStreamLine(line, onEvent: onEvent) { return answer }
+                }
+                // The connection ended without a last line: the proxy went away mid-call.
+                throw AICoinError.malformedResponse
             }
+            group.addTask {
+                let step = min(1.0, max(idleTimeout / 4, 0.01))
+                while true {
+                    try await Task.sleep(nanoseconds: UInt64(step * 1_000_000_000))
+                    if clock.secondsSinceLast() >= idleTimeout {
+                        throw Self.streamStalled(after: idleTimeout)
+                    }
+                }
+            }
+            defer { group.cancelAll() }
+            guard let answer = try await group.next() else { throw AICoinError.malformedResponse }
+            return answer
         }
-        // The connection ended without a last line: the proxy went away mid-call.
-        throw AICoinError.malformedResponse
+    }
+
+    /// One NDJSON line: an event to deliver (nil returned), the result (returned), or the error
+    /// the plain call would have thrown (thrown).
+    private func handleStreamLine(_ line: String, onEvent: @Sendable (ConsortiumEvent) -> Void) throws -> TextAnswer? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        switch object["event"] as? String {
+        case "result":
+            let answer = try decodeAnswer(data)
+            eventBus.events.send(.paidCallSucceeded)
+            return answer
+        case "error":
+            let failed = (object["status"] as? NSNumber)?.intValue ?? 502
+            try check(status: failed, data: data)
+            // Coins were spent on the turns that ran before it failed.
+            eventBus.events.send(.paidCallSucceeded)
+            throw AICoinError.server(status: failed, message: Self.errorMessage(from: data))
+        default:
+            if let event = ConsortiumEvent.parse(object) { onEvent(event) }
+            return nil
+        }
     }
 
     /// `POST /image`. `size` is the provider-neutral `"1024x1024"` form.
@@ -316,4 +376,13 @@ extension AICoinError {
         default: return false
         }
     }
+}
+
+/// When a stream last delivered a line, readable from the watchdog task.
+private final class LastLineClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last = Date()
+
+    func touch() { lock.withLock { last = Date() } }
+    func secondsSinceLast() -> TimeInterval { lock.withLock { Date().timeIntervalSince(last) } }
 }
