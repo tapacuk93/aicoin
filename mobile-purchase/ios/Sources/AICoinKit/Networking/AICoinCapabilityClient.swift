@@ -153,7 +153,7 @@ public struct AICoinCapabilityClient: Sendable {
         maxRounds: Int? = nil, timeout: TimeInterval = 600,
         library: ConsortiumLibrary? = nil, quality: ConsortiumQuality? = nil,
         maxOutputTokens: Int? = nil, callID: String? = nil, idleTimeout: TimeInterval = 45,
-        notify: ConsortiumNotify? = nil,
+        notify: ConsortiumNotify? = nil, skip: [String] = [],
         onEvent: (@Sendable (ConsortiumEvent) -> Void)? = nil
     ) async throws -> TextAnswer {
         var body: [String: Any] = ["prompt": prompt, "mode": mode]
@@ -164,6 +164,9 @@ public struct AICoinCapabilityClient: Sendable {
         if let maxRounds { body["max_rounds"] = maxRounds }
         if let library { body["library"] = library.json }
         if let quality { body["quality"] = quality.rawValue }
+        // Providers the caller wants left off the panel (a reader's setting); unknown names are
+        // ignored by the proxy, so this needs no list of who is on it.
+        if !skip.isEmpty { body["skip"] = skip }
         if let maxOutputTokens { body["max_output_tokens"] = maxOutputTokens }
         guard let onEvent else {
             let data = try await post("consortium", body: body, timeout: timeout)

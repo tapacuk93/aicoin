@@ -82,6 +82,24 @@ final class ConsortiumHandler {
     private ConsortiumHandler() {
     }
 
+    /** The `skip` field as lower-case provider names; anything that is not a list of strings is no skip. */
+    static Set<String> skipped(Object field) {
+        Set<String> skip = new LinkedHashSet<>();
+        if (field instanceof List) {
+            for (Object p : (List<?>) field) {
+                if (p instanceof String) skip.add(((String) p).trim().toLowerCase(Locale.ROOT));
+            }
+        }
+        return skip;
+    }
+
+    /** {@code panel} in its order, less {@code skip}. */
+    static List<String> withoutSkipped(List<String> panel, Set<String> skip) {
+        List<String> kept = new ArrayList<>(panel);
+        kept.removeAll(skip);
+        return kept;
+    }
+
     /**
      * The panel: the providers that can hold a chat turn ({@link ChatAdapter}), that this
      * deployment has a key and a model for, and that the caller asked for (all of them, if it
@@ -269,7 +287,17 @@ final class ConsortiumHandler {
             return;
         }
         boolean best = quality.equals("best");
-        List<String> panel = panel(config, requested, subject, null, best);
+        // `skip` is the other way of narrowing the panel: by who to leave out rather than who to
+        // seat. It is what a reader's setting wants ("not Kimi, it takes ten minutes a turn"), and
+        // unlike `providers` it keeps seating a provider added to the panel later.
+        Set<String> skip = skipped(body.get("skip"));
+        List<String> seated = panel(config, requested, subject, null, best);
+        List<String> panel = withoutSkipped(seated, skip);
+        if (!seated.isEmpty() && panel.isEmpty()) {
+            sendError(ctx, HttpResponseStatus.BAD_REQUEST,
+                    "skip leaves no one on the panel (skipped: " + String.join(", ", skip) + ")");
+            return;
+        }
         if (panel.isEmpty()) {
             sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE,
                     "no consortium providers are configured (need a key and a model for one of "

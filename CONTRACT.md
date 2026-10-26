@@ -205,6 +205,7 @@ Auth is the same API token as any AI-proxy call (`X-Api-Key`, never a bare addre
   "prompt": "...",                      // required, max 32,000 characters
   "context": "...",                     // optional background the whole panel sees, max 32,000 characters
   "providers": ["anthropic", "kimi"],   // optional; default: the whole panel
+  "skip": ["kimi"],                     // optional; leave these off whatever panel results — 400 if none would be left
   "editor": "anthropic",                // optional; default: the first panelist (and the lead)
   "mode": "auto",                       // optional: auto (default) | lead | panel | poll
   "max_rounds": 2,                      // optional; may only lower consortium.maxRounds, never raise it
