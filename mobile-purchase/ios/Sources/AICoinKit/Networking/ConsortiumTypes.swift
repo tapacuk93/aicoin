@@ -102,6 +102,12 @@ public enum ConsortiumEvent: Sendable, Equatable {
     /// The editor could not do its merge or revision — out of credit, an error, a reply that was
     /// not one whole answer — and another panelist took the turn, and edits from now on.
     case editorChanged(EditorChanged)
+    /// The call was paused (`pauseConsortium`): the stream ends after this, and the call waits
+    /// for a request with the same `callID` to resume it.
+    case paused(Paused)
+    /// Providers were taken off the panel or put back (`updateConsortium`, or a resume or
+    /// re-attach with a different `skip`).
+    case panelChanged(PanelChanged)
 
     /// The event's place in the call, counting from 1 — the same on every attach, so a client
     /// coming back with a `callID` can skip the ones it has already shown. 0 from a proxy that
@@ -113,6 +119,8 @@ public enum ConsortiumEvent: Sendable, Equatable {
         case .read(let read): return read.seq
         case .resumed(let resumed): return resumed.seq
         case .editorChanged(let changed): return changed.seq
+        case .paused(let paused): return paused.seq
+        case .panelChanged(let changed): return changed.seq
         }
     }
 
@@ -133,6 +141,34 @@ public enum ConsortiumEvent: Sendable, Equatable {
             self.reason = reason
             self.stage = stage
             self.round = round
+        }
+    }
+
+    public struct Paused: Sendable, Equatable {
+        public let seq: Int
+        /// Where the call stopped: `"draft"`, `"merge"`, `"review"` or `"revise"`, and the round.
+        public let phase: String
+        public let round: Int
+
+        public init(seq: Int = 0, phase: String, round: Int) {
+            self.seq = seq
+            self.phase = phase
+            self.round = round
+        }
+    }
+
+    public struct PanelChanged: Sendable, Equatable {
+        public let seq: Int
+        public let removed: [String]
+        public let added: [String]
+        /// The panel now, in rank order.
+        public let panel: [String]
+
+        public init(seq: Int = 0, removed: [String], added: [String], panel: [String]) {
+            self.seq = seq
+            self.removed = removed
+            self.added = added
+            self.panel = panel
         }
     }
 
@@ -192,6 +228,9 @@ public enum ConsortiumEvent: Sendable, Equatable {
     public struct Turn: Sendable, Equatable {
         public enum Status: String, Sendable {
             case started, finished, failed
+            /// Called off — the reader paused the call or took this provider off the panel. Its
+            /// coin was given back.
+            case cancelled
         }
 
         /// `"draft"`, `"merge"`, `"review"` or `"revise"`.
@@ -271,6 +310,11 @@ public enum ConsortiumEvent: Sendable, Equatable {
                 return Skipped(provider: provider, reason: item["reason"] as? String ?? "")
             }
             return .start(start)
+        case "paused":
+            return .paused(Paused(seq: int("seq"), phase: string("phase") ?? "", round: int("round")))
+        case "panel_changed":
+            return .panelChanged(PanelChanged(seq: int("seq"), removed: strings("removed"), added: strings("added"),
+                                              panel: strings("panel")))
         case "editor_changed":
             guard let from = string("from"), let to = string("to") else { return nil }
             return .editorChanged(EditorChanged(seq: int("seq"), from: from, to: to, reason: string("reason") ?? "",
@@ -299,5 +343,21 @@ public enum ConsortiumEvent: Sendable, Equatable {
         default:
             return nil
         }
+    }
+}
+
+/// A consortium call that was paused — by `pauseConsortium`, from this device or another — ended
+/// the stream (or the wait) instead of finishing. Not a failure: the call is kept, and calling
+/// `consortium(...)` again with the same `callID` resumes it. Recognise it with
+/// `AICoinCapabilityClient.isConsortiumPaused(_:)`.
+public struct ConsortiumPausedError: Error, Sendable, Equatable {
+    public let callID: String?
+    public let phase: String?
+    public let round: Int?
+
+    public init(callID: String?, phase: String?, round: Int?) {
+        self.callID = callID
+        self.phase = phase
+        self.round = round
     }
 }

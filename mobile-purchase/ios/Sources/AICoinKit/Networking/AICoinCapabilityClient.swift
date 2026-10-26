@@ -166,11 +166,17 @@ public struct AICoinCapabilityClient: Sendable {
         if let quality { body["quality"] = quality.rawValue }
         // Providers the caller wants left off the panel (a reader's setting); unknown names are
         // ignored by the proxy, so this needs no list of who is on it.
-        if !skip.isEmpty { body["skip"] = skip }
+        // A durable call always says who to skip, even nobody: a request coming back for one
+        // applies its skip to the call, and an empty one puts everyone back.
+        if !skip.isEmpty || callID != nil { body["skip"] = skip }
         if let maxOutputTokens { body["max_output_tokens"] = maxOutputTokens }
         guard let onEvent else {
-            let data = try await post("consortium", body: body, timeout: timeout)
-            return try decodeAnswer(data)
+            do {
+                let data = try await post("consortium", body: body, timeout: timeout)
+                return try decodeAnswer(data)
+            } catch AICoinError.server(let status, let message) where status == 409 && message == "call paused" {
+                throw ConsortiumPausedError(callID: callID, phase: nil, round: nil)
+            }
         }
         body["stream"] = true
         return try await streamConsortium(body: body, timeout: timeout, idleTimeout: idleTimeout, onEvent: onEvent)
@@ -260,6 +266,10 @@ public struct AICoinCapabilityClient: Sendable {
             let answer = try decodeAnswer(data)
             eventBus.events.send(.paidCallSucceeded)
             return answer
+        case "paused":
+            if let event = ConsortiumEvent.parse(object) { onEvent(event) }
+            throw ConsortiumPausedError(callID: nil, phase: object["phase"] as? String,
+                                        round: (object["round"] as? NSNumber)?.intValue)
         case "error":
             let failed = (object["status"] as? NSNumber)?.intValue ?? 502
             try check(status: failed, data: data)
@@ -270,6 +280,39 @@ public struct AICoinCapabilityClient: Sendable {
             if let event = ConsortiumEvent.parse(object) { onEvent(event) }
             return nil
         }
+    }
+
+    // MARK: - Controlling a running call
+
+    /// `POST /consortium/{callID}/pause`: stop a durable call where it is. Turns in flight are
+    /// called off and their coins given back, nothing more runs or is billed, and any attached
+    /// stream ends with `.paused` (its `consortium(...)` throws `ConsortiumPausedError`). Resume it
+    /// with `consortium(...)` and the same `callID` — the turns called off are redone — within the
+    /// proxy's paused retention (a day by default); after that it is gone (`410`), so start a new
+    /// call. Throws `AICoinError.server(404)` for no such call of this wallet's, `409` if it has
+    /// already finished.
+    public func pauseConsortium(callID: String) async throws {
+        _ = try await sendFree("consortium/\(Self.pathSegment(callID))/pause", method: "POST", body: [:])
+    }
+
+    /// `PATCH /consortium/{callID}`: change who is on a running (or paused) call's panel. Providers
+    /// in `skip` are taken off now — a turn of theirs in flight is called off and refunded — and
+    /// ones no longer in it are put back, joining from the call's next stage. Returns the panel
+    /// now. `400` if nobody would be left, `409` if the call has finished.
+    public func updateConsortium(callID: String, skip: [String]) async throws -> [String] {
+        let data = try await sendFree("consortium/\(Self.pathSegment(callID))", method: "PATCH", body: ["skip": skip])
+        struct Panel: Decodable { let panel: [String] }
+        guard let panel = try? JSONDecoder().decode(Panel.self, from: data) else { throw AICoinError.malformedResponse }
+        return panel.panel
+    }
+
+    /// Whether `error` is a consortium call ending because it was paused, rather than failing.
+    public static func isConsortiumPaused(_ error: Error) -> Bool {
+        error is ConsortiumPausedError
+    }
+
+    private static func pathSegment(_ id: String) -> String {
+        id.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._:"))) ?? id
     }
 
     // MARK: - Push devices

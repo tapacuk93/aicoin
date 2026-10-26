@@ -509,4 +509,57 @@ final class AICoinCapabilityClientTests: XCTestCase {
         XCTAssertNil(sent["failure_body"])
         XCTAssertNil(sentBody(transport.requests[1])["notify"], "a call without an id cannot be told about later")
     }
+
+    // MARK: - Pause and panel changes
+
+    func testPauseAndPanelChangesGoToTheCallsOwnPaths() async throws {
+        let transport = StubTransport(#"{"panel":["anthropic","google"],"skip":["kimi"],"paused":false}"#)
+        try await client(transport).pauseConsortium(callID: "chapter-7")
+        let panel = try await client(transport).updateConsortium(callID: "chapter-7", skip: ["kimi"])
+
+        XCTAssertEqual(panel, ["anthropic", "google"])
+        let requests = transport.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["POST", "PATCH"])
+        XCTAssertEqual(requests.map { $0.url?.path }, ["/consortium/chapter-7/pause", "/consortium/chapter-7"])
+        XCTAssertEqual(sentBody(requests[1])["skip"] as? [String], ["kimi"])
+    }
+
+    func testAStreamThatEndsPausedThrowsAPauseNotAFailure() async {
+        let transport = LineStubTransport()
+        let log = EventLog()
+        transport.feed.yield(startLine)
+        transport.feed.yield(#"{"event":"turn","seq":2,"stage":"draft","round":0,"provider":"kimi","model":"kimi-k2.6","status":"cancelled"}"#)
+        transport.feed.yield(#"{"event":"panel_changed","seq":3,"removed":["kimi"],"added":[],"panel":["anthropic"]}"#)
+        transport.feed.yield(#"{"event":"paused","seq":4,"phase":"draft","round":0}"#)
+        transport.feed.finish()
+        do {
+            _ = try await client(transport).consortium(prompt: "Q", callID: "c1", onEvent: { log.append($0) })
+            XCTFail("a paused call has no result")
+        } catch {
+            XCTAssertTrue(AICoinCapabilityClient.isConsortiumPaused(error), "\(error)")
+            XCTAssertEqual((error as? ConsortiumPausedError)?.phase, "draft")
+            XCTAssertFalse(AICoinError.isTerminal(error))
+        }
+        let events = log.events
+        guard case .turn(let turn) = events[1] else { return XCTFail("a turn") }
+        XCTAssertEqual(turn.status, .cancelled)
+        XCTAssertEqual(events[2], .panelChanged(.init(seq: 3, removed: ["kimi"], added: [], panel: ["anthropic"])))
+        XCTAssertEqual(events[3], .paused(.init(seq: 4, phase: "draft", round: 0)))
+    }
+
+    func testAPlainCallThatWasPausedThrowsAPauseToo() async {
+        let transport = StubTransport(#"{"error":"call paused","paused":true,"call_id":"c1"}"#, status: 409)
+        do {
+            _ = try await client(transport).consortium(prompt: "Q", callID: "c1")
+            XCTFail("expected a pause")
+        } catch {
+            XCTAssertTrue(AICoinCapabilityClient.isConsortiumPaused(error))
+        }
+    }
+
+    func testADurableCallAlwaysSaysWhoToSkipSoAResumeCanPutEveryoneBack() async throws {
+        let transport = StubTransport(#"{"answer":"a"}"#)
+        _ = try await client(transport).consortium(prompt: "Q", callID: "c1")
+        XCTAssertEqual(sentBody(transport.requests.first)["skip"] as? [String], [])
+    }
 }
