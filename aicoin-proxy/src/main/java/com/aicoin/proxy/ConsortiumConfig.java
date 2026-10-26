@@ -1,6 +1,8 @@
 package com.aicoin.proxy;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -28,6 +30,8 @@ final class ConsortiumConfig {
     private final int maxLibraryEntries;
     private final int maxReadsPerTurn;
     private final int maxLibraryReads;
+    private int callRetentionHours = 24;
+    private int callLeaseSeconds = 30;
 
     ConsortiumConfig(boolean enabled, int maxRounds, int maxOutputTokens, int maxContextChars,
                       int leadContextChars, String editor, Map<String, String> models) {
@@ -103,9 +107,29 @@ final class ConsortiumConfig {
         return editor;
     }
 
-    /** @return the model this provider answers with, or null if none is configured. */
+    /**
+     * A model setting as the ordered list it names. A setting may be one id or several, comma
+     * separated ({@code "kimi-k3.1-pro-highspeed,kimi-k3.1-pro"}) — the YAML list form is joined
+     * that way when config is read — and a turn tries them in order when one fails. See
+     * {@link #modelsFor}.
+     */
+    static List<String> split(String setting) {
+        List<String> out = new ArrayList<>();
+        if (setting == null) {
+            return out;
+        }
+        for (String part : setting.split(",")) {
+            if (!part.trim().isEmpty()) {
+                out.add(part.trim());
+            }
+        }
+        return out;
+    }
+
+    /** @return the model this provider answers with first, or null if none is configured. */
     String modelFor(String provider) {
-        return models.get(provider);
+        List<String> chain = split(models.get(provider));
+        return chain.isEmpty() ? null : chain.get(0);
     }
 
     Map<String, String> getModels() {
@@ -120,13 +144,26 @@ final class ConsortiumConfig {
      * always had.
      */
     String modelFor(String provider, boolean best) {
+        List<String> chain = modelsFor(provider, best);
+        return chain.isEmpty() ? null : chain.get(0);
+    }
+
+    /**
+     * Every model a provider's turn may use, in the order to try them: the first answers unless
+     * it fails — overloaded, rate-limited, a 5xx, a timeout, or a reply with no text — and then the
+     * next is tried within the same turn. A provider's fastest model is often its least available
+     * one (Kimi's high-speed K3.1 Pro refused five tries in five as overloaded on 2026-10-26), and a
+     * turn lost to that is a panelist's voice lost from a round; a list lets a deployment ask for
+     * the fast one without betting the turn on it.
+     */
+    List<String> modelsFor(String provider, boolean best) {
         if (best) {
-            String chosen = bestModels.get(provider);
-            if (chosen != null && !chosen.trim().isEmpty()) {
-                return chosen;
+            List<String> chain = split(bestModels.get(provider));
+            if (!chain.isEmpty()) {
+                return chain;
             }
         }
-        return models.get(provider);
+        return split(models.get(provider));
     }
 
     Map<String, String> getBestModels() {
@@ -186,5 +223,30 @@ final class ConsortiumConfig {
     /** How many chapters one call may add to the shared record, across every turn. */
     int getMaxLibraryReads() {
         return maxLibraryReads;
+    }
+
+    /**
+     * How long a call with a {@code call_id} is kept in Redis — its progress while it runs, its
+     * events and its result after — so a client that lost it (an app frozen in the background, a
+     * proxy restart) can come back for it. Long enough for a phone left overnight.
+     */
+    int getCallRetentionHours() {
+        return callRetentionHours;
+    }
+
+    /**
+     * How long a process's claim on a running call lasts without being renewed. A process that
+     * dies stops renewing; once this runs out another one — or the same one, restarted — resumes
+     * the call. Short enough that a redeploy loses seconds, long enough that a slow Redis round
+     * trip does not hand a healthy call to a second owner.
+     */
+    int getCallLeaseSeconds() {
+        return callLeaseSeconds;
+    }
+
+    ConsortiumConfig withCalls(int retentionHours, int leaseSeconds) {
+        this.callRetentionHours = Math.max(1, retentionHours);
+        this.callLeaseSeconds = Math.max(5, leaseSeconds);
+        return this;
     }
 }

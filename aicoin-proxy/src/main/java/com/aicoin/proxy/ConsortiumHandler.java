@@ -71,17 +71,7 @@ final class ConsortiumHandler {
     /** Longest request accepted, matching the text endpoint's cap. */
     private static final int MAX_PROMPT_CHARS = 400_000;
 
-    /** Seconds of silence after which a streamed call sends {@code {"event":"ping"}}. */
-    static final int PING_SECONDS = 15;
-
-    /** How much of a review's comments a {@code turn} event carries; the result has them whole. */
-    static final int COMMENT_PREVIEW_CHARS = 400;
-
-    /** Why an editor's reply is not usable as the answer, or null when it is. */
-    private static final Function<String, String> WHOLE_ANSWER =
-            text -> ConsortiumPrompts.editedAnswer(text) == null ? "reply was not one whole answer" : null;
-
-    private static String stringList(List<String> values) {
+    static String stringList(List<String> values) {
         StringBuilder json = new StringBuilder("[");
         for (int i = 0; i < values.size(); i++) {
             json.append(i == 0 ? "" : ",").append(Json.string(values.get(i)));
@@ -202,6 +192,37 @@ final class ConsortiumHandler {
             sendError(ctx, HttpResponseStatus.BAD_REQUEST, "body must be JSON");
             return;
         }
+        // A call with an id is durable — see "Durable calls" in CONTRACT.md. If the id already
+        // names one of this wallet's calls, this request is a client coming back for it: it is
+        // attached, replayed or resumed, and the rest of this body is not read at all. A call is
+        // what its id was first given to; a second body under the same id cannot change it.
+        Object callIdObj = body.get("call_id");
+        String callId = null;
+        if (callIdObj != null) {
+            if (!(callIdObj instanceof String) || !CALL_ID.matcher((String) callIdObj).matches()) {
+                sendError(ctx, HttpResponseStatus.BAD_REQUEST,
+                        "call_id must be 1-128 characters of letters, digits, '.', '_', ':' or '-'");
+                return;
+            }
+            callId = (String) callIdObj;
+            ConsortiumCalls calls = ConsortiumCalls.get();
+            if (calls != null) {
+                String id = callId;
+                calls.openOrCreate(ctx, Boolean.TRUE.equals(body.get("stream")),
+                        ConsortiumStore.key(walletAddress, callId),
+                        () -> serveNew(ctx, requestBody, body, id, config, clientGroup, healthTracker, ledger,
+                                walletAddress));
+                return;
+            }
+        }
+        serveNew(ctx, requestBody, body, callId, config, clientGroup, healthTracker, ledger, walletAddress);
+    }
+
+    private static final java.util.regex.Pattern CALL_ID = java.util.regex.Pattern.compile("[A-Za-z0-9._:-]{1,128}");
+
+    private static void serveNew(ChannelHandlerContext ctx, byte[] requestBody, Map<?, ?> body, String callId,
+                                 ProxyConfig config, EventLoopGroup clientGroup,
+                                 ProviderHealthTracker healthTracker, AicoinLedger ledger, String walletAddress) {
         Object promptObj = body.get("prompt");
         if (!(promptObj instanceof String) || ((String) promptObj).trim().isEmpty()) {
             sendError(ctx, HttpResponseStatus.BAD_REQUEST, "body must be {\\\"prompt\\\":\\\"...\\\"}");
@@ -326,12 +347,24 @@ final class ConsortiumHandler {
             return;
         }
 
-        Options options = new Options(best, maxOutputTokens, library, Boolean.TRUE.equals(body.get("stream")));
-        int rounds = maxRounds;
-        Runnable begin = () -> new Session(ctx, config, clientGroup, healthTracker, ledger, walletAddress,
-                prompt, background, panel, editor, rounds, includeTranscript, lead,
-                poll, subject, null, 0, 0, java.util.Map.of(), options).start();
-        if (!options.stream) {
+        boolean stream = Boolean.TRUE.equals(body.get("stream"));
+        Map<String, List<String>> models = new java.util.LinkedHashMap<>();
+        for (String provider : panel) {
+            models.put(provider, config.getConsortium().modelsFor(provider, best));
+        }
+        ConsortiumCalls calls = callId == null ? null : ConsortiumCalls.get();
+        ConsortiumSession session = new ConsortiumSession(config, clientGroup, healthTracker, ledger, walletAddress,
+                calls == null ? null : callId, calls == null ? null : calls.store(), prompt, background, panel, editor,
+                models, maxRounds, includeTranscript, lead, poll, subject, null, best, maxOutputTokens, library,
+                UpstreamTimer.of(ctx.channel()), 0, 0, Map.of());
+        Runnable begin = () -> {
+            if (calls != null) {
+                calls.create(session, new String(requestBody, CharsetUtil.UTF_8), ctx, stream);
+            } else {
+                session.start(ctx, stream);
+            }
+        };
+        if (!stream) {
             begin.run();
             return;
         }
@@ -356,27 +389,6 @@ final class ConsortiumHandler {
     }
 
     /**
-     * What a call asked for beyond the request itself: which models, how long each turn may
-     * write, the library it may read from, and whether it wants to watch.
-     */
-    static final class Options {
-        static final Options DEFAULT = new Options(false, -1, null, false);
-
-        final boolean best;
-        /** Per-turn output cap; -1 means the configured default. */
-        final int maxOutputTokens;
-        final ConsortiumLibrary library;
-        final boolean stream;
-
-        Options(boolean best, int maxOutputTokens, ConsortiumLibrary library, boolean stream) {
-            this.best = best;
-            this.maxOutputTokens = maxOutputTokens;
-            this.library = library;
-            this.stream = stream;
-        }
-    }
-
-    /**
      * Runs a consortium for a request that arrived somewhere else — {@code POST /text}, where the
      * model that read it asked for the panel rather than answering alone.
      *
@@ -394,9 +406,14 @@ final class ConsortiumHandler {
                           String prompt, String background, List<String> panel, String editor,
                           String subject, String from, int priorCalls, long priorCoins,
                           Map<String, Long> priorSpend) {
-        new Session(ctx, config, clientGroup, healthTracker, ledger, wallet, prompt, background,
-                panel, editor, config.getConsortium().getMaxRounds(), false, false, false,
-                subject, from, priorCalls, priorCoins, priorSpend, Options.DEFAULT).start();
+        Map<String, List<String>> models = new java.util.LinkedHashMap<>();
+        for (String provider : panel) {
+            models.put(provider, config.getConsortium().modelsFor(provider, false));
+        }
+        new ConsortiumSession(config, clientGroup, healthTracker, ledger, wallet, null, null, prompt, background,
+                panel, editor, models, config.getConsortium().getMaxRounds(), false, false, false, subject, from,
+                false, config.getConsortium().getMaxOutputTokens(), null, UpstreamTimer.of(ctx.channel()),
+                priorCalls, priorCoins, priorSpend).start(ctx, false);
     }
 
     private static Map<?, ?> parseBody(byte[] bytes) {
@@ -411,796 +428,7 @@ final class ConsortiumHandler {
         }
     }
 
-    /**
-     * One consortium call in flight. Every provider turn completes on some Netty event loop, so
-     * all state transitions go through {@code synchronized} methods on this object; the round
-     * counters in particular are what decide when a round is over, and losing one would hang the
-     * request until the client gave up.
-     */
-    private static final class Session {
-        private final ChannelHandlerContext ctx;
-        private final ProxyConfig config;
-        private final EventLoopGroup group;
-        private final ProviderHealthTracker healthTracker;
-        private final AicoinLedger ledger;
-        private final String wallet;
-        private final String prompt;
-        private final List<String> panel;
-        private final String editor;
-        private final int maxRounds;
-        private final boolean includeTranscript;
-        /** Everybody answers once and nothing is merged - see the note at the call site. */
-        private final boolean poll;
-        /** True when one model drafts and the rest improve it — see the note at the call site. */
-        private final boolean lead;
-        /** What the request was tagged as, and what the panel was ranked on. */
-        private final String subject;
-        /** The endpoint that escalated to this panel, or null for a call that came in as one. */
-        private final String escalatedFrom;
-
-        private final SharedContext context;
-        private final boolean best;
-        private final int maxOutputTokens;
-        /** The work this request belongs to, or null — see {@link ConsortiumLibrary}. */
-        private final ConsortiumLibrary library;
-        /** True when the caller is watching: every step goes out as an NDJSON line as it happens. */
-        private final boolean stream;
-
-        /** Ref -> who asked for it and when, for every library part already in the record. */
-        private final Map<String, String> readBy = new HashMap<>();
-        private int libraryReads;
-        private final List<String> readJson = new ArrayList<>();
-
-        /**
-         * Serialises stream writes. Lines are handed to the channel's event loop under this lock,
-         * never written directly, because a write made on the loop thread goes out at once while
-         * one made elsewhere is queued — so two turns finishing on different threads could
-         * otherwise put their lines on the wire in the opposite order to the one they happened in.
-         */
-        private final Object streamLock = new Object();
-        private boolean streamClosed;
-        private long lastStreamWriteNanos;
-        private ScheduledFuture<?> pinger;
-
-        private final List<String> draftProviders = new ArrayList<>();
-        private final List<String> drafts = new ArrayList<>();
-        private final List<String> reviewJson = new ArrayList<>();
-        private final List<String> errorJson = new ArrayList<>();
-        /**
-         * Coins charged per provider. The total is what the wallet paid, but a caller deciding
-         * which model to lean on wants to know which of them the money went to — and only this
-         * side knows, since each turn is settled against its own provider's reported usage.
-         */
-        private final java.util.Map<String, Long> coinsByProvider = new java.util.LinkedHashMap<>();
-
-        private String answer;
-        private int round;
-        private int calls;
-        private long coinsCharged;
-        private boolean insufficient;
-        private boolean aborted;
-        private boolean finished;
-        private String stoppedReason = "clean";
-
-        // Per-round collection, reset at the start of each round.
-        private int outstanding;
-        private final List<String> commentProviders = new ArrayList<>();
-        private final List<String> comments = new ArrayList<>();
-        private final List<String> clearedBy = new ArrayList<>();
-
-        private final ChannelFutureListener clientGone;
-
-        Session(ChannelHandlerContext ctx, ProxyConfig config, EventLoopGroup group,
-                 ProviderHealthTracker healthTracker, AicoinLedger ledger, String wallet, String prompt,
-                 String background, List<String> panel, String editor, int maxRounds,
-                 boolean includeTranscript, boolean lead, boolean poll, String subject,
-                 String escalatedFrom, int priorCalls, long priorCoins, Map<String, Long> priorSpend,
-                 Options options) {
-            this.ctx = ctx;
-            this.config = config;
-            this.group = group;
-            this.healthTracker = healthTracker;
-            this.ledger = ledger;
-            this.wallet = wallet;
-            this.prompt = prompt;
-            this.panel = panel;
-            this.editor = editor;
-            this.maxRounds = maxRounds;
-            this.includeTranscript = includeTranscript;
-            this.poll = poll;
-            this.lead = lead;
-            this.subject = subject;
-            this.escalatedFrom = escalatedFrom;
-            this.calls = priorCalls;
-            this.coinsCharged = priorCoins;
-            this.coinsByProvider.putAll(priorSpend);
-            this.context = new SharedContext(prompt, background, config.getConsortium().getMaxContextChars());
-            this.best = options.best;
-            this.maxOutputTokens = options.maxOutputTokens > 0 ? options.maxOutputTokens
-                    : config.getConsortium().getMaxOutputTokens();
-            this.library = options.library;
-            this.stream = options.stream;
-            if (library != null) {
-                context.addLibraryIndex(library.renderIndex());
-            }
-            // A consortium runs for minutes. A client that gave up in the middle is nobody to
-            // spend the next round's coins for, so the rounds stop at the next boundary — the
-            // turns already in flight are paid for and cannot be recalled.
-            this.clientGone = f -> markAborted();
-        }
-
-        void start() {
-            ctx.channel().closeFuture().addListener(clientGone);
-            if (stream) {
-                startStream();
-            }
-            beginDrafts();
-        }
-
-        private String modelFor(String provider) {
-            return config.getConsortium().modelFor(provider, best);
-        }
-
-        private String modeName() {
-            return lead ? "lead" : "panel";
-        }
-
-        // ---- Streaming --------------------------------------------------------------------
-
-        /**
-         * Commits to {@code 200} and sends the first line. From here every failure is an
-         * {@code error} event rather than a status, which is why the refusals a caller acts on
-         * (bad body, no panel, empty wallet) are all decided before this runs.
-         */
-        private void startStream() {
-            HttpResponse head = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
-            head.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/x-ndjson; charset=utf-8");
-            // Nothing between here and the phone may hold lines back to fill a buffer: the point of
-            // the stream is that each one arrives when it happens. Chunked, so a proxy in front
-            // (Caddy) treats it as a stream and flushes each write; no-cache and no-transform so
-            // nothing caches or recompresses it; X-Accel-Buffering for any nginx-style hop.
-            HttpUtil.setTransferEncodingChunked(head, true);
-            head.headers().set(HttpHeaderNames.CACHE_CONTROL, "no-cache, no-transform");
-            head.headers().set("X-Accel-Buffering", "no");
-            head.headers().set("Trailer", "X-Aicoin-Charged");
-            synchronized (streamLock) {
-                lastStreamWriteNanos = System.nanoTime();
-                ctx.channel().eventLoop().execute(() -> ctx.writeAndFlush(head));
-            }
-            StringBuilder start = new StringBuilder("{\"event\":\"start\",\"mode\":")
-                    .append(Json.string(modeName()))
-                    .append(",\"poll\":").append(poll)
-                    .append(",\"panel\":[");
-            for (int i = 0; i < panel.size(); i++) {
-                start.append(i == 0 ? "" : ",").append(Json.string(panel.get(i)));
-            }
-            start.append("],\"editor\":").append(Json.string(editor))
-                    .append(",\"subject\":").append(Json.string(subject))
-                    .append(",\"quality\":").append(Json.string(best ? "best" : "standard"))
-                    .append(",\"models\":").append(modelsJson())
-                    .append(",\"max_output_tokens\":").append(maxOutputTokens)
-                    .append(",\"max_rounds\":").append(maxRounds)
-                    .append("}");
-            emit(start.toString());
-            // A turn can run for minutes with nothing to say. An idle connection is exactly what
-            // Caddy, an HTTP/3 hop or the phone's own networking eventually drops, so silence is
-            // filled with a ping every fifteen seconds.
-            pinger = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                boolean silent;
-                synchronized (streamLock) {
-                    silent = System.nanoTime() - lastStreamWriteNanos >= TimeUnit.SECONDS.toNanos(PING_SECONDS);
-                }
-                if (silent) {
-                    emit("{\"event\":\"ping\"}");
-                }
-            }, 1, 1, TimeUnit.SECONDS);
-        }
-
-        /** One NDJSON line to a watching caller; nothing when the caller is not watching. */
-        private void emit(String json) {
-            if (!stream) {
-                return;
-            }
-            synchronized (streamLock) {
-                if (streamClosed) {
-                    return;
-                }
-                lastStreamWriteNanos = System.nanoTime();
-                byte[] bytes = (json + "\n").getBytes(CharsetUtil.UTF_8);
-                ctx.channel().eventLoop().execute(
-                        () -> ctx.writeAndFlush(new DefaultHttpContent(Unpooled.wrappedBuffer(bytes))));
-            }
-        }
-
-        /** The last line, then the end of the response — with what it cost as a trailer. */
-        private void endStream(String json) {
-            synchronized (streamLock) {
-                if (streamClosed) {
-                    return;
-                }
-                streamClosed = true;
-                if (pinger != null) {
-                    pinger.cancel(false);
-                }
-                byte[] bytes = (json + "\n").getBytes(CharsetUtil.UTF_8);
-                LastHttpContent last = new DefaultLastHttpContent(Unpooled.wrappedBuffer(bytes));
-                // The total is not known when the headers go out, so the header every paid call
-                // carries comes as a trailer instead; the access log reads it there too.
-                last.trailingHeaders().set("X-Aicoin-Charged", Long.toString(coinsCharged));
-                ctx.channel().eventLoop().execute(() -> ctx.writeAndFlush(last));
-            }
-        }
-
-        private String turnEvent(String stage, int round, String provider, String status) {
-            return "{\"event\":\"turn\",\"stage\":" + Json.string(stage) + ",\"round\":" + round
-                    + ",\"provider\":" + Json.string(provider) + ",\"model\":" + Json.string(modelFor(provider))
-                    + ",\"status\":" + Json.string(status);
-        }
-
-        private String modelsJson() {
-            StringBuilder json = new StringBuilder("{");
-            for (int i = 0; i < panel.size(); i++) {
-                json.append(i == 0 ? "" : ",").append(Json.string(panel.get(i))).append(":")
-                        .append(Json.string(modelFor(panel.get(i))));
-            }
-            return json.append("}").toString();
-        }
-
-        private synchronized void markAborted() {
-            aborted = true;
-        }
-
-        private synchronized boolean isAborted() {
-            return aborted;
-        }
-
-        /** Who writes the first answer: the whole panel, or — in lead mode — the editor alone. */
-        private List<String> draftPanel() {
-            return lead ? List.of(editor) : panel;
-        }
-
-        private void beginDrafts() {
-            List<String> drafters = draftPanel();
-            synchronized (this) {
-                outstanding = drafters.size();
-            }
-            String system = poll ? ConsortiumPrompts.pollSystem()
-                    : lead ? ConsortiumPrompts.leadDraftSystem() : ConsortiumPrompts.draftSystem();
-            String task = poll ? ConsortiumPrompts.pollTask()
-                    : lead ? ConsortiumPrompts.leadDraftTask() : ConsortiumPrompts.draftTask();
-            for (String provider : drafters) {
-                turn(provider, system, task, "draft", 0, null, (text, error) -> {
-                    synchronized (this) {
-                        if (text != null) {
-                            draftProviders.add(provider);
-                            drafts.add(text);
-                        }
-                        if (--outstanding > 0) {
-                            return;
-                        }
-                    }
-                    afterDrafts();
-                });
-            }
-        }
-
-        private void afterDrafts() {
-            List<String> providersSnapshot;
-            List<String> draftsSnapshot;
-            synchronized (this) {
-                providersSnapshot = new ArrayList<>(draftProviders);
-                draftsSnapshot = new ArrayList<>(drafts);
-            }
-            if (draftsSnapshot.isEmpty()) {
-                // Nobody answered: either every provider failed, or the wallet could not pay for
-                // the first turn. The wallet case is the one the client can act on.
-                if (insufficient()) {
-                    sendInsufficient();
-                } else {
-                    finish(HttpResponseStatus.BAD_GATEWAY, "no panelist answered");
-                }
-                return;
-            }
-            if (poll) {
-                // Every answer is the result. There is nothing to merge and nothing to review:
-                // reviewing would ask the panel to reconcile judgements the caller asked to see
-                // unreconciled, and that is the one thing a poll must not do.
-                stoppedReason("polled");
-                finishOk();
-                return;
-            }
-            if (!lead) {
-                context.addDrafts(providersSnapshot, draftsSnapshot);
-            }
-            if (draftsSnapshot.size() == 1) {
-                // One draft is already the merged answer; a merge turn here would only cost a call
-                // to rewrite a single input.
-                setAnswer(draftsSnapshot.get(0));
-                context.addAnswer("The answer as it now stands", draftsSnapshot.get(0));
-                beginReviewRound();
-                return;
-            }
-            turn(editor, ConsortiumPrompts.mergeSystem(draftsSnapshot.size()),
-                    ConsortiumPrompts.mergeTask(), "merge", 0, WHOLE_ANSWER,
-                    (text, error) -> {
-                        // An editor that failed to merge must not sink the call: the first draft is
-                        // a real answer to the request, and the review rounds still run over it.
-                        // A merge that is not one whole answer (see editedAnswer) counts as failed.
-                        String edited = ConsortiumPrompts.editedAnswer(text);
-                        if (text != null && edited == null) {
-                            recordError("merge", editor, "reply was not one whole answer");
-                        }
-                        String merged = edited != null ? edited : draftsSnapshot.get(0);
-                        setAnswer(merged);
-                        context.addAnswer("The answer as it now stands", merged);
-                        beginReviewRound();
-                    });
-        }
-
-        private void beginReviewRound() {
-            if (isAborted()) {
-                stoppedReason("client_gone");
-                finishOk();
-                return;
-            }
-            if (insufficient()) {
-                stoppedReason("insufficient_balance");
-                finishOk();
-                return;
-            }
-            synchronized (this) {
-                round++;
-                outstanding = panel.size();
-                commentProviders.clear();
-                comments.clear();
-                clearedBy.clear();
-            }
-            String system = ConsortiumPrompts.reviewSystem();
-            // Every reviewer in a round reviews the same record, which is what makes their
-            // comments comparable — and what lets the editor tell agreement from one model having
-            // seen something the others did not. (A reviewer that reads part of the library first
-            // sees that part too, and so does anyone who starts after it was added.)
-            String task = ConsortiumPrompts.reviewTask();
-            int thisRound = round;
-            for (String provider : panel) {
-                turn(provider, system, task, "review", thisRound, null, (text, error) -> {
-                    boolean clean = text != null && ConsortiumPrompts.isClean(text);
-                    synchronized (this) {
-                        if (text != null) {
-                            reviewJson.add("{\"round\":" + thisRound
-                                    + ",\"provider\":" + Json.string(provider)
-                                    + ",\"clean\":" + clean
-                                    + ",\"comments\":" + (clean ? "null" : Json.string(text)) + "}");
-                            if (clean) {
-                                clearedBy.add(provider);
-                            } else {
-                                commentProviders.add(provider);
-                                comments.add(text);
-                            }
-                        }
-                        if (--outstanding > 0) {
-                            return;
-                        }
-                    }
-                    afterReviewRound();
-                });
-            }
-        }
-
-        private void afterReviewRound() {
-            List<String> providersSnapshot;
-            List<String> commentsSnapshot;
-            List<String> clearedSnapshot;
-            int thisRound;
-            synchronized (this) {
-                providersSnapshot = new ArrayList<>(commentProviders);
-                commentsSnapshot = new ArrayList<>(comments);
-                clearedSnapshot = new ArrayList<>(clearedBy);
-                thisRound = round;
-            }
-            if (!commentsSnapshot.isEmpty() || !clearedSnapshot.isEmpty()) {
-                context.addReviews(thisRound, providersSnapshot, commentsSnapshot, clearedSnapshot);
-            }
-            if (commentsSnapshot.isEmpty()) {
-                // A whole round with nothing to say: this is what the call was asking for.
-                stoppedReason("clean");
-                finishOk();
-                return;
-            }
-            if (round >= maxRounds) {
-                stoppedReason("round_limit");
-                finishOk();
-                return;
-            }
-            if (isAborted() || insufficient()) {
-                stoppedReason(isAborted() ? "client_gone" : "insufficient_balance");
-                finishOk();
-                return;
-            }
-            turn(editor, ConsortiumPrompts.reviseSystem(commentsSnapshot.size()),
-                    ConsortiumPrompts.reviseTask(), "revise", thisRound, WHOLE_ANSWER,
-                    (rawText, error) -> {
-                        // A revision that is not one whole answer (see editedAnswer) is no revision:
-                        // the answer it would have replaced stands.
-                        String text = ConsortiumPrompts.editedAnswer(rawText);
-                        if (rawText != null && text == null) {
-                            recordError("revise", editor, "reply was not one whole answer");
-                        }
-                        if (text == null) {
-                            // The comments stand unanswered and there is no revised text to review.
-                            // Returning the answer as it was, and saying so, beats another round
-                            // over an unchanged answer. A wallet that ran dry on this very turn is
-                            // reported as what it is rather than as an editor failure.
-                            stoppedReason(insufficient() ? "insufficient_balance" : "revision_failed");
-                            finishOk();
-                            return;
-                        }
-                        setAnswer(text);
-                        context.addAnswer("The answer as it now stands (revised after round "
-                                + thisRound + ")", text);
-                        beginReviewRound();
-                    });
-        }
-
-        /**
-         * One billed provider turn: hold a coin, call, settle what the call really cost, and hand
-         * back the text (or the reason there is none). Identical accounting to a forwarded call —
-         * see {@link UpstreamForwarder} — because a consortium turn is an ordinary paid call.
-         *
-         * <p>When the call carries a library, the turn may answer with {@code READ} lines instead;
-         * the parts it asked for are added to the record and the same turn runs again — a new,
-         * equally ordinary paid call — until it answers or reading closes. The stage that asked
-         * for the turn sees only the final answer.
-         *
-         * @param task     what this turn is to do; rendered after the shared record, freshly on
-         *                 every attempt, so a re-run after a read sees what it read
-         * @param rejects  for an editor's turn: says why a reply is not usable (null when it is), so
-         *                 a watching caller is told the turn failed rather than finished
-         */
-        private void turn(String provider, String system, String task, String stage, int round,
-                           Function<String, String> rejects, BiConsumer<String, String> onDone) {
-            attempt(provider, system, task, stage, round, rejects, onDone, 0, null);
-        }
-
-        private void attempt(String provider, String system, String task, String stage, int round,
-                              Function<String, String> rejects, BiConsumer<String, String> onDone,
-                              int readsThisTurn, String lastReadNote) {
-            String model = modelFor(provider);
-            boolean readingOpen = false;
-            String fullSystem = system;
-            String fullTask = task;
-            if (library != null) {
-                int left = readsLeft();
-                readingOpen = readsThisTurn < config.getConsortium().getMaxReadsPerTurn() && left > 0;
-                fullSystem = system + ConsortiumPrompts.librarySystem();
-                fullTask = task + ConsortiumPrompts.libraryTask(readingOpen, left, lastReadNote);
-            }
-            boolean mayRead = readingOpen;
-            byte[] body = ChatAdapter.body(provider, model, fullSystem, context.forTurn(fullTask), maxOutputTokens);
-            String path = ChatAdapter.path(provider, model);
-
-            ledger.debitForCall(wallet, CALL_COST_AICOIN, provider, debit -> {
-                if (!debit.isReachable()) {
-                    failTurn(stage, round, provider, "could not validate wallet");
-                    onDone.accept(null, "could not validate wallet");
-                    return;
-                }
-                if (!debit.isSuccess()) {
-                    markInsufficient();
-                    failTurn(stage, round, provider, "insufficient balance");
-                    onDone.accept(null, "insufficient balance");
-                    return;
-                }
-                countCall();
-                emit(turnEvent(stage, round, provider, "started") + "}");
-                long startedNanos = System.nanoTime();
-                UpstreamCall.post(group, config, healthTracker, provider, path, ChatAdapter.headers(provider), body,
-                        UpstreamTimer.of(ctx.channel()), config.getConsortium().getTurnReadTimeoutSeconds(),
-                        result -> {
-                            double seconds = Math.round((System.nanoTime() - startedNanos) / 1e8) / 10.0;
-                            if (!result.isOk()) {
-                                ledger.refund(wallet, CALL_COST_AICOIN, provider);
-                                failTurn(stage, round, provider, result.getError());
-                                onDone.accept(null, result.getError());
-                                return;
-                            }
-                            String responseText = result.bodyText();
-                            CostCalculator.Priced priced =
-                                    CostCalculator.price(provider, responseText, config.getModelPricing());
-                            ledger.recordEvent(provider, priced.getCostUsd(),
-                                    priced.isTokensKnown() ? priced.getTokens() : -1, Instant.now(), wallet);
-                            long charged = 1L;
-                            if (config.isMeteredBilling()) {
-                                charged = CoinMeter.coinsFor(priced.getCostUsd(), config.getCoinValueUsd());
-                                ledger.settleCall(wallet, charged - CALL_COST_AICOIN, provider);
-                            }
-                            addCharged(provider, charged);
-
-                            String text = ChatAdapter.text(provider, responseText);
-                            if (text == null) {
-                                // A 2xx with nothing in it — a model that spent its whole output
-                                // cap thinking, or a shape this adapter doesn't read. Paid for,
-                                // since the provider did the work and will bill for it.
-                                failTurn(stage, round, provider, "no text in response");
-                                onDone.accept(null, "no text in response");
-                                return;
-                            }
-                            List<String> refs = library == null ? null : ConsortiumPrompts.readRequest(text);
-                            if (refs != null) {
-                                if (!mayRead) {
-                                    // Told reading was closed and asked anyway: there is no answer
-                                    // here, and another run would only be asked the same thing.
-                                    failTurn(stage, round, provider, "asked to read after reading was closed");
-                                    onDone.accept(null, "asked to read after reading was closed");
-                                    return;
-                                }
-                                if (isAborted()) {
-                                    failTurn(stage, round, provider, "client gone");
-                                    onDone.accept(null, "client gone");
-                                    return;
-                                }
-                                String note = read(provider, stage, round, refs);
-                                attempt(provider, system, task, stage, round, rejects, onDone,
-                                        readsThisTurn + 1, note);
-                                return;
-                            }
-                            String rejected = rejects == null ? null : rejects.apply(text);
-                            if (rejected != null) {
-                                emit(turnEvent(stage, round, provider, "failed")
-                                        + ",\"seconds\":" + seconds + ",\"error\":" + Json.string(rejected) + "}");
-                            } else {
-                                StringBuilder finished = new StringBuilder(turnEvent(stage, round, provider, "finished"))
-                                        .append(",\"seconds\":").append(seconds);
-                                if ("review".equals(stage)) {
-                                    boolean clean = ConsortiumPrompts.isClean(text);
-                                    finished.append(",\"clean\":").append(clean);
-                                    if (!clean) {
-                                        finished.append(",\"comments\":").append(Json.string(
-                                                text.length() <= COMMENT_PREVIEW_CHARS ? text
-                                                        : text.substring(0, COMMENT_PREVIEW_CHARS) + "…"));
-                                    }
-                                }
-                                emit(finished.append("}").toString());
-                            }
-                            onDone.accept(text, null);
-                        });
-            });
-        }
-
-        /** Records a turn that produced nothing, and tells a watching caller. */
-        private void failTurn(String stage, int round, String provider, String error) {
-            recordError(stage, provider, error);
-            emit(turnEvent(stage, round, provider, "failed") + ",\"error\":" + Json.string(error) + "}");
-        }
-
-        private synchronized int readsLeft() {
-            return Math.max(0, config.getConsortium().getMaxLibraryReads() - libraryReads);
-        }
-
-        /**
-         * Puts the parts a turn asked for into the shared record, and returns what to tell that
-         * turn about its request when it runs again. A part already in the record is not added a
-         * second time — it is the same text, and the whole panel can already see it — and the
-         * turn is told so, along with which refs did not exist or were not written yet, so it does
-         * not spend its next run asking for them again.
-         */
-        private String read(String provider, String stage, int round, List<String> refs) {
-            List<String> titles = new ArrayList<>();
-            List<String> added = new ArrayList<>();
-            List<String> notes = new ArrayList<>();
-            synchronized (this) {
-                for (String ref : refs) {
-                    ConsortiumLibrary.Entry entry = library.get(ref);
-                    titles.add(entry == null ? "" : entry.title());
-                    if (entry == null) {
-                        notes.add(ref + " is not in the contents.");
-                        continue;
-                    }
-                    if (!entry.isWritten()) {
-                        notes.add(ref + " is not written yet, so there is nothing to read.");
-                        continue;
-                    }
-                    String already = readBy.get(ref);
-                    if (already != null) {
-                        notes.add(ref + " is already in the record above (" + already + ").");
-                        continue;
-                    }
-                    if (libraryReads >= config.getConsortium().getMaxLibraryReads()) {
-                        notes.add(ref + " was not added: this call has read as many parts as it may.");
-                        continue;
-                    }
-                    libraryReads++;
-                    String by = "read at " + ChatAdapter.displayName(provider) + "'s request "
-                            + stageLabel(stage, round);
-                    readBy.put(ref, by);
-                    context.addLibraryRead("Part " + ref
-                            + (entry.title().isEmpty() ? "" : " \u201c" + entry.title() + "\u201d")
-                            + " of the work — " + by, entry.text());
-                    added.add(ref);
-                }
-                StringBuilder json = new StringBuilder("{\"stage\":").append(Json.string(stage))
-                        .append(",\"round\":").append(round)
-                        .append(",\"provider\":").append(Json.string(provider))
-                        .append(",\"refs\":").append(stringList(refs))
-                        .append(",\"added\":").append(stringList(added));
-                if (!notes.isEmpty()) {
-                    json.append(",\"notes\":").append(stringList(notes));
-                }
-                readJson.add(json.append("}").toString());
-            }
-            StringBuilder event = new StringBuilder("{\"event\":\"read\",\"stage\":").append(Json.string(stage))
-                    .append(",\"round\":").append(round)
-                    .append(",\"provider\":").append(Json.string(provider))
-                    .append(",\"refs\":").append(stringList(refs))
-                    .append(",\"titles\":").append(stringList(titles))
-                    .append(",\"added\":").append(stringList(added));
-            if (!notes.isEmpty()) {
-                event.append(",\"notes\":").append(stringList(notes));
-            }
-            emit(event.append("}").toString());
-            StringBuilder note = new StringBuilder("You asked to read ").append(String.join(", ", refs)).append(".");
-            if (!added.isEmpty()) {
-                note.append(" Added to the record above: ").append(String.join(", ", added)).append(".");
-            }
-            for (String line : notes) {
-                note.append(' ').append(line);
-            }
-            return note.toString();
-        }
-
-        private static String stageLabel(String stage, int round) {
-            switch (stage) {
-                case "draft":
-                    return "while drafting";
-                case "merge":
-                    return "while merging the drafts";
-                case "review":
-                    return "in review round " + round;
-                case "revise":
-                    return "while revising after round " + round;
-                default:
-                    return "during " + stage;
-            }
-        }
-
-        private synchronized void countCall() {
-            calls++;
-        }
-
-        private synchronized void addCharged(String provider, long charged) {
-            coinsCharged += charged;
-            coinsByProvider.merge(provider, charged, Long::sum);
-        }
-
-        private synchronized void markInsufficient() {
-            insufficient = true;
-        }
-
-        private synchronized boolean insufficient() {
-            return insufficient;
-        }
-
-        private synchronized void setAnswer(String text) {
-            answer = text;
-        }
-
-        private synchronized String answer() {
-            return answer;
-        }
-
-        private synchronized void stoppedReason(String reason) {
-            stoppedReason = reason;
-        }
-
-        private synchronized void recordError(String stage, String provider, String error) {
-            errorJson.add("{\"stage\":" + Json.string(stage) + ",\"provider\":" + Json.string(provider)
-                    + ",\"error\":" + Json.string(error) + "}");
-        }
-
-        private void sendInsufficient() {
-            ledger.getBalance(wallet, balance -> {
-                String json = "{\"error\":\"insufficient aicoin balance\",\"balance\":"
-                        + (balance.isPresent() ? balance.get() : 0) + "}";
-                send(HttpResponseStatus.PAYMENT_REQUIRED, json);
-            });
-        }
-
-        private void finish(HttpResponseStatus status, String error) {
-            send(status, "{\"error\":" + Json.string(error)
-                    + ",\"calls\":" + calls + ",\"coins_charged\":" + coinsCharged
-                    + ",\"errors\":[" + String.join(",", errorJson) + "]}");
-        }
-
-        private void finishOk() {
-            StringBuilder json = new StringBuilder();
-            synchronized (this) {
-                json.append("{\"answer\":").append(Json.string(answer))
-                        .append(",\"subject\":").append(Json.string(subject))
-                        .append(",\"escalated\":").append(escalatedFrom != null)
-                        .append(escalatedFrom == null ? ""
-                                : ",\"escalated_from\":" + Json.string(escalatedFrom))
-                        .append(",\"settled\":").append("clean".equals(stoppedReason))
-                        .append(",\"stopped_reason\":").append(Json.string(stoppedReason))
-                        .append(",\"rounds\":").append(round)
-                        .append(",\"panel\":[");
-                for (int i = 0; i < panel.size(); i++) {
-                    json.append(i == 0 ? "" : ",").append(Json.string(panel.get(i)));
-                }
-                json.append("],\"editor\":").append(Json.string(editor))
-                        .append(",\"mode\":").append(Json.string(modeName()))
-                        .append(",\"quality\":").append(Json.string(best ? "best" : "standard"))
-                        .append(",\"models\":").append(modelsJson())
-                        .append(",\"max_output_tokens\":").append(maxOutputTokens)
-                        .append(",\"calls\":").append(calls)
-                        .append(",\"coins_charged\":").append(coinsCharged)
-                        .append(",\"spend\":{");
-                boolean firstSpend = true;
-                for (java.util.Map.Entry<String, Long> entry : coinsByProvider.entrySet()) {
-                    json.append(firstSpend ? "" : ",")
-                            .append(Json.string(entry.getKey())).append(":").append(entry.getValue());
-                    firstSpend = false;
-                }
-                json.append("}")
-                        .append(",\"reviews\":[").append(String.join(",", reviewJson)).append("]")
-                        .append(",\"errors\":[").append(String.join(",", errorJson)).append("]")
-                        .append(",\"reads\":[").append(String.join(",", readJson)).append("]");
-                // A poll's answers are its whole result, so they are always returned; for the
-                // other modes they are the working-out and come back only if asked for.
-                if (includeTranscript || poll) {
-                    json.append(",\"answers\":[");
-                    for (int i = 0; i < drafts.size(); i++) {
-                        json.append(i == 0 ? "" : ",")
-                                .append("{\"provider\":").append(Json.string(draftProviders.get(i)))
-                                .append(",\"model\":").append(Json.string(modelFor(draftProviders.get(i))))
-                                .append(",\"text\":").append(Json.string(drafts.get(i))).append("}");
-                    }
-                    json.append("]");
-                }
-                if (includeTranscript) {
-                    json.append(",\"drafts\":[");
-                    for (int i = 0; i < drafts.size(); i++) {
-                        json.append(i == 0 ? "" : ",")
-                                .append("{\"provider\":").append(Json.string(draftProviders.get(i)))
-                                .append(",\"text\":").append(Json.string(drafts.get(i))).append("}");
-                    }
-                    json.append("]");
-                }
-                json.append("}");
-            }
-            send(HttpResponseStatus.OK, json.toString());
-        }
-
-        private void send(HttpResponseStatus status, String json) {
-            synchronized (this) {
-                if (finished) {
-                    return;
-                }
-                finished = true;
-            }
-            ctx.channel().closeFuture().removeListener(clientGone);
-            if (stream) {
-                // The same body a plain call would get, as the last line: `result` for a 200, and
-                // `error` with the status it would have had otherwise. The status line itself was
-                // committed to 200 when the stream started.
-                endStream(status.code() == 200 ? "{\"event\":\"result\"," + json.substring(1)
-                        : "{\"event\":\"error\",\"status\":" + status.code() + "," + json.substring(1));
-                LOG.log(Level.FINE, "consortium finished: {0} calls, {1} coins", new Object[] {calls, coinsCharged});
-                return;
-            }
-            byte[] bytes = json.getBytes(CharsetUtil.UTF_8);
-            FullHttpResponse response = new DefaultFullHttpResponse(
-                    HttpVersion.HTTP_1_1, status, Unpooled.wrappedBuffer(bytes));
-            response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
-            // The same header a single proxied call sets, for the same reason: a client can show
-            // what the call cost without being told how the proxy bills.
-            response.headers().set("X-Aicoin-Charged", Long.toString(coinsCharged));
-            HttpUtil.setContentLength(response, bytes.length);
-            ctx.writeAndFlush(response);
-            LOG.log(Level.FINE, "consortium finished: {0} calls, {1} coins", new Object[] {calls, coinsCharged});
-        }
-    }
-
-    private static void sendError(ChannelHandlerContext ctx, HttpResponseStatus status, String message) {
+    static void sendError(ChannelHandlerContext ctx, HttpResponseStatus status, String message) {
         byte[] bytes = ("{\"error\":\"" + message + "\"}").getBytes(CharsetUtil.UTF_8);
         FullHttpResponse response = new DefaultFullHttpResponse(
                 HttpVersion.HTTP_1_1, status, Unpooled.wrappedBuffer(bytes));

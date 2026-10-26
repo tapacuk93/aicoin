@@ -357,4 +357,27 @@ class ProxyConfigTest {
         assertEquals(8000, narrowed.outputTokensFor(20000));
         assertEquals(2, narrowed.getMaxLibraryReads());
     }
+
+    @Test
+    void aModelSettingMayBeAListTriedInOrder() {
+        ConsortiumConfig consortium = ProxyConfig.load(new HashMap<>()).getConsortium();
+        assertEquals(java.util.List.of("kimi-k3.1-pro-highspeed", "kimi-k3.1-pro"), consortium.modelsFor("kimi", true));
+        assertEquals("kimi-k3.1-pro-highspeed", consortium.modelFor("kimi", true), "the first is the one to try first");
+        assertEquals(java.util.List.of("claude-sonnet-5"), consortium.modelsFor("anthropic", false),
+                "a single id is still a valid setting");
+        assertEquals("claude-sonnet-5", consortium.modelFor("anthropic"));
+
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_CONSORTIUM_KIMI_MODEL", "kimi-k2.7-code, kimi-k2.6");
+        ConsortiumConfig overridden = ProxyConfig.load(env).getConsortium();
+        assertEquals(java.util.List.of("kimi-k2.7-code", "kimi-k2.6"), overridden.modelsFor("kimi", false),
+                "an env override lists them comma-separated");
+    }
+
+    @Test
+    void durableCallsAreKeptADayAndLeasedForThirtySeconds() {
+        ConsortiumConfig consortium = ProxyConfig.load(new HashMap<>()).getConsortium();
+        assertEquals(24, consortium.getCallRetentionHours());
+        assertEquals(30, consortium.getCallLeaseSeconds());
+    }
 }

@@ -615,7 +615,7 @@ public final class ProxyConfig {
         Map<String, String> models = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : defaults.entrySet()) {
             String provider = entry.getKey();
-            String model = getString(yaml, "consortium.models." + provider, entry.getValue());
+            String model = getModelList(yaml, "consortium.models." + provider, entry.getValue());
             model = envStr(env, "AICOIN_PROXY_CONSORTIUM_" + provider.toUpperCase(java.util.Locale.ROOT) + "_MODEL", model);
             models.put(provider, model);
         }
@@ -625,7 +625,7 @@ public final class ProxyConfig {
         // ordinary model (ConsortiumConfig#modelFor), so leaving one out costs nothing but strength.
         Map<String, String> bestModels = new LinkedHashMap<>();
         for (String provider : defaults.keySet()) {
-            String model = getString(yaml, "consortium.bestModels." + provider, "");
+            String model = getModelList(yaml, "consortium.bestModels." + provider, "");
             model = envStr(env, "AICOIN_PROXY_CONSORTIUM_" + provider.toUpperCase(java.util.Locale.ROOT)
                     + "_BEST_MODEL", model);
             if (model != null && !model.trim().isEmpty()) {
@@ -657,10 +657,14 @@ public final class ProxyConfig {
         if (maxRounds < 1) {
             maxRounds = 1;
         }
+        int callRetentionHours = envInt(env, "AICOIN_PROXY_CONSORTIUM_CALL_RETENTION_HOURS",
+                getInt(yaml, "consortium.callRetentionHours", 24));
+        int callLeaseSeconds = envInt(env, "AICOIN_PROXY_CONSORTIUM_CALL_LEASE_SECONDS",
+                getInt(yaml, "consortium.callLeaseSeconds", 30));
         return new ConsortiumConfig(enabled, maxRounds, maxOutputTokens, maxContextChars,
                 leadContextChars, editor, models, bestModels, maxOutputTokensCeiling,
                 turnReadTimeoutSeconds, maxLibraryChars, maxLibraryEntries, maxReadsPerTurn,
-                maxLibraryReads);
+                maxLibraryReads).withCalls(callRetentionHours, callLeaseSeconds);
     }
 
     /**
@@ -829,6 +833,25 @@ public final class ProxyConfig {
             current = ((Map<String, Object>) current).get(part);
         }
         return current;
+    }
+
+    /**
+     * A consortium model setting: one id, a comma-separated list, or a YAML list — returned as
+     * the comma-separated form {@link ConsortiumConfig#split} reads, which is also what the env
+     * override takes.
+     */
+    private static String getModelList(Map<String, Object> root, String dottedPath, String fallback) {
+        Object v = getNested(root, dottedPath);
+        if (v instanceof List) {
+            List<String> parts = new ArrayList<>();
+            for (Object item : (List<?>) v) {
+                if (item != null) {
+                    parts.add(String.valueOf(item).trim());
+                }
+            }
+            return String.join(",", parts);
+        }
+        return v != null ? String.valueOf(v) : fallback;
     }
 
     private static String getString(Map<String, Object> root, String dottedPath, String fallback) {

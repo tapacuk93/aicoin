@@ -1,7 +1,9 @@
 package com.aicoin.proxy;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The record of a consortium call that every panelist sees, per CONTRACT.md's "Consortium"
@@ -64,6 +66,48 @@ final class SharedContext {
     private final List<Entry> entries = new ArrayList<>();
     /** Index of the entry holding the answer under discussion, so a new one can supersede it. */
     private int currentAnswerIndex = -1;
+
+    private SharedContext(int maxChars) {
+        this.maxChars = maxChars;
+    }
+
+    /**
+     * The record as plain data, for a durable call's checkpoint: every block in order, with what
+     * may be dropped and what is exempt, and which block is the answer under discussion. A call
+     * resumed in another process must see exactly the record the panel had, or its next turn
+     * answers a different conversation.
+     */
+    synchronized Map<String, Object> snapshot() {
+        List<Object> list = new ArrayList<>();
+        for (Entry entry : entries) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("heading", entry.heading);
+            item.put("body", entry.body);
+            item.put("droppable", entry.droppable);
+            item.put("exempt", entry.exempt);
+            list.add(item);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("entries", list);
+        out.put("current_answer", currentAnswerIndex);
+        return out;
+    }
+
+    /** The record {@link #snapshot()} described. */
+    static SharedContext restore(Map<?, ?> snapshot, int maxChars) {
+        SharedContext context = new SharedContext(maxChars);
+        Object list = snapshot.get("entries");
+        if (list instanceof List) {
+            for (Object itemObj : (List<?>) list) {
+                Map<?, ?> item = (Map<?, ?>) itemObj;
+                context.entries.add(new Entry(String.valueOf(item.get("heading")), String.valueOf(item.get("body")),
+                        Boolean.TRUE.equals(item.get("droppable")), Boolean.TRUE.equals(item.get("exempt"))));
+            }
+        }
+        Object current = snapshot.get("current_answer");
+        context.currentAnswerIndex = current instanceof Number ? ((Number) current).intValue() : -1;
+        return context;
+    }
 
     SharedContext(String request, String background, int maxChars) {
         this.maxChars = maxChars;

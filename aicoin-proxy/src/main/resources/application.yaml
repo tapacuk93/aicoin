@@ -263,6 +263,14 @@ consortium:
   # Env: AICOIN_PROXY_CONSORTIUM_MAX_READS_PER_TURN, _MAX_LIBRARY_READS.
   maxReadsPerTurn: 3
   maxLibraryReads: 20
+  # A call sent with a call_id is durable (CONTRACT.md "Durable calls"): it runs to its end without
+  # a client, is checkpointed to Redis after every turn, and is resumed by another process if the
+  # one running it dies. Kept this long for a client to come back for.
+  # Env: AICOIN_PROXY_CONSORTIUM_CALL_RETENTION_HOURS.
+  callRetentionHours: 24
+  # How long a process's claim on a running call lasts unrenewed; after it a dead owner's calls
+  # are resumed elsewhere. Env: AICOIN_PROXY_CONSORTIUM_CALL_LEASE_SECONDS.
+  callLeaseSeconds: 30
   # How much of the panel's shared record one turn may be given. Every panelist sees the record on
   # every turn, so this is multiplied by the panel size and by the rounds, and every character is
   # billed as input. Past it the oldest rounds are dropped; the request, the caller's background and
@@ -280,7 +288,8 @@ consortium:
   editor: ""
   # What each panelist answers with. Config, not code: providers rename and retire models on their
   # own schedule, and a consortium that 400s because an id lapsed should be a restart away from
-  # working. Env: AICOIN_PROXY_CONSORTIUM_<PROVIDER>_MODEL.
+  # working. Each may be one id or a list tried in order within a turn when a model fails (see
+  # bestModels.kimi). Env: AICOIN_PROXY_CONSORTIUM_<PROVIDER>_MODEL, a list comma-separated.
   models:
     anthropic: claude-sonnet-5
     openai: gpt-5
@@ -291,14 +300,17 @@ consortium:
   # provider listed on 2026-10-26, every id taken from that provider's own models API and confirmed
   # with a one-line generation — except where the comment says otherwise. A provider with no entry
   # keeps its model above, so leaving one out costs strength, never a seat.
-  # Env: AICOIN_PROXY_CONSORTIUM_<PROVIDER>_BEST_MODEL.
+  # Env: AICOIN_PROXY_CONSORTIUM_<PROVIDER>_BEST_MODEL (a list comma-separated).
   bestModels:
     anthropic: claude-opus-5-5
     # Newest flagship-tier ("sol") model listed. Listed but NOT confirmed by a generation: the
     # OpenAI account had no credits left on 2026-10-26 (429 credit_balance_exhausted on every model).
     openai: gpt-6.1-sol
     google: gemini-4-argon
-    kimi: kimi-k3.1-pro
+    # A list is tried in order within one turn when a model fails (overloaded, 429, 5xx, timeout,
+    # no text). K3.1 Pro high-speed is the fast one but refused 5 tries in 5 as
+    # engine_overloaded_error on 2026-10-26; plain K3.1 Pro answers, slowly (95 s for a paragraph).
+    kimi: [kimi-k3.1-pro-highspeed, kimi-k3.1-pro]
     # mistral: none. No Mistral key exists locally or in production to list its models with.
 # The consolidated endpoints: POST /text, POST /image, POST /audio. One shape in, one shape out,
 # with the provider chosen here from the ratings below rather than named by the caller. See

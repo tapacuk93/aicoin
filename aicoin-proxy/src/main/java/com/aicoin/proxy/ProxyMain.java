@@ -53,6 +53,15 @@ public final class ProxyMain {
 
             Channel channel = bootstrap.bind(config.getPort()).sync().channel();
             LOG.info("aicoin-proxy listening on port " + config.getPort());
+            // Durable consortium calls (CONTRACT.md "Durable calls"): resumes any a previous
+            // process left running, and on shutdown gives up this one's leases so the next
+            // process picks them up within seconds instead of waiting the leases out.
+            ConsortiumCalls calls = new ConsortiumCalls(new ConsortiumStore.Redis(ledger.redis(),
+                    config.getConsortium().getCallRetentionHours(), config.getConsortium().getCallLeaseSeconds()),
+                    config, workerGroup, healthTracker, ledger);
+            ConsortiumCalls.install(calls);
+            calls.start();
+            Runtime.getRuntime().addShutdownHook(new Thread(calls::stop, "consortium-calls-release"));
             channel.closeFuture().sync();
         } finally {
             liveness.stop();
