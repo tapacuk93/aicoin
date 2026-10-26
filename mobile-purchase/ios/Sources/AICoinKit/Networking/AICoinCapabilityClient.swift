@@ -56,9 +56,11 @@ public struct AICoinCapabilityClient: Sendable {
         public let stoppedReason: String?
         public let mode: String?
         public let rounds: Int?
+        /// `/consortium` only: `"standard"` or `"best"` — which models were seated.
+        public let quality: String?
 
         private enum CodingKeys: String, CodingKey {
-            case answer, provider, editor, model, escalated, subject, calls, settled, mode, rounds
+            case answer, provider, editor, model, escalated, subject, calls, settled, mode, rounds, quality
             case coinsCharged = "coins_charged"
             case stoppedReason = "stopped_reason"
         }
@@ -77,6 +79,7 @@ public struct AICoinCapabilityClient: Sendable {
             stoppedReason = try c.decodeIfPresent(String.self, forKey: .stoppedReason)
             mode = try c.decodeIfPresent(String.self, forKey: .mode)
             rounds = try c.decodeIfPresent(Int.self, forKey: .rounds)
+            quality = try c.decodeIfPresent(String.self, forKey: .quality)
         }
     }
 
@@ -120,15 +123,85 @@ public struct AICoinCapabilityClient: Sendable {
 
     /// `POST /consortium`. Minutes, not seconds — hence the ten-minute default timeout; a
     /// sixty-second one would abandon every panel mid-review, after its coins were spent.
+    ///
+    /// - Parameters:
+    ///   - library: the larger work this request belongs to; the panel sees its index and reads
+    ///     earlier parts on demand (see `ConsortiumLibrary`).
+    ///   - quality: `.best` seats each provider's strongest model, at several times the price.
+    ///   - maxOutputTokens: the per-turn output cap. A long answer needs more than the proxy's
+    ///     default, or it comes back cut off; the proxy clamps it to its own ceiling.
+    ///   - onEvent: given, the call is streamed and each step of the panel's work is delivered as
+    ///     it happens, on whatever task reads the stream; the return value is the same either way.
+    ///     With streaming the timeout is the longest silence allowed — the proxy pings every 15 s.
     public func consortium(
         prompt: String, context: String? = nil, mode: String = "auto",
-        maxRounds: Int? = nil, timeout: TimeInterval = 600
+        maxRounds: Int? = nil, timeout: TimeInterval = 600,
+        library: ConsortiumLibrary? = nil, quality: ConsortiumQuality? = nil,
+        maxOutputTokens: Int? = nil,
+        onEvent: (@Sendable (ConsortiumEvent) -> Void)? = nil
     ) async throws -> TextAnswer {
         var body: [String: Any] = ["prompt": prompt, "mode": mode]
         if let context, !context.isEmpty { body["context"] = context }
         if let maxRounds { body["max_rounds"] = maxRounds }
-        let data = try await post("consortium", body: body, timeout: timeout)
-        return try decodeAnswer(data)
+        if let library { body["library"] = library.json }
+        if let quality { body["quality"] = quality.rawValue }
+        if let maxOutputTokens { body["max_output_tokens"] = maxOutputTokens }
+        guard let onEvent else {
+            let data = try await post("consortium", body: body, timeout: timeout)
+            return try decodeAnswer(data)
+        }
+        body["stream"] = true
+        return try await streamConsortium(body: body, timeout: timeout, onEvent: onEvent)
+    }
+
+    /// A streamed consortium: NDJSON, one event per line, ending in a `result` line carrying the
+    /// same body a plain call returns — or an `error` line with the status it would have had.
+    /// Refusals decided before the panel starts (no token, an empty wallet, a bad body) are
+    /// ordinary HTTP errors, exactly as without streaming.
+    private func streamConsortium(
+        body: [String: Any], timeout: TimeInterval, onEvent: @Sendable (ConsortiumEvent) -> Void
+    ) async throws -> TextAnswer {
+        let request = try makeRequest("consortium", body: body, timeout: timeout)
+        let lines: AsyncThrowingStream<String, Error>
+        let response: URLResponse
+        if let streaming = transport as? any HTTPLineStreamingTransport {
+            (lines, response) = try await streaming.lines(for: request)
+        } else {
+            // A transport that can only hand over whole bodies still gets every event, just
+            // together at the end.
+            let (data, whole) = try await transport.data(for: request)
+            response = whole
+            lines = wholeBodyLines(data)
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            var collected = Data()
+            for try await line in lines { collected.append(Data((line + "\n").utf8)) }
+            try check(status: status, data: collected)
+            throw AICoinError.server(status: status, message: Self.errorMessage(from: collected))
+        }
+        for try await line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8),
+                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { continue }
+            switch object["event"] as? String {
+            case "result":
+                let answer = try decodeAnswer(data)
+                eventBus.events.send(.paidCallSucceeded)
+                return answer
+            case "error":
+                let failed = (object["status"] as? NSNumber)?.intValue ?? 502
+                try check(status: failed, data: data)
+                // Coins were spent on the turns that ran before it failed.
+                eventBus.events.send(.paidCallSucceeded)
+                throw AICoinError.server(status: failed, message: Self.errorMessage(from: data))
+            default:
+                if let event = ConsortiumEvent.parse(object) { onEvent(event) }
+            }
+        }
+        // The connection ended without a last line: the proxy went away mid-call.
+        throw AICoinError.malformedResponse
     }
 
     /// `POST /image`. `size` is the provider-neutral `"1024x1024"` form.
@@ -159,6 +232,28 @@ public struct AICoinCapabilityClient: Sendable {
     // MARK: - Plumbing
 
     private func post(_ path: String, body: [String: Any], timeout: TimeInterval) async throws -> Data {
+        let request = try makeRequest(path, body: body, timeout: timeout)
+        let (data, response) = try await transport.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        try check(status: status, data: data)
+        guard (200..<300).contains(status) else {
+            throw AICoinError.server(status: status, message: Self.errorMessage(from: data))
+        }
+        eventBus.events.send(.paidCallSucceeded)
+        return data
+    }
+
+    /// A `402` as the typed error every caller handles, announced on the bus so the buy sheet
+    /// opens — the one status this path has to translate itself.
+    private func check(status: Int, data: Data) throws {
+        if status == 402 {
+            let balance = AICoinRouter.parseBalance(from: data)
+            eventBus.events.send(.insufficientBalance(balance: balance))
+            throw AICoinError.insufficientBalance(balance: balance)
+        }
+    }
+
+    private func makeRequest(_ path: String, body: [String: Any], timeout: TimeInterval) throws -> URLRequest {
         guard let token = token(), !token.isEmpty else { throw AICoinError.missingToken }
         var request = URLRequest(url: WalletClient.endpointURL(baseURL, "/\(path)"))
         request.httpMethod = "POST"
@@ -168,19 +263,7 @@ public struct AICoinCapabilityClient: Sendable {
         // Slashes unescaped: the proxy reads bodies with a YAML parser, which has no `\/`, and a
         // prompt with a "/" in it came back 400 "body must be JSON".
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
-
-        let (data, response) = try await transport.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        if status == 402 {
-            let balance = AICoinRouter.parseBalance(from: data)
-            eventBus.events.send(.insufficientBalance(balance: balance))
-            throw AICoinError.insufficientBalance(balance: balance)
-        }
-        guard (200..<300).contains(status) else {
-            throw AICoinError.server(status: status, message: Self.errorMessage(from: data))
-        }
-        eventBus.events.send(.paidCallSucceeded)
-        return data
+        return request
     }
 
     private func decodeAnswer(_ data: Data) throws -> TextAnswer {

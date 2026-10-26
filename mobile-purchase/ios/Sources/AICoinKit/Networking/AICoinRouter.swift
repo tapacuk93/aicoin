@@ -144,3 +144,18 @@ public struct AICoinRouter: HTTPTransport {
         return (try? JSONDecoder().decode(Body.self, from: data))?.balance
     }
 }
+
+/// Apps hand the router to everything as their one transport, so it has to pass a stream through
+/// or every streamed consortium behind it would arrive all at once at the end. The proxy's own
+/// endpoints are not provider hosts, so they go to `underlying` untouched, as `data(for:)` sends
+/// them; a provider call has nothing to stream here and is delivered whole.
+extension AICoinRouter: HTTPLineStreamingTransport {
+    public func lines(for request: URLRequest) async throws -> (AsyncThrowingStream<String, Error>, URLResponse) {
+        let isProviderCall = request.url?.host.flatMap { Self.knownHosts[$0] } != nil
+        if !isProviderCall, let streaming = underlying as? any HTTPLineStreamingTransport {
+            return try await streaming.lines(for: request)
+        }
+        let (data, response) = try await data(for: request)
+        return (wholeBodyLines(data), response)
+    }
+}

@@ -22,6 +22,41 @@ private final class StubTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
+/// Hands its reply over line by line, through a stream the test feeds, so a test can see events
+/// arrive before the call has finished.
+private final class LineStubTransport: HTTPLineStreamingTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let status: Int
+    private var _requests: [URLRequest] = []
+    let stream: AsyncThrowingStream<String, Error>
+    let feed: AsyncThrowingStream<String, Error>.Continuation
+
+    init(status: Int = 200) {
+        self.status = status
+        (stream, feed) = AsyncThrowingStream<String, Error>.makeStream()
+    }
+
+    var requests: [URLRequest] { lock.withLock { _requests } }
+
+    func lines(for request: URLRequest) async throws -> (AsyncThrowingStream<String, Error>, URLResponse) {
+        lock.withLock { _requests.append(request) }
+        return (stream, HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        XCTFail("a streamed call should read lines, not a whole body")
+        return (Data(), URLResponse())
+    }
+}
+
+/// Collects events from a `@Sendable` callback.
+private final class EventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _events: [ConsortiumEvent] = []
+    var events: [ConsortiumEvent] { lock.withLock { _events } }
+    func append(_ event: ConsortiumEvent) { lock.withLock { _events.append(event) } }
+}
+
 private func sentBody(_ request: URLRequest?) -> [String: Any] {
     guard let data = request?.httpBody, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { return [:] }
@@ -31,7 +66,7 @@ private func sentBody(_ request: URLRequest?) -> [String: Any] {
 final class AICoinCapabilityClientTests: XCTestCase {
     private let base = URL(string: "https://proxy.example")!
 
-    private func client(_ transport: StubTransport, bus: AICoinEventBus = AICoinEventBus(),
+    private func client(_ transport: any HTTPTransport, bus: AICoinEventBus = AICoinEventBus(),
                         token: String? = "tok") -> AICoinCapabilityClient {
         AICoinCapabilityClient(transport: transport, baseURL: base, eventBus: bus, token: { token })
     }
@@ -201,5 +236,149 @@ final class AICoinCapabilityClientTests: XCTestCase {
         XCTAssertTrue(AICoinError.isTerminal(AICoinError.insufficientBalance(balance: nil)))
         XCTAssertFalse(AICoinError.isTerminal(AICoinError.malformedResponse))
         XCTAssertFalse(AICoinError.isTerminal(URLError(.timedOut)))
+    }
+
+    // MARK: - Streamed consortium
+
+    private let startLine = #"{"event":"start","mode":"panel","poll":false,"panel":["anthropic","kimi"],"editor":"anthropic","subject":"writing","quality":"best","models":{"anthropic":"claude-opus-5-5","kimi":"kimi-k3.1-pro"},"max_output_tokens":20000,"max_rounds":2}"#
+    private let resultLine = #"{"event":"result","answer":"<p>Chapter</p>","subject":"writing","settled":true,"stopped_reason":"clean","rounds":1,"panel":["anthropic","kimi"],"editor":"anthropic","mode":"panel","quality":"best","calls":5,"coins_charged":40,"reads":[]}"#
+
+    func testWithoutACallbackNothingNewIsSent() async throws {
+        let transport = StubTransport(#"{"answer":"a"}"#)
+        _ = try await client(transport).consortium(prompt: "Q")
+        XCTAssertEqual(Set(sentBody(transport.requests.first).keys), ["prompt", "mode"],
+                       "an old caller's request is byte-for-byte what it was")
+    }
+
+    func testAStreamedConsortiumSendsTheNewFieldsAndDeliversEventsAsTheyArrive() async throws {
+        let transport = LineStubTransport()
+        let log = EventLog()
+        let library = ConsortiumLibrary(current: "1.2", entries: [
+            .init(ref: "1", title: "Origins", text: "<p>Once</p>"),
+            .init(ref: "1.1", title: "Rivers", text: "<p>Water</p>"),
+            .init(ref: "1.2", title: "Roads"),
+        ])
+        let call = Task {
+            try await client(transport).consortium(
+                prompt: "Write 1.2", mode: "panel", library: library, quality: .best,
+                maxOutputTokens: 20000, onEvent: { log.append($0) })
+        }
+
+        transport.feed.yield(startLine)
+        transport.feed.yield(#"{"event":"turn","stage":"draft","round":0,"provider":"kimi","model":"kimi-k3.1-pro","status":"started"}"#)
+        // Delivered while the call is still running — the point of streaming.
+        for _ in 0..<200 where log.events.count < 2 { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(log.events.count, 2)
+
+        transport.feed.yield(#"{"event":"ping"}"#)
+        transport.feed.yield(#"{"event":"read","stage":"draft","round":0,"provider":"kimi","refs":["1.1","9"],"titles":["Rivers",""],"added":["1.1"],"notes":["9 is not in the contents."]}"#)
+        transport.feed.yield(#"{"event":"turn","stage":"review","round":1,"provider":"anthropic","model":"claude-opus-5-5","status":"finished","seconds":41.2,"clean":false,"comments":"The bridge date is wrong."}"#)
+        transport.feed.yield(#"{"event":"turn","stage":"review","round":1,"provider":"kimi","model":"kimi-k3.1-pro","status":"failed","error":"upstream timed out"}"#)
+        transport.feed.yield(#"{"event":"something_new","x":1}"#)
+        transport.feed.yield(resultLine)
+        transport.feed.finish()
+
+        let answer = try await call.value
+        XCTAssertEqual(answer.answer, "<p>Chapter</p>")
+        XCTAssertEqual(answer.quality, "best")
+        XCTAssertEqual(answer.provider, "anthropic")
+        XCTAssertEqual(answer.coinsCharged, 40)
+
+        let events = log.events
+        XCTAssertEqual(events.count, 5, "pings and unknown events are not delivered: \(events)")
+        guard case .start(let start) = events[0] else { return XCTFail("first is start") }
+        XCTAssertEqual(start.panel, ["anthropic", "kimi"])
+        XCTAssertEqual(start.quality, "best")
+        XCTAssertEqual(start.models["anthropic"], "claude-opus-5-5")
+        guard case .read(let read) = events[2] else { return XCTFail("third is the read") }
+        XCTAssertEqual(read.refs, ["1.1", "9"])
+        XCTAssertEqual(read.titles, ["Rivers", ""])
+        XCTAssertEqual(read.added, ["1.1"])
+        guard case .turn(let review) = events[3] else { return XCTFail("fourth is a review") }
+        XCTAssertEqual(review.status, .finished)
+        XCTAssertEqual(review.clean, false)
+        XCTAssertEqual(review.seconds, 41.2)
+        XCTAssertEqual(review.comments, "The bridge date is wrong.")
+        guard case .turn(let failed) = events[4] else { return XCTFail("fifth is a failure") }
+        XCTAssertEqual(failed.status, .failed)
+        XCTAssertEqual(failed.error, "upstream timed out")
+
+        let body = sentBody(transport.requests.first)
+        XCTAssertEqual(body["stream"] as? Bool, true)
+        XCTAssertEqual(body["quality"] as? String, "best")
+        XCTAssertEqual(body["max_output_tokens"] as? Int, 20000)
+        XCTAssertEqual(body["mode"] as? String, "panel")
+        let sentLibrary = try XCTUnwrap(body["library"] as? [String: Any])
+        XCTAssertEqual(sentLibrary["current"] as? String, "1.2")
+        let entries = try XCTUnwrap(sentLibrary["entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.map { $0["ref"] as? String }, ["1", "1.1", "1.2"])
+        XCTAssertEqual(entries[0]["text"] as? String, "<p>Once</p>")
+        XCTAssertNil(entries[2]["text"], "an unwritten part carries no text, not an empty one")
+    }
+
+    func testAnErrorLineIsTheErrorThePlainCallWouldHaveThrown() async {
+        let transport = LineStubTransport()
+        transport.feed.yield(startLine)
+        transport.feed.yield(#"{"event":"error","status":502,"error":"no panelist answered","calls":2,"coins_charged":2,"errors":[]}"#)
+        transport.feed.finish()
+        do {
+            _ = try await client(transport).consortium(prompt: "Q", onEvent: { _ in })
+            XCTFail("expected error")
+        } catch {
+            XCTAssertEqual(error as? AICoinError, .server(status: 502, message: "no panelist answered"))
+        }
+    }
+
+    func testARefusalBeforeTheStreamIsAnOrdinaryStatus() async {
+        let bus = AICoinEventBus()
+        var events: [AICoinEvent] = []
+        let subscription = bus.events.sink { events.append($0) }
+        defer { subscription.cancel() }
+        let transport = LineStubTransport(status: 402)
+        transport.feed.yield(#"{"error":"insufficient aicoin balance","balance":0}"#)
+        transport.feed.finish()
+        do {
+            _ = try await client(transport, bus: bus).consortium(prompt: "Q", onEvent: { _ in })
+            XCTFail("expected 402")
+        } catch {
+            XCTAssertEqual(error as? AICoinError, .insufficientBalance(balance: 0))
+        }
+        XCTAssertEqual(events, [.insufficientBalance(balance: 0)])
+    }
+
+    func testAStreamThatEndsWithoutAResultIsMalformed() async {
+        let transport = LineStubTransport()
+        transport.feed.yield(startLine)
+        transport.feed.finish()
+        do {
+            _ = try await client(transport).consortium(prompt: "Q", onEvent: { _ in })
+            XCTFail("expected error")
+        } catch {
+            XCTAssertEqual(error as? AICoinError, .malformedResponse)
+        }
+    }
+
+    func testATransportThatCannotStreamStillDeliversEveryEvent() async throws {
+        let log = EventLog()
+        let transport = StubTransport([startLine, #"{"event":"ping"}"#, resultLine].joined(separator: "\n") + "\n")
+        let answer = try await client(transport).consortium(prompt: "Q", onEvent: { log.append($0) })
+        XCTAssertEqual(answer.answer, "<p>Chapter</p>")
+        XCTAssertEqual(log.events.count, 1)
+        XCTAssertEqual(sentBody(transport.requests.first)["stream"] as? Bool, true)
+    }
+
+    func testTheRouterPassesAStreamToTheProxysOwnEndpointsThrough() async throws {
+        // Apps give the router to everything; if it swallowed the stream, every event would
+        // arrive at the end.
+        let inner = LineStubTransport()
+        let router = AICoinRouter(underlying: inner, baseURL: base, eventBus: AICoinEventBus(), tokenProvider: { "tok" })
+        let log = EventLog()
+        let call = Task { try await client(router).consortium(prompt: "Q", onEvent: { log.append($0) }) }
+        inner.feed.yield(startLine)
+        for _ in 0..<200 where log.events.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(log.events.count, 1, "delivered before the call ended")
+        inner.feed.yield(resultLine)
+        inner.feed.finish()
+        _ = try await call.value
     }
 }
