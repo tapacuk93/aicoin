@@ -206,9 +206,24 @@ Auth is the same API token as any AI-proxy call (`X-Api-Key`, never a bare addre
   "editor": "anthropic",                // optional; default: the first panelist (and the lead)
   "mode": "auto",                       // optional: auto (default) | lead | panel | poll
   "max_rounds": 2,                      // optional; may only lower consortium.maxRounds, never raise it
-  "include_transcript": false           // optional; true also returns every draft
+  "include_transcript": false,          // optional; true also returns every draft
+  "max_output_tokens": 20000,           // optional; per-turn output cap, clamped to consortium.maxOutputTokensCeiling
+  "quality": "best",                    // optional: standard (default) | best — which models are seated
+  "library": {                          // optional; the larger work this request belongs to
+    "current": "3.2",                   //   the part being written now (must be one of the entries)
+    "entries": [                        //   reading order; dotted refs give the tree
+      {"ref": "1", "title": "Origins", "text": "<html…>"},
+      {"ref": "3.2", "title": "Trade routes"}          // no text: planned, not written yet
+    ]
+  },
+  "stream": true                        // optional; NDJSON events as the panel works, see "Streaming"
 }
 ```
+Every field after `include_transcript` is additive: a caller that sends none of them gets exactly the call it always got (its response gains `quality`, `models`, `max_output_tokens` and `reads`, which it can ignore).
+
+**`max_output_tokens`** is the cap every turn of this call is sent with. The default (`consortium.maxOutputTokens`, 4,000) suits a short answer; a chapter-length one in HTML with MathML, from a reasoning model that spends part of its cap thinking, runs out mid-answer under it and comes back as an incomplete text — paid for, then rejected by the caller. A caller that knows its answer is long may raise it up to `consortium.maxOutputTokensCeiling` (default 32,000); more is clamped, not refused. Not a positive integer is `400`. A long turn also takes minutes, and turns are not streamed from the provider, so they are allowed `consortium.turnReadTimeoutSeconds` (default 600) of upstream silence rather than the forwarding path's 60.
+
+**`quality: "best"`** seats each provider with its `consortium.bestModels` entry instead of its `consortium.models` one; a provider with no best entry keeps its everyday model, so `best` never seats fewer panelists. It is the caller's choice, not a ranking of the proxy's: the best models cost several times as much per turn, and only the caller knows whether the request is worth that. Anything but `standard` or `best` is `400`. The response states `quality` and the `models` it seated.
 
 **The panel** is every provider that (a) this proxy knows a chat shape for — `anthropic`, `openai`, `google`, `mistral`, `kimi` — and (b) this deployment has both a non-empty `apiKey` and a `consortium.models.<provider>` entry for, **ordered by what each is rated at for the request's subject** (see "Capability endpoints"; a caller may name the `subject`, otherwise it is tagged from the prompt and context). `elevenlabs` and `stability` are not chat APIs and are never on it; `cohere` is one but its shape is not implemented, so it is not either. A caller's `providers` list can only narrow that set, never extend it. An empty panel is `503`, not an empty answer.
 
@@ -218,12 +233,20 @@ The order is not cosmetic: the first panelist is the default **editor**, which m
 
 The record is bounded by `consortium.maxContextChars` (default 60,000), because it goes to every panelist on every round and every character of it is billed as input. Past the limit the oldest **rounds** are dropped, oldest first, and the text says so; the request, the caller's `context` and the answer currently under discussion are never dropped, since a turn without those cannot be answered at all. If those alone exceed the limit, the record is truncated rather than sent to fail upstream on a context-length error.
 
+**The library — the whole work, read on demand.** A request that is one part of something larger (a chapter of a book) needs the panel to see the rest of it, and pasting every earlier part into `context` would put hundreds of thousands of characters in front of every panelist on every turn, billed as input each time, when a turn needs at most the two or three parts the new one leans on. So `library` carries the work, and the record carries only its **index**: every entry in order, indented by depth, with its title and word count (markup not counted), `not written yet` for an entry without text, and the `current` one marked as being written now. The index is a block of the record that is never dropped. The library's text is not in the record.
+
+Any turn — draft, merge, review, revise, or a poll answer — may reply with nothing but lines of the form `READ <ref>`, one or more. Read as strictly as `NO COMMENTS`: every non-blank line must be one (emphasis, a list dash and a trailing full stop are allowed), so a draft that happens to contain such a line is still a draft. The proxy then appends each requested part's text to the shared record as its own block, headed with the part and who asked for it at which stage and round ("read at Kimi's request while drafting"), and runs the same turn again. Read blocks are kept, never dropped, so a later turn need not read again; a part already in the record is not added twice, and the asking turn is told it is already there and who read it. An unknown ref or an unwritten one is answered with a short note in the re-run's task. A turn may ask `consortium.maxReadsPerTurn` times (default 3) and a call may add `consortium.maxLibraryReads` parts in all (default 20); once either is reached the turn is told reading is closed and to answer, and a turn that asks anyway is a failed turn (`errors`: `"asked to read after reading was closed"`). **Each re-run is an ordinary paid call** — a turn that reads twice costs three calls. Turns running at the same time (a round's drafts or reviews) see a part as soon as it has been added, but one already in flight does not.
+
+The index and the read parts sit outside `consortium.maxContextChars`: neither is round history the panel has moved past, and dropping a part that was read would only make the next turn ask, and pay, for it again. They are bounded instead by the library limits and the read cap. When a library is present every turn's instructions say briefly what the index is and how to read, and how many reads are left.
+
+A library is refused with `400` when it is not an object with an `entries` list, an entry has no ref (or one with spaces) or repeats one, a `text` is not a string, `current` is not one of the entries, it has more than `consortium.maxLibraryEntries` entries (default 2,000), or its texts total more than `consortium.maxLibraryChars` characters (default 600,000). The response lists every read request in `reads`.
+
 **Two shapes, chosen by how much context came with the request.** Drafting in parallel buys useful disagreement when the request *is* the whole input: several models answer the same short question independently and the merge is where their differences pay off. Once a large context arrives with it — a directory, a document, a session's history — that stops being true: each draft is then mostly a re-reading of the same material, billed once per panelist, and the drafts converge anyway because the context, not the model, is doing the work.
 
 - **`panel`** — every panelist drafts, the editor merges, the panel reviews. The default for a bare question.
 - **`lead`** — the editor alone drafts, with the whole context in front of it, and the rest of the panel improves that answer round by round. One draft instead of N, and no merge turn.
 
-`mode: "auto"` (the default) picks `lead` when the caller's `context` is at least `consortium.leadContextChars` (default 8,000) and `panel` otherwise; `"lead"` and `"panel"` force one regardless. The response says which ran, in `mode`.
+`mode: "auto"` (the default) picks `lead` when the caller's `context` is at least `consortium.leadContextChars` (default 8,000) and `panel` otherwise; `"lead"` and `"panel"` force one regardless. The response says which ran, in `mode`. Only `context` counts: a `library` never turns a call into `lead`, because its text is not in the record and its size says nothing about how much each drafter would re-read.
 
 **`poll` — the third shape, and the one that does not converge.** Every panelist answers the request once, independently; nothing is merged, nothing is reviewed, and every answer comes back attributed to the model that wrote it, in `answers`. One turn per panelist and no rounds, so a four-model poll is four calls.
 
@@ -253,17 +276,24 @@ Response `200`:
 ```json
 {
   "answer": "...",
+  "subject": "writing",
   "settled": true,
   "stopped_reason": "clean",        // or round_limit | insufficient_balance | revision_failed | client_gone
   "rounds": 2,
   "panel": ["anthropic", "openai"],
   "editor": "anthropic",
-  "mode": "lead",                   // or "panel" — which shape actually ran
+  "mode": "lead",                   // or "panel" — which shape actually ran (a poll reports "panel")
+  "quality": "best",                // or "standard"
+  "models": {"anthropic": "claude-opus-5-5", "openai": "gpt-6.1-sol"},   // the model each panelist sent
+  "max_output_tokens": 20000,       // the per-turn cap this call ran with, after clamping
   "calls": 8,
   "coins_charged": 8,
   "spend": {"anthropic": 5, "openai": 3},   // coins per provider: which models the money went to
   "reviews": [{"round": 1, "provider": "openai", "clean": false, "comments": "..."}],
   "errors": [{"stage": "draft", "provider": "mistral", "error": "upstream timed out"}],
+  "reads": [{"stage": "draft", "round": 0, "provider": "kimi", "refs": ["2.3", "9"],
+             "added": ["2.3"], "notes": ["9 is not in the contents."]}],   // [] without a library;
+                                                         // notes only when a ref was not added
   "answers": [{"provider": "anthropic", "model": "claude-sonnet-5", "text": "..."}],
                                                          // always in poll mode; otherwise only
                                                          // with include_transcript
@@ -271,12 +301,37 @@ Response `200`:
 }
 ```
 
-Config (`consortium`, all env-overridable — `AICOIN_PROXY_CONSORTIUM_ENABLED`, `_MAX_ROUNDS`, `_MAX_OUTPUT_TOKENS`, `_EDITOR`, `_<PROVIDER>_MODEL`):
+**Streaming.** With `"stream": true` the response is `200`, `Content-Type: application/x-ndjson`, chunked, one JSON object per line, each written and flushed as it happens — so an app can show what the panel is doing while it does it, and so a call that runs for minutes is never a silent connection (Cloudflare, Caddy, an HTTP/3 hop or the phone would eventually drop one). Refusals decided before the panel starts stay ordinary HTTP errors: `400`, `401`, `503`, and `402` — a streamed call checks the balance before it commits to `200`, since an empty wallet is the one refusal every client turns into the buy sheet. The lines:
+```jsonc
+{"event":"start","mode":"panel","poll":false,"panel":["anthropic","kimi"],"editor":"anthropic","subject":"writing",
+ "quality":"best","models":{"anthropic":"claude-opus-5-5","kimi":"kimi-k3.1-pro"},"max_output_tokens":20000,"max_rounds":2}
+{"event":"turn","stage":"draft","round":0,"provider":"kimi","model":"kimi-k3.1-pro","status":"started"}
+{"event":"read","stage":"draft","round":0,"provider":"kimi","refs":["2.3"],"titles":["Trade routes"],"added":["2.3"]}
+{"event":"turn","stage":"review","round":1,"provider":"kimi","model":"…","status":"finished","seconds":41.2,"clean":false,"comments":"first ~400 chars…"}
+{"event":"turn","stage":"merge","round":0,"provider":"anthropic","model":"…","status":"failed","error":"upstream timed out"}
+{"event":"ping"}
+{"event":"result", …exactly the fields of the 200 body above…}
+```
+- `stage` is `draft`, `merge`, `review` or `revise`; `round` is 0 for draft and merge, the review round for review, and the round being answered for revise. A poll's answers are `draft` turns.
+- `started` goes out once the turn's coin is held and the provider is called. `finished` carries `seconds`, and for a review `clean` and, when not clean, the first 400 characters of `comments` (the `result` has them whole). `failed` carries `error`: an upstream failure, no text, no balance — or, for an editor, a reply that was not one whole answer (with `seconds`).
+- A turn that asks to read is followed by a `read` event (`refs` as asked, `titles` in the same order — `""` for an unknown ref — `added` for those actually put in the record, `notes` for the rest) and a fresh `started` for its re-run, with no `finished` in between.
+- `ping` after 15 seconds without a line.
+- The last line is `{"event":"result", …}` with the same fields a plain call's `200` body has, or `{"event":"error","status":502,"error":"…", …}` with the status and body a plain call would have got (`502` no panelist answered, `402` the first turn could not be paid for after all). What the call cost, which a plain response puts in `X-Aicoin-Charged`, comes as an HTTP trailer of that name, since it is not known when the headers go out.
+
+A client that disconnects mid-stream stops the rounds at the next boundary, exactly as without streaming.
+
+Config (`consortium`, all env-overridable — `AICOIN_PROXY_CONSORTIUM_ENABLED`, `_MAX_ROUNDS`, `_MAX_OUTPUT_TOKENS`, `_MAX_OUTPUT_TOKENS_CEILING`, `_TURN_READ_TIMEOUT_SECONDS`, `_MAX_LIBRARY_CHARS`, `_MAX_LIBRARY_ENTRIES`, `_MAX_READS_PER_TURN`, `_MAX_LIBRARY_READS`, `_EDITOR`, `_<PROVIDER>_MODEL`, `_<PROVIDER>_BEST_MODEL`):
 ```yaml
 consortium:
   enabled: true          # false serves 404, as if the endpoint did not exist
   maxRounds: 3
   maxOutputTokens: 4000  # per turn; generous because thinking models spend part of it before writing
+  maxOutputTokensCeiling: 32000  # the most a caller's max_output_tokens may raise it to
+  turnReadTimeoutSeconds: 600    # upstream silence a turn may sit through (a long answer is unstreamed)
+  maxLibraryChars: 600000        # total text a library may carry
+  maxLibraryEntries: 2000
+  maxReadsPerTurn: 3             # READ requests one turn may make before reading closes
+  maxLibraryReads: 20            # parts one call may add to the record
   maxContextChars: 60000 # of the shared record per turn; past it the oldest rounds are dropped
   leadContextChars: 8000 # context at or above this makes `mode: auto` mean lead
   editor: ""             # empty: the first panelist
@@ -286,6 +341,11 @@ consortium:
     google: gemini-3.5-flash
     mistral: mistral-large-latest
     kimi: kimi-k2.6
+  bestModels:            # quality: "best"; a provider without one keeps its model above
+    anthropic: claude-opus-5-5
+    openai: gpt-6.1-sol
+    google: gemini-4-argon
+    kimi: kimi-k3.1-pro
 ```
 Models are config rather than code for the same reason rates are: providers rename and retire them on their own schedule, and a consortium that starts failing because an id lapsed should be a restart away from working, not a release.
 
@@ -577,7 +637,7 @@ history, so it needs its own, separate auth.
 
 ### Tests to include
 - JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs), and the admin token's constant-time comparison + address-format validation — no network/Redis needed.
-- For the consortium: each provider's chat request shape and the extraction of assistant text from each provider's response shape (including a 2xx that carries none), the strict reading of `NO COMMENTS`, that a polled panelist is briefed to stand alone rather than towards a merge, that a poll is never turned into a lead by a large context, and panel/editor selection from config — all pure, no network. The rounds themselves, their billing and the partial-result paths are covered end-to-end in `e2e/run.sh` against the mock provider, which plays drafter, editor and reviewer.
+- For the consortium: each provider's chat request shape and the extraction of assistant text from each provider's response shape (including a 2xx that carries none), the strict reading of `NO COMMENTS`, that a polled panelist is briefed to stand alone rather than towards a merge, that a poll is never turned into a lead by a large context, and panel/editor selection from config; the library's parsing, limits and index, the strict reading of `READ` lines, that read parts are kept outside the record limit, best-model fallback and the output-cap clamp — all pure, no network. The rounds themselves, their billing and the partial-result paths are covered end-to-end in `e2e/run.sh` against the mock provider, which plays drafter, editor and reviewer.
 
 ## Docker / docker-compose
 - `aicoin-proxy/Dockerfile` — multi-stage: build stage on **GraalVM** (not vanilla OpenJDK), copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a matching GraalVM runtime image. Entrypoint runs the generated start script. GraalVM chosen for a smaller heap footprint on the cheap single-vCPU production host (see "Production hosting" below); full ahead-of-time `native-image` is a future option, not required now, since the app plugin's script + GraalVM JIT already meets the cost/perf bar.

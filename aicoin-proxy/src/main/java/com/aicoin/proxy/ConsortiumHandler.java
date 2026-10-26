@@ -593,7 +593,7 @@ final class ConsortiumHandler {
                 if (silent) {
                     emit("{\"event\":\"ping\"}");
                 }
-            }, 5, 5, TimeUnit.SECONDS);
+            }, 1, 1, TimeUnit.SECONDS);
         }
 
         /** One NDJSON line to a watching caller; nothing when the caller is not watching. */
