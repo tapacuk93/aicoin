@@ -218,12 +218,15 @@ Auth is the same API token as any AI-proxy call (`X-Api-Key`, never a bare addre
       {"ref": "3.2", "title": "Trade routes"}          // no text: planned, not written yet
     ]
   },
-  "stream": true                        // optional; NDJSON events as the panel works, see "Streaming"
+  "stream": true,                       // optional; NDJSON events as the panel works, see "Streaming"
+  "call_id": "6f1c…"                    // optional; makes the call durable, see "Durable calls"
 }
 ```
 Every field after `include_transcript` is additive: a caller that sends none of them gets exactly the call it always got (its response gains `quality`, `models`, `max_output_tokens` and `reads`, which it can ignore).
 
 **`max_output_tokens`** is the cap every turn of this call is sent with. The default (`consortium.maxOutputTokens`, 4,000) suits a short answer; a chapter-length one in HTML with MathML, from a reasoning model that spends part of its cap thinking, runs out mid-answer under it and comes back as an incomplete text — paid for, then rejected by the caller. A caller that knows its answer is long may raise it up to `consortium.maxOutputTokensCeiling` (default 32,000); more is clamped, not refused. Not a positive integer is `400`. A long turn also takes minutes, and turns are not streamed from the provider, so they are allowed `consortium.turnReadTimeoutSeconds` (default 600) of upstream silence rather than the forwarding path's 60.
+
+**Model lists.** A `consortium.models` or `consortium.bestModels` entry may be one id or an ordered list (a YAML list, or comma-separated — which is also how the env overrides take one). A turn tries them in order within itself: when a model fails — refused (`429`, overloaded), a `5xx`, a timeout, or a `2xx` with no text — the same turn is sent to the provider's next model. A refused attempt is refunded as any failed call is; one that answered with no text was billed, and stays billed. Each attempt is priced by the model that answered it. Within one call the provider then starts from the model that last answered, since a model that just refused as overloaded tends to refuse again a minute later. Turn events and `models` report the model that answered, and a turn that fell back carries `"fell_back_from"` (the model it gave up on) and `"fallback_reason"` on its `started` and `finished` events; the attempt given up on is listed in `errors`. Kimi's best is `[kimi-k3.1-pro-highspeed, kimi-k3.1-pro]`: the high-speed model refused 5 tries in 5 as `engine_overloaded_error` on 2026-10-26, and K3.1 Pro answers, slowly. `/text`, `GET /skills` and `consortium.panel` use only the first model of each list.
 
 **`quality: "best"`** seats each provider with its `consortium.bestModels` entry instead of its `consortium.models` one; a provider with no best entry keeps its everyday model, so `best` never seats fewer panelists. It is the caller's choice, not a ranking of the proxy's: the best models cost several times as much per turn, and only the caller knows whether the request is worth that. Anything but `standard` or `best` is `400`. The response states `quality` and the `models` it seated.
 
@@ -320,9 +323,25 @@ Response `200`:
 - `ping` after 15 seconds without a line.
 - The last line is `{"event":"result", …}` with the same fields a plain call's `200` body has, or `{"event":"error","status":502,"error":"…", …}` with the status and body a plain call would have got (`502` no panelist answered, `402` the first turn could not be paid for after all). What the call cost, which a plain response puts in `X-Aicoin-Charged`, comes as an HTTP trailer of that name, since it is not known when the headers go out.
 
-A client that disconnects mid-stream stops the rounds at the next boundary, exactly as without streaming.
+Every event carries `"seq"`, counting from 1 in the order the events happened — `start` is 1 and the `result` or `error` line is the last. Pings carry none. A client that disconnects mid-stream stops the rounds at the next boundary, exactly as without streaming — unless the call has a `call_id`.
 
-Config (`consortium`, all env-overridable — `AICOIN_PROXY_CONSORTIUM_ENABLED`, `_MAX_ROUNDS`, `_MAX_OUTPUT_TOKENS`, `_MAX_OUTPUT_TOKENS_CEILING`, `_TURN_READ_TIMEOUT_SECONDS`, `_MAX_LIBRARY_CHARS`, `_MAX_LIBRARY_ENTRIES`, `_MAX_READS_PER_TURN`, `_MAX_LIBRARY_READS`, `_EDITOR`, `_<PROVIDER>_MODEL`, `_<PROVIDER>_BEST_MODEL`):
+**Durable calls — `call_id`.** A chapter is ten minutes and dozens of coins of turns, and without an id it lives and dies with its connection: iOS freezing an app in the background drops the stream, and the call stops at `client_gone`; a redeploy kills every call in flight. The caller then starts over and pays again. A call sent with `"call_id"` (1–128 characters of letters, digits, `.`, `_`, `:` or `-`; generate one per piece of work, such as a UUID) belongs to no connection:
+
+- It runs to its end whether or not anyone is listening, and its outcome is kept.
+- It is checkpointed to the ledger's Redis after every turn — the record the panel sees (drafts, the answer, each round's reviews and revisions, the library parts read), who has finished each stage, what was charged, every event so far — and its events and result are kept for `consortium.callRetentionHours` (default 24).
+- Ids are scoped to the wallet: the same id from two wallets names two different calls, and no wallet can reach another's.
+
+A request whose `call_id` this wallet has already used is a client coming back for that call. **Its body is otherwise ignored** — a call is what its id was first given to, and a second body under the same id cannot change it — except `stream`, which says how this client wants it:
+- **finished** → every stored event, then the `result` (or `error`) line, when streaming; the stored body (with the status it had) when not. Nothing is charged; `X-Aicoin-Charged` (header or trailer) is the call's total.
+- **running in this process** → the stored events are replayed, then the live ones follow. Any number of clients may attach; one leaving does not stop the call. A plain client gets the result when it ends.
+- **recorded as running, but its process is gone** → resumed here from its last checkpoint. Ownership is a lease in Redis (`consortium.callLeaseSeconds`, default 30) that the running process renews every third of that; a process that dies stops renewing, and once the lease lapses another one takes the call over. A client attached meanwhile is fed the stored events as they appear until then. Completed turns are not redone or billed again; a turn that was in flight is run again, and the coin held for it is refunded first, since it is about to be held and billed again. A resumed call sends `{"event":"resumed","seq":N,"from":"review","round":2}` to its clients when it carries on, and its stored `start` event is marked `"resumed":true` for a client that replays from the beginning.
+- A process also resumes, every 15 seconds and at startup, any unfinished call whose lease has lapsed, so a redeploy does not leave calls waiting for a client that may not come back for hours. A process shutting down cleanly gives its leases up, so the one replacing it resumes them within seconds; one that is killed leaves them to lapse.
+
+What can be lost: a turn whose answer had arrived and been settled but not yet checkpointed when the process died (a window of milliseconds) is run, and billed, again; a coin held a moment before a crash, before the hold was recorded, is not refunded. Both are the cost of a crash at the worst instant, not of a restart. A call with an id that Redis cannot reach still runs, just not durably.
+
+The `start` event and the result carry the `call_id`.
+
+Config (`consortium`, all env-overridable — `AICOIN_PROXY_CONSORTIUM_ENABLED`, `_MAX_ROUNDS`, `_MAX_OUTPUT_TOKENS`, `_MAX_OUTPUT_TOKENS_CEILING`, `_TURN_READ_TIMEOUT_SECONDS`, `_MAX_LIBRARY_CHARS`, `_MAX_LIBRARY_ENTRIES`, `_MAX_READS_PER_TURN`, `_MAX_LIBRARY_READS`, `_CALL_RETENTION_HOURS`, `_CALL_LEASE_SECONDS`, `_EDITOR`, `_<PROVIDER>_MODEL`, `_<PROVIDER>_BEST_MODEL`):
 ```yaml
 consortium:
   enabled: true          # false serves 404, as if the endpoint did not exist
@@ -334,6 +353,8 @@ consortium:
   maxLibraryEntries: 2000
   maxReadsPerTurn: 3             # READ requests one turn may make before reading closes
   maxLibraryReads: 20            # parts one call may add to the record
+  callRetentionHours: 24         # how long a durable call's progress, events and result are kept
+  callLeaseSeconds: 30           # how long a dead process's calls wait before another resumes them
   maxContextChars: 60000 # of the shared record per turn; past it the oldest rounds are dropped
   leadContextChars: 8000 # context at or above this makes `mode: auto` mean lead
   editor: ""             # empty: the first panelist
@@ -347,7 +368,7 @@ consortium:
     anthropic: claude-opus-5-5
     openai: gpt-6.1-sol
     google: gemini-4-argon
-    kimi: kimi-k3.1-pro
+    kimi: [kimi-k3.1-pro-highspeed, kimi-k3.1-pro]   # tried in order within a turn
 ```
 Models are config rather than code for the same reason rates are: providers rename and retire them on their own schedule, and a consortium that starts failing because an id lapsed should be a restart away from working, not a release.
 
@@ -639,7 +660,7 @@ history, so it needs its own, separate auth.
 
 ### Tests to include
 - JUnit5 pure-function tests: `X-AI`→provider resolution (incl. missing/unknown → 400), auth-injection header/query-param construction per provider, usage-JSON→cost_usd parsing, the price-weight formula and its checkpoint table, the Ed25519 live-signature/token verification logic (valid/tampered/expired/revoked cases, against genuinely-generated keypairs), and the admin token's constant-time comparison + address-format validation — no network/Redis needed.
-- For the consortium: each provider's chat request shape and the extraction of assistant text from each provider's response shape (including a 2xx that carries none), the strict reading of `NO COMMENTS`, that a polled panelist is briefed to stand alone rather than towards a merge, that a poll is never turned into a lead by a large context, and panel/editor selection from config; the library's parsing, limits and index, the strict reading of `READ` lines, that read parts are kept outside the record limit, best-model fallback and the output-cap clamp — all pure, no network. The rounds themselves, their billing and the partial-result paths are covered end-to-end in `e2e/run.sh` against the mock provider, which plays drafter, editor and reviewer.
+- For the consortium: each provider's chat request shape and the extraction of assistant text from each provider's response shape (including a 2xx that carries none), the strict reading of `NO COMMENTS`, that a polled panelist is briefed to stand alone rather than towards a merge, that a poll is never turned into a lead by a large context, and panel/editor selection from config; the library's parsing, limits and index, the strict reading of `READ` lines, that read parts are kept outside the record limit, best-model fallback and the output-cap clamp, model lists (YAML, comma-separated env, single id), and that a durable call's checkpoint restores the record and its state exactly — all pure, no network. Attaching, replaying and resuming a durable call across a killed process were verified by hand against a local proxy with real providers. The rounds themselves, their billing and the partial-result paths are covered end-to-end in `e2e/run.sh` against the mock provider, which plays drafter, editor and reviewer.
 
 ## Docker / docker-compose
 - `aicoin-proxy/Dockerfile` — multi-stage: build stage on **GraalVM** (not vanilla OpenJDK), copy the `application` plugin's install output (`build/install/aicoin-proxy/`) into a matching GraalVM runtime image. Entrypoint runs the generated start script. GraalVM chosen for a smaller heap footprint on the cheap single-vCPU production host (see "Production hosting" below); full ahead-of-time `native-image` is a future option, not required now, since the app plugin's script + GraalVM JIT already meets the cost/perf bar.
