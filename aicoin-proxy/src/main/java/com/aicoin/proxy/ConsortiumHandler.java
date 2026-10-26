@@ -233,7 +233,7 @@ final class ConsortiumHandler {
             if (calls != null) {
                 String id = callId;
                 calls.openOrCreate(ctx, Boolean.TRUE.equals(body.get("stream")),
-                        ConsortiumStore.key(walletAddress, callId),
+                        ConsortiumStore.key(walletAddress, callId), body,
                         () -> serveNew(ctx, requestBody, body, id, config, clientGroup, healthTracker, ledger,
                                 walletAddress));
                 return;
@@ -393,7 +393,9 @@ final class ConsortiumHandler {
             }
         }
         Map<String, List<String>> models = new java.util.LinkedHashMap<>();
-        for (String provider : panel) {
+        // Models for everyone the call could seat, not just today's panel: a provider the reader
+        // puts back later (PATCH, or a resume with a different skip) needs one too.
+        for (String provider : seated) {
             models.put(provider, config.getConsortium().modelsFor(provider, best));
         }
         ConsortiumCalls calls = callId == null ? null : ConsortiumCalls.get();
@@ -401,6 +403,7 @@ final class ConsortiumHandler {
                 calls == null ? null : callId, calls == null ? null : calls.store(), prompt, background, panel, editor,
                 models, maxRounds, includeTranscript, lead, poll, subject, null, best, maxOutputTokens, library,
                 UpstreamTimer.of(ctx.channel()), 0, 0, Map.of());
+        session.seating(seated, skip);
         // Told by push when it ends with nobody watching — durable calls only, since only those run
         // on without a client; a `notify` on a call without an id is ignored.
         if (callId != null && body.get("notify") != null) {
@@ -528,6 +531,50 @@ final class ConsortiumHandler {
             out.put("data", data);
         }
         return out;
+    }
+
+    static void sendJson(ChannelHandlerContext ctx, HttpResponseStatus status, String json) {
+        byte[] bytes = json.getBytes(CharsetUtil.UTF_8);
+        FullHttpResponse response = new DefaultFullHttpResponse(
+                HttpVersion.HTTP_1_1, status, Unpooled.wrappedBuffer(bytes));
+        response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
+        HttpUtil.setContentLength(response, bytes.length);
+        ctx.writeAndFlush(response);
+    }
+
+    /**
+     * {@code POST /consortium/{call_id}/pause} and {@code PATCH /consortium/{call_id}}: the caller's
+     * controls over one of its own durable calls. {@code tail} is the path after
+     * {@code /consortium/}. The id is the wallet's, as everywhere: another wallet's call is a 404.
+     */
+    static void serveControl(ChannelHandlerContext ctx, String method, String tail, byte[] requestBody,
+                             String walletAddress) {
+        ConsortiumCalls calls = ConsortiumCalls.get();
+        if (calls == null) {
+            sendError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "durable calls are not available");
+            return;
+        }
+        boolean pause = tail.endsWith("/pause");
+        String callId = pause ? tail.substring(0, tail.length() - "/pause".length()) : tail;
+        if (!CALL_ID.matcher(callId).matches()) {
+            sendError(ctx, HttpResponseStatus.NOT_FOUND, "no such call");
+            return;
+        }
+        String key = ConsortiumStore.key(walletAddress, callId);
+        if (pause && "POST".equals(method)) {
+            calls.pause(ctx, key);
+            return;
+        }
+        if (!pause && "PATCH".equals(method)) {
+            Map<?, ?> body = parseBody(requestBody);
+            if (body == null || !(body.get("skip") instanceof List)) {
+                sendError(ctx, HttpResponseStatus.BAD_REQUEST, "body must be {\\\"skip\\\":[...]}");
+                return;
+            }
+            calls.update(ctx, key, skipped(body.get("skip")));
+            return;
+        }
+        sendError(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED, "use POST …/pause or PATCH");
     }
 
     static void sendError(ChannelHandlerContext ctx, HttpResponseStatus status, String message) {

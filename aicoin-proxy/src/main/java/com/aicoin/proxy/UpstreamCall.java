@@ -140,13 +140,13 @@ final class UpstreamCall {
      * As above, with the read timeout named by the caller — a consortium turn, which writes a
      * whole long answer before sending its first byte, needs far longer than a forwarded call.
      */
-    static void post(EventLoopGroup group, ProxyConfig config, ProviderHealthTracker healthTracker,
+    static Runnable post(EventLoopGroup group, ProxyConfig config, ProviderHealthTracker healthTracker,
                       String provider, String path, List<Map.Entry<String, String>> headers, byte[] body,
                       UpstreamTimer timer, int readTimeoutSeconds, Consumer<Result> onResult) {
         ProviderConfig providerConfig = config.getProvider(provider);
         if (providerConfig == null) {
             onResult.accept(Result.failed("unknown provider " + provider));
-            return;
+            return () -> { };
         }
 
         URI upstreamUri;
@@ -154,14 +154,14 @@ final class UpstreamCall {
             upstreamUri = new URI(providerConfig.getBaseUrl());
         } catch (Exception e) {
             onResult.accept(Result.failed("invalid provider baseUrl"));
-            return;
+            return () -> { };
         }
         boolean tls = "https".equalsIgnoreCase(upstreamUri.getScheme());
         String host = upstreamUri.getHost();
         int port = upstreamUri.getPort() != -1 ? upstreamUri.getPort() : (tls ? 443 : 80);
         if (host == null) {
             onResult.accept(Result.failed("invalid provider baseUrl"));
-            return;
+            return () -> { };
         }
 
         AuthInjector.Injection injection = AuthInjector.compute(providerConfig);
@@ -203,6 +203,7 @@ final class UpstreamCall {
                     }
                 });
 
+        java.util.concurrent.atomic.AtomicReference<Channel> connected = new java.util.concurrent.atomic.AtomicReference<>();
         bootstrap.connect(host, port).addListener((ChannelFutureListener) future -> {
             if (!future.isSuccess()) {
                 LOG.log(Level.WARNING, "consortium connect failed for " + provider, future.cause());
@@ -210,6 +211,12 @@ final class UpstreamCall {
                 return;
             }
             Channel ch = future.channel();
+            connected.set(ch);
+            if (settled.get()) {
+                // Called off before the connection was up: send nothing.
+                ch.close();
+                return;
+            }
             String hostHeader = (port == (tls ? 443 : 80)) ? host : host + ":" + port;
             FullHttpRequest req = new DefaultFullHttpRequest(
                     HttpVersion.HTTP_1_1, HttpMethod.POST, finalUri, Unpooled.wrappedBuffer(body));
@@ -226,6 +233,15 @@ final class UpstreamCall {
                 }
             });
         });
+        // Calling a call off: settle it as failed (so the caller's one callback has been had)
+        // and drop the connection, so the provider stops writing an answer nobody will read.
+        return () -> {
+            once.accept(Result.failed("cancelled"));
+            Channel ch = connected.get();
+            if (ch != null) {
+                ch.close();
+            }
+        };
     }
 
     private static final class ResponseHandler extends SimpleChannelInboundHandler<FullHttpResponse> {

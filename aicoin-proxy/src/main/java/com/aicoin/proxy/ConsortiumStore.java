@@ -81,6 +81,20 @@ interface ConsortiumStore {
     /** The call is over: it is no longer a candidate for resuming. */
     void finished(String key);
 
+    /**
+     * The call is paused: not a candidate for resuming on its own (out of the running set), kept
+     * {@code retentionHours} and then gone — and after that, remembered as gone for a week, so a
+     * request that comes back for it is told so ({@code 410}) rather than quietly starting a new
+     * call under the old id.
+     */
+    void paused(String key, int retentionHours);
+
+    /** A paused call is running again: back to the ordinary retention, and a resume candidate. */
+    void unpaused(String key);
+
+    /** Whether this id named a paused call that has since expired. */
+    void gone(String key, Consumer<Boolean> onGone);
+
     void running(Consumer<List<String>> onKeys);
 
     /** The ledger's Redis. */
@@ -184,6 +198,30 @@ interface ConsortiumStore {
         @Override
         public void finished(String key) {
             redis.srem(RUNNING_KEY, key).whenComplete((n, err) -> logFailure("finish", err));
+        }
+
+        @Override
+        public void paused(String key, int retentionHours) {
+            long seconds = retentionHours * 3600L;
+            redis.srem(RUNNING_KEY, key).whenComplete((n, err) -> logFailure("pause", err));
+            for (String part : new String[] {":request", ":state", ":events"}) {
+                redis.expire(key + part, seconds);
+            }
+            redis.set(key + ":gone", "paused", SetArgs.Builder.ex(seconds + 7 * 24 * 3600L));
+        }
+
+        @Override
+        public void unpaused(String key) {
+            for (String part : new String[] {":request", ":state", ":events"}) {
+                redis.expire(key + part, retentionSeconds);
+            }
+            redis.del(key + ":gone");
+            redis.sadd(RUNNING_KEY, key).whenComplete((n, err) -> logFailure("unpause", err));
+        }
+
+        @Override
+        public void gone(String key, Consumer<Boolean> onGone) {
+            redis.exists(key + ":gone").whenComplete((n, err) -> onGone.accept(err == null && n != null && n > 0));
         }
 
         @Override

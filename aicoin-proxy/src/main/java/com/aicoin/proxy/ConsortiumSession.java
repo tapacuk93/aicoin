@@ -64,7 +64,29 @@ final class ConsortiumSession {
     private final String callId;
     private final String storeKey;
     private final ConsortiumStore store;
-    private final List<String> panel;
+    /**
+     * Who is on the panel now. Not fixed: a reader can take a member off (or put one back) while
+     * the call runs or while it is paused — see {@link #applySkip}. In rank order, always a subset
+     * of {@link #eligible}.
+     */
+    private List<String> panel;
+    /** Everyone this call could seat, in rank order: the panel before {@code skip}. */
+    private List<String> eligible;
+    /** Who the caller asked to leave off. */
+    private Set<String> skip = new LinkedHashSet<>();
+    /**
+     * Who takes part in the stage now running: the panel when it began, less anyone taken off
+     * since. Someone put back mid-stage joins from the next one — a review round that was half
+     * done when they arrived is not made to wait for them.
+     */
+    private final List<String> stageMembers = new ArrayList<>();
+    /** The stage's one move to the next has been made; guards against making it twice. */
+    private boolean stageAdvanced;
+    /** Paused by the caller: nothing runs, nothing is billed, until a request resumes it. */
+    private boolean paused;
+    /** Each provider's turn in flight, so it can be called off. */
+    private final Map<String, Attempt> inFlight = new HashMap<>();
+    private Runnable onPaused = () -> { };
     /**
      * Who merges and revises. Not fixed: when the editor cannot do its turn — out of credit, an
      * error, a timeout, a reply that is not one whole answer — the turn goes to the next-ranked
@@ -195,6 +217,7 @@ final class ConsortiumSession {
         this.store = callId == null ? null : store;
         this.storeKey = callId == null ? null : ConsortiumStore.key(wallet, callId);
         this.panel = List.copyOf(panel);
+        this.eligible = List.copyOf(panel);
         this.editor = editor;
         this.models = new LinkedHashMap<>();
         models.forEach((provider, chain) -> this.models.put(provider, List.copyOf(chain)));
@@ -217,6 +240,181 @@ final class ConsortiumSession {
 
     void onFinished(Runnable action) {
         this.onFinished = action;
+    }
+
+    void onPaused(Runnable action) {
+        this.onPaused = action;
+    }
+
+    /** Who the call could seat and who the caller left off — before it starts. */
+    synchronized void seating(List<String> eligible, Set<String> skip) {
+        this.eligible = List.copyOf(eligible);
+        this.skip = new LinkedHashSet<>(skip);
+    }
+
+    synchronized List<String> eventsNow() {
+        return new ArrayList<>(events);
+    }
+
+    synchronized List<String> panelNow() {
+        return new ArrayList<>(panel);
+    }
+
+    synchronized Set<String> skipNow() {
+        return new LinkedHashSet<>(skip);
+    }
+
+    synchronized boolean isFinished() {
+        return finished;
+    }
+
+    synchronized boolean isPaused() {
+        return paused;
+    }
+
+    synchronized String phaseNow() {
+        return phase;
+    }
+
+    synchronized int roundNow() {
+        return round;
+    }
+
+    /**
+     * Stops the call where it is, at the caller's request: every turn in flight is called off and
+     * its coin given back, the checkpoint says paused, every attached client is sent
+     * {@code {"event":"paused"}} and its stream ends, and nothing more runs or is billed until a
+     * request with the same {@code call_id} resumes it — at which point the turns called off are
+     * run again from the start.
+     *
+     * <p>Why a reader wants this: a chapter heading somewhere they do not like, or a panel they
+     * want to change mid-way (Kimi taking ten minutes a turn), used to mean waiting for it to
+     * finish and paying for every turn, or walking away from it and losing what it had done.
+     *
+     * @return {@code "paused"}, or {@code "finished"} when there was nothing left to pause
+     */
+    String pause(int retentionHours) {
+        List<String> toCancel;
+        synchronized (this) {
+            if (finished) {
+                return "finished";
+            }
+            if (paused) {
+                return "paused";
+            }
+            paused = true;
+            toCancel = new ArrayList<>(inFlight.keySet());
+        }
+        for (String provider : toCancel) {
+            cancelTurn(provider);
+        }
+        synchronized (this) {
+            emit("paused", "\"phase\":" + Json.string(phase) + ",\"round\":" + round);
+            String line = events.get(events.size() - 1);
+            String body = "{\"error\":\"call paused\",\"paused\":true,\"call_id\":" + Json.string(callId)
+                    + ",\"phase\":" + Json.string(phase) + ",\"round\":" + round
+                    + ",\"calls\":" + calls + ",\"coins_charged\":" + coinsCharged + "}";
+            for (ConsortiumClient client : new ArrayList<>(clients)) {
+                client.end(409, body, seq, line, coinsCharged);
+            }
+            clients.clear();
+            checkpoint();
+            if (store != null) {
+                store.paused(storeKey, retentionHours);
+            }
+        }
+        LOG.info("consortium " + storeKey + " paused at " + phaseNow() + " round " + roundNow());
+        onPaused.run();
+        return "paused";
+    }
+
+    /**
+     * Takes providers off the panel or puts them back, to match {@code newSkip} (and, when given,
+     * {@code providers}): the panel becomes everyone the call could seat, in rank order, less
+     * those skipped. A provider taken off has its turn in flight called off and refunded and takes
+     * no more; one put back joins from the next stage — it drafts only if drafting has not begun,
+     * and otherwise reviews, revises and edits as anyone else. If the editor is taken off, editing
+     * passes on as when an editor fails ({@code editor_changed}), and a merge or revision it was
+     * writing is started again by the new one.
+     *
+     * @param act whether the call is running here and should carry on accordingly; false for a
+     *            paused or just-restored call, which picks the change up when it runs
+     * @return the panel now, or null when the skip would leave nobody on it (nothing changes)
+     */
+    List<String> applySkip(Set<String> newSkip, Set<String> providers, boolean act) {
+        List<String> removed = new ArrayList<>();
+        List<String> added = new ArrayList<>();
+        String oldEditor;
+        String stageNow;
+        int roundNow;
+        synchronized (this) {
+            List<String> desired = new ArrayList<>();
+            for (String provider : eligible) {
+                if ((providers == null || providers.contains(provider)) && !newSkip.contains(provider)) {
+                    desired.add(provider);
+                }
+            }
+            if (desired.isEmpty()) {
+                return null;
+            }
+            if (finished) {
+                return new ArrayList<>(panel);
+            }
+            skip = new LinkedHashSet<>(newSkip);
+            for (String provider : panel) {
+                if (!desired.contains(provider)) {
+                    removed.add(provider);
+                }
+            }
+            for (String provider : desired) {
+                if (!panel.contains(provider)) {
+                    added.add(provider);
+                }
+            }
+            if (removed.isEmpty() && added.isEmpty()) {
+                checkpoint();
+                return new ArrayList<>(panel);
+            }
+            panel = desired;
+            emit("panel_changed", "\"removed\":" + ConsortiumHandler.stringList(removed)
+                    + ",\"added\":" + ConsortiumHandler.stringList(added)
+                    + ",\"panel\":" + ConsortiumHandler.stringList(panel));
+            oldEditor = editor;
+            stageNow = phase;
+            roundNow = round;
+        }
+        for (String provider : removed) {
+            cancelTurn(provider);
+        }
+        boolean editorRemoved = removed.contains(oldEditor);
+        if (editorRemoved) {
+            String next = nextEditor(Set.of(), true);
+            if (next == null) {
+                next = nextEditor(Set.of(), false);
+            }
+            if (next == null) {
+                next = panelNow().get(0);
+            }
+            changeEditor(oldEditor, next, "taken off the panel", stageNow, roundNow);
+        }
+        synchronized (this) {
+            checkpoint();
+        }
+        LOG.info("consortium " + storeKey + " panel now " + panelNow() + " (removed " + removed + ", added " + added + ")");
+        if (act && !isPaused() && !isFinished()) {
+            if (editorRemoved && "merge".equals(stageNow)) {
+                startMerge();
+            } else if (editorRemoved && "revise".equals(stageNow)) {
+                startRevise();
+            } else if (editorRemoved && lead && "draft".equals(stageNow)) {
+                runDrafts();
+            }
+            // Taking off the last member still owed a turn ends the stage.
+            if (tryAdvance()) {
+                advance();
+            }
+        }
+        return panelNow();
     }
 
     // ---- Persistence -----------------------------------------------------------------------------
@@ -242,6 +440,10 @@ final class ConsortiumSession {
         state.put("max_output_tokens", maxOutputTokens);
         state.put("context", context.snapshot());
         state.put("phase", phase);
+        state.put("eligible", new ArrayList<>(eligible));
+        state.put("skip", new ArrayList<>(skip));
+        state.put("stage_members", new ArrayList<>(stageMembers));
+        state.put("paused", paused);
         state.put("round", round);
         state.put("draft_providers", new ArrayList<>(draftProviders));
         state.put("drafts", new ArrayList<>(drafts));
@@ -313,6 +515,12 @@ final class ConsortiumSession {
                 UpstreamTimer.NONE,
                 SharedContext.restore((Map<?, ?>) state.get("context"), config.getConsortium().getMaxContextChars()));
         session.phase = str(state.get("phase"));
+        // Checkpoints written before panels could change have none of these; the panel stands in.
+        session.eligible = state.get("eligible") instanceof List ? strings(state.get("eligible")) : session.panel;
+        session.skip = new LinkedHashSet<>(strings(state.get("skip")));
+        session.stageMembers.addAll(state.get("stage_members") instanceof List
+                ? strings(state.get("stage_members")) : session.panel);
+        session.paused = Boolean.TRUE.equals(state.get("paused"));
         session.round = num(state.get("round"));
         session.draftProviders.addAll(strings(state.get("draft_providers")));
         session.skippedJson.addAll(strings(state.get("skipped")));
@@ -489,9 +697,11 @@ final class ConsortiumSession {
                 attach(ctx, stream);
             }
             emit("start", startFields(false));
+            stageMembers.clear();
+            stageMembers.addAll(panel);
             checkpoint();
         }
-        beginDrafts();
+        runDrafts();
     }
 
     /** The initial checkpoint, for {@link ConsortiumStore#create}. */
@@ -544,6 +754,8 @@ final class ConsortiumSession {
                 calls--;
             }
             pendingHolds.clear();
+            paused = false;
+            stageAdvanced = false;
             from = phase;
             fromRound = round;
             // The start event says so too, for a client that re-attaches from the beginning.
@@ -561,7 +773,7 @@ final class ConsortiumSession {
         LOG.info("consortium " + storeKey + " resumed at " + from + " round " + fromRound);
         switch (from) {
             case "draft":
-                beginDrafts();
+                runDrafts();
                 break;
             case "merge":
                 startMerge();
@@ -609,20 +821,65 @@ final class ConsortiumSession {
                 + ",\"status\":" + Json.string(status);
     }
 
-    /** Who writes the first answer: the whole panel, or — in lead mode — the editor alone. */
-    private List<String> draftPanel() {
-        return lead ? List.of(editor()) : panel;
+    /**
+     * Who writes the first answer: the stage's members — the whole panel as it was when drafting
+     * began, less anyone taken off since — or, in lead mode, the editor alone.
+     */
+    private synchronized List<String> draftMembers() {
+        if (lead) {
+            return List.of(editor);
+        }
+        List<String> members = new ArrayList<>(stageMembers);
+        members.retainAll(panel);
+        return members;
     }
 
-    private void beginDrafts() {
+    private synchronized List<String> reviewMembers() {
+        List<String> members = new ArrayList<>(stageMembers);
+        members.retainAll(panel);
+        return members;
+    }
+
+    /**
+     * Whether the running stage is over and this caller is the one to move the call on. Every
+     * turn's callback asks, and so does a panel change (taking off the last member still owed a
+     * turn ends the stage too); exactly one of them gets yes.
+     */
+    private synchronized boolean tryAdvance() {
+        if (stageAdvanced || paused || finished) {
+            return false;
+        }
+        boolean over = "draft".equals(phase) ? draftsFinished.containsAll(draftMembers())
+                : "review".equals(phase) && reviewersFinished.containsAll(reviewMembers());
+        if (over) {
+            stageAdvanced = true;
+        }
+        return over;
+    }
+
+    private void advance() {
+        String now;
+        synchronized (this) {
+            now = phase;
+        }
+        if ("draft".equals(now)) {
+            afterDrafts();
+        } else if ("review".equals(now)) {
+            afterReviewRound();
+        }
+    }
+
+    private void runDrafts() {
         List<String> drafters;
         synchronized (this) {
             phase = "draft";
-            drafters = new ArrayList<>(draftPanel());
+            drafters = new ArrayList<>(draftMembers());
             drafters.removeAll(draftsFinished);
         }
         if (drafters.isEmpty()) {
-            afterDrafts();
+            if (tryAdvance()) {
+                afterDrafts();
+            }
             return;
         }
         String system = poll ? ConsortiumPrompts.pollSystem()
@@ -631,7 +888,6 @@ final class ConsortiumSession {
                 : lead ? ConsortiumPrompts.leadDraftTask() : ConsortiumPrompts.draftTask();
         for (String provider : drafters) {
             turn(provider, system, task, "draft", 0, null, (text, error) -> {
-                boolean last;
                 synchronized (this) {
                     if (text != null) {
                         draftProviders.add(provider);
@@ -639,7 +895,6 @@ final class ConsortiumSession {
                         draftModels.add(answeredBy.get(provider));
                     }
                     draftsFinished.add(provider);
-                    last = draftsFinished.containsAll(draftPanel());
                     checkpoint();
                 }
                 if (lead && text == null && !insufficient()) {
@@ -649,11 +904,11 @@ final class ConsortiumSession {
                     String next = nextEditor(draftsFinished, false);
                     if (next != null) {
                         changeEditor(provider, next, error, "draft", 0);
-                        beginDrafts();
+                        runDrafts();
                         return;
                     }
                 }
-                if (last) {
+                if (tryAdvance()) {
                     afterDrafts();
                 }
             });
@@ -748,6 +1003,9 @@ final class ConsortiumSession {
             commentProviders.clear();
             comments.clear();
             clearedBy.clear();
+            stageMembers.clear();
+            stageMembers.addAll(panel);
+            stageAdvanced = false;
             checkpoint();
         }
         runReviews();
@@ -757,12 +1015,14 @@ final class ConsortiumSession {
         List<String> reviewers;
         int thisRound;
         synchronized (this) {
-            reviewers = new ArrayList<>(panel);
+            reviewers = reviewMembers();
             reviewers.removeAll(reviewersFinished);
             thisRound = round;
         }
         if (reviewers.isEmpty()) {
-            afterReviewRound();
+            if (tryAdvance()) {
+                afterReviewRound();
+            }
             return;
         }
         // Every reviewer in a round reviews the same record, which is what makes their comments
@@ -774,7 +1034,6 @@ final class ConsortiumSession {
         for (String provider : reviewers) {
             turn(provider, system, task, "review", thisRound, null, (text, error) -> {
                 boolean clean = text != null && ConsortiumPrompts.isClean(text);
-                boolean last;
                 synchronized (this) {
                     if (text != null) {
                         reviewJson.add("{\"round\":" + thisRound
@@ -789,10 +1048,9 @@ final class ConsortiumSession {
                         }
                     }
                     reviewersFinished.add(provider);
-                    last = reviewersFinished.containsAll(panel);
                     checkpoint();
                 }
-                if (last) {
+                if (tryAdvance()) {
                     afterReviewRound();
                 }
             });
@@ -1002,8 +1260,29 @@ final class ConsortiumSession {
         boolean mayRead = readingOpen;
         byte[] body = ChatAdapter.body(provider, model, fullSystem, context.forTurn(fullTask), maxOutputTokens);
         String path = ChatAdapter.path(provider, model);
+        Attempt attempt = new Attempt();
+        synchronized (this) {
+            // Paused, or taken off the panel: this turn is not to run. Nothing is said to the
+            // stage — a pause resumes it from the checkpoint, a removal ends the provider's part.
+            if (paused || finished || (!panel.contains(provider) && !provider.equals(editor))) {
+                return;
+            }
+            inFlight.put(provider, attempt);
+        }
 
         ledger.debitForCall(wallet, CALL_COST_AICOIN, provider, debit -> {
+            synchronized (this) {
+                if (attempt.abandoned) {
+                    // Called off while the coin was being held: give it straight back.
+                    if (debit.isReachable() && debit.isSuccess()) {
+                        ledger.refund(wallet, CALL_COST_AICOIN, provider);
+                    }
+                    return;
+                }
+                if (!debit.isReachable() || !debit.isSuccess()) {
+                    inFlight.remove(provider, attempt);
+                }
+            }
             if (!debit.isReachable()) {
                 failTurn(stage, round, provider, model, "could not validate wallet");
                 onDone.accept(null, "could not validate wallet");
@@ -1019,14 +1298,24 @@ final class ConsortiumSession {
             }
             synchronized (this) {
                 calls++;
+                attempt.holdTaken = true;
                 pendingHolds.add(provider);
                 emit("turn", turnFields(stage, round, provider, model, "started") + fallbackFields);
                 checkpoint();
             }
             long startedNanos = System.nanoTime();
             long startedMillis = System.currentTimeMillis();
-            UpstreamCall.post(group, config, healthTracker, provider, path, ChatAdapter.headers(provider), body,
+            Runnable cancel = UpstreamCall.post(group, config, healthTracker, provider, path,
+                    ChatAdapter.headers(provider), body,
                     timer, config.getConsortium().getTurnReadTimeoutSeconds(), result -> {
+                        synchronized (this) {
+                            // Called off: the coin was already given back and nobody is waiting.
+                            if (attempt.abandoned || attempt.settled) {
+                                return;
+                            }
+                            attempt.settled = true;
+                            inFlight.remove(provider, attempt);
+                        }
                         double seconds = Math.round((System.nanoTime() - startedNanos) / 1e8) / 10.0;
                         if (!result.isOk()) {
                             // Refused or never answered: the provider billed nothing, so neither
@@ -1131,7 +1420,50 @@ final class ConsortiumSession {
                         }
                         onDone.accept(text, null);
                     });
+            boolean cancelNow;
+            synchronized (this) {
+                attempt.cancel = cancel;
+                cancelNow = attempt.abandoned;
+            }
+            if (cancelNow) {
+                cancel.run();
+            }
         });
+    }
+
+    /** One turn in flight: whether its coin is held, whether it settled, and how to call it off. */
+    private static final class Attempt {
+        boolean holdTaken;
+        boolean settled;
+        boolean abandoned;
+        Runnable cancel;
+    }
+
+    /**
+     * Calls off a provider's turn in flight, like a failed turn as far as the wallet is
+     * concerned: its held coin is given back, and nothing it might still answer is read or
+     * billed. Whoever asked for the turn is not told — the caller of this decides what the stage
+     * does next.
+     */
+    private void cancelTurn(String provider) {
+        Runnable cancel;
+        synchronized (this) {
+            Attempt attempt = inFlight.remove(provider);
+            if (attempt == null) {
+                return;
+            }
+            attempt.abandoned = true;
+            if (attempt.holdTaken && !attempt.settled) {
+                attempt.settled = true;
+                ledger.refund(wallet, CALL_COST_AICOIN, provider);
+                pendingHolds.remove(provider);
+            }
+            cancel = attempt.cancel;
+            emit("turn", turnFields(phase, round, provider, modelFor(provider), "cancelled"));
+        }
+        if (cancel != null) {
+            cancel.run();
+        }
     }
 
     /** Records a turn that produced nothing, and tells every watching client. */

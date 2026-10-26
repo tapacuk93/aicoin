@@ -32,6 +32,7 @@ final class ConsortiumConfig {
     private final int maxLibraryReads;
     private int callRetentionHours = 24;
     private int callLeaseSeconds = 30;
+    private int pausedRetentionHours = 24;
 
     ConsortiumConfig(boolean enabled, int maxRounds, int maxOutputTokens, int maxContextChars,
                       int leadContextChars, String editor, Map<String, String> models) {
@@ -242,6 +243,19 @@ final class ConsortiumConfig {
      */
     int getCallLeaseSeconds() {
         return callLeaseSeconds;
+    }
+
+    /**
+     * How long a paused call is kept for its caller to resume; after it the call is deleted and a
+     * request for it is answered {@code 410}, so the client starts afresh.
+     */
+    int getPausedRetentionHours() {
+        return pausedRetentionHours;
+    }
+
+    ConsortiumConfig withPausedRetention(int hours) {
+        this.pausedRetentionHours = Math.max(1, hours);
+        return this;
     }
 
     ConsortiumConfig withCalls(int retentionHours, int leaseSeconds) {

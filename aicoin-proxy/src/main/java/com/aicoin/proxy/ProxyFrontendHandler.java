@@ -317,6 +317,21 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
 
+        if (path.startsWith("/consortium/") && path.length() > "/consortium/".length()) {
+            if (!config.getConsortium().isEnabled()) {
+                sendJsonError(ctx, HttpResponseStatus.NOT_FOUND, "consortium is not enabled");
+                return;
+            }
+            // A caller's controls over its own running call: pause it, or change who is on its
+            // panel. They spend nothing themselves, so they are not held to the app's daily cap.
+            byte[] controlBody = ByteBufUtil.getBytes(request.content());
+            String method = request.method().name();
+            String tail = path.substring("/consortium/".length());
+            requireApiToken(ctx, request, false, walletAddress ->
+                    ConsortiumHandler.serveControl(ctx, method, tail, controlBody, walletAddress));
+            return;
+        }
+
         if (request.method() == HttpMethod.POST && "/consortium".equals(path)) {
             if (!config.getConsortium().isEnabled()) {
                 sendJsonError(ctx, HttpResponseStatus.NOT_FOUND, "consortium is not enabled");

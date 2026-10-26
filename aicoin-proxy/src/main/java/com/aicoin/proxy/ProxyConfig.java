@@ -664,7 +664,9 @@ public final class ProxyConfig {
         return new ConsortiumConfig(enabled, maxRounds, maxOutputTokens, maxContextChars,
                 leadContextChars, editor, models, bestModels, maxOutputTokensCeiling,
                 turnReadTimeoutSeconds, maxLibraryChars, maxLibraryEntries, maxReadsPerTurn,
-                maxLibraryReads).withCalls(callRetentionHours, callLeaseSeconds);
+                maxLibraryReads).withCalls(callRetentionHours, callLeaseSeconds)
+                .withPausedRetention(envInt(env, "AICOIN_PROXY_CONSORTIUM_PAUSED_RETENTION_HOURS",
+                        getInt(yaml, "consortium.pausedRetentionHours", 24)));
     }
 
     /**

@@ -34,7 +34,7 @@ import java.util.logging.Logger;
  * stale balance check and overdraw); both run as single Redis Lua scripts,
  * which Redis executes atomically with respect to every other client.
  */
-final class AicoinLedger implements AutoCloseable {
+class AicoinLedger implements AutoCloseable {
 
     private static final Logger LOG = Logger.getLogger(AicoinLedger.class.getName());
 
@@ -238,6 +238,18 @@ final class AicoinLedger implements AutoCloseable {
         this.connection = client.connect();
         this.commands = connection.async();
         this.appCaps = new AppCaps(new AppCaps.RedisStore(commands));
+    }
+
+    /**
+     * No connection at all: for a test that stands in for the ledger by overriding the calls it
+     * needs (debit, settle, refund, record). Every other method would fail on the missing
+     * connection, which is the point — a test that reaches one has left the seam it meant to use.
+     */
+    AicoinLedger() {
+        this.client = null;
+        this.connection = null;
+        this.commands = null;
+        this.appCaps = null;
     }
 
     /** The ledger's Redis connection, shared with {@link AdminAlerts} so alerts need no second one. */
