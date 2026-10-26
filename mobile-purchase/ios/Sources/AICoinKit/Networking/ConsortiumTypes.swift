@@ -44,6 +44,42 @@ public struct ConsortiumLibrary: Sendable, Equatable {
     }
 }
 
+/// What to push when a durable consortium call (one with a `callID`) ends while the app is not
+/// watching it — so the app can let iOS suspend it instead of holding a background task that iOS
+/// cuts short. Sent only to this wallet's devices registered for `topic` (see
+/// `AICoinCapabilityClient.registerPushDevice`), and only if no client has the call's stream open
+/// when it ends. The push carries `data` beside `aps`, plus `call_id`, so a tap can re-attach.
+public struct ConsortiumNotify: Sendable, Equatable {
+    /// The app's bundle id — the APNs topic.
+    public var topic: String
+    public var title: String
+    public var body: String?
+    /// Opaque keys for the app, at most 1 KB as JSON.
+    public var data: [String: String]
+    /// What to say if the call fails; without them a failure pushes nothing.
+    public var failureTitle: String?
+    public var failureBody: String?
+
+    public init(topic: String, title: String, body: String? = nil, data: [String: String] = [:],
+                failureTitle: String? = nil, failureBody: String? = nil) {
+        self.topic = topic
+        self.title = title
+        self.body = body
+        self.data = data
+        self.failureTitle = failureTitle
+        self.failureBody = failureBody
+    }
+
+    var json: [String: Any] {
+        var out: [String: Any] = ["topic": topic, "title": title]
+        if let body { out["body"] = body }
+        if !data.isEmpty { out["data"] = data }
+        if let failureTitle { out["failure_title"] = failureTitle }
+        if let failureBody { out["failure_body"] = failureBody }
+        return out
+    }
+}
+
 /// Which models a consortium seats. `.best` is each provider's strongest model, at several times
 /// the price per turn.
 public enum ConsortiumQuality: String, Sendable {

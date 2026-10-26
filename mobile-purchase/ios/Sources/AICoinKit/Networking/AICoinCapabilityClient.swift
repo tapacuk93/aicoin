@@ -141,6 +141,8 @@ public struct AICoinCapabilityClient: Sendable {
     ///     back at once if it has finished. Nothing is charged again. Generate it once per piece of
     ///     work (a UUID) and keep it until the result is in hand. The other arguments are ignored
     ///     when the id already names a call.
+    ///   - notify: with a `callID`, push this when the call ends while no client is attached —
+    ///     see `ConsortiumNotify`.
     ///   - idleTimeout: streaming only. The proxy sends a line at least every 15 s, so this long
     ///     with none means the connection is dead even if nothing said so (a proxy restart can
     ///     leave a stream silent rather than closed). It then throws an error
@@ -151,10 +153,13 @@ public struct AICoinCapabilityClient: Sendable {
         maxRounds: Int? = nil, timeout: TimeInterval = 600,
         library: ConsortiumLibrary? = nil, quality: ConsortiumQuality? = nil,
         maxOutputTokens: Int? = nil, callID: String? = nil, idleTimeout: TimeInterval = 45,
+        notify: ConsortiumNotify? = nil,
         onEvent: (@Sendable (ConsortiumEvent) -> Void)? = nil
     ) async throws -> TextAnswer {
         var body: [String: Any] = ["prompt": prompt, "mode": mode]
         if let callID { body["call_id"] = callID }
+        // Only a durable call is told about later; the proxy ignores `notify` without an id.
+        if let notify, callID != nil { body["notify"] = notify.json }
         if let context, !context.isEmpty { body["context"] = context }
         if let maxRounds { body["max_rounds"] = maxRounds }
         if let library { body["library"] = library.json }
@@ -262,6 +267,40 @@ public struct AICoinCapabilityClient: Sendable {
             if let event = ConsortiumEvent.parse(object) { onEvent(event) }
             return nil
         }
+    }
+
+    // MARK: - Push devices
+
+    /// `POST /push/devices`: tell this wallet's durable calls (see `consortium(callID:notify:)`) to
+    /// push to this device when they end unwatched. Free. `token` is what
+    /// `didRegisterForRemoteNotificationsWithDeviceToken` hands over; `topic` is the app's bundle
+    /// id; `environment` is `"sandbox"` for a development-signed build, `"production"` for
+    /// TestFlight and the App Store — the APNs host that can reach the device.
+    public func registerPushDevice(token: Data, topic: String, environment: String) async throws {
+        _ = try await sendFree("push/devices", method: "POST",
+                               body: Self.pushBody(token: token, topic: topic, environment: environment))
+    }
+
+    /// `DELETE /push/devices`: stop pushing to this device for this wallet (sign-out, a new wallet).
+    public func unregisterPushDevice(token: Data, topic: String, environment: String) async throws {
+        _ = try await sendFree("push/devices", method: "DELETE",
+                               body: Self.pushBody(token: token, topic: topic, environment: environment))
+    }
+
+    static func pushBody(token: Data, topic: String, environment: String) -> [String: Any] {
+        ["token": token.map { String(format: "%02x", $0) }.joined(), "topic": topic, "environment": environment]
+    }
+
+    /// A call that costs nothing: same token and errors as a paid one, but no "balance changed".
+    private func sendFree(_ path: String, method: String, body: [String: Any]) async throws -> Data {
+        var request = try makeRequest(path, body: body, timeout: 30)
+        request.httpMethod = method
+        let (data, response) = try await transport.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw AICoinError.server(status: status, message: Self.errorMessage(from: data))
+        }
+        return data
     }
 
     /// `POST /image`. `size` is the provider-neutral `"1024x1024"` form.

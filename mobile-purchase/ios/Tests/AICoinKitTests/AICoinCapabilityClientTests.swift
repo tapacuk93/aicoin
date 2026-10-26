@@ -468,4 +468,45 @@ final class AICoinCapabilityClientTests: XCTestCase {
                                                              reason: "upstream timed out", stage: "merge", round: 0)))
         XCTAssertEqual(log.events.last?.seq, 2)
     }
+
+    // MARK: - Push
+
+    func testPushDevicesAreRegisteredAndForgottenWithAHexToken() async throws {
+        let bus = AICoinEventBus()
+        var events: [AICoinEvent] = []
+        let subscription = bus.events.sink { events.append($0) }
+        defer { subscription.cancel() }
+        let transport = StubTransport("", status: 204)
+        let token = Data([0xde, 0xad, 0xbe, 0xef, 0x00, 0x0a])
+
+        try await client(transport, bus: bus).registerPushDevice(token: token, topic: "com.oeaio.infiniteaibook", environment: "sandbox")
+        try await client(transport, bus: bus).unregisterPushDevice(token: token, topic: "com.oeaio.infiniteaibook", environment: "sandbox")
+
+        let requests = transport.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["POST", "DELETE"])
+        XCTAssertEqual(requests[0].url?.path, "/push/devices")
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "X-Api-Key"), "tok")
+        let body = sentBody(requests[0])
+        XCTAssertEqual(body["token"] as? String, "deadbeef000a")
+        XCTAssertEqual(body["topic"] as? String, "com.oeaio.infiniteaibook")
+        XCTAssertEqual(body["environment"] as? String, "sandbox")
+        XCTAssertTrue(events.isEmpty, "registering is free, so the balance did not change")
+    }
+
+    func testNotifyIsSentOnlyWithACallID() async throws {
+        let notify = ConsortiumNotify(topic: "com.oeaio.infiniteaibook", title: "Chapter ready", body: "Trade routes",
+                                      data: ["book": "salt-road"], failureTitle: "Chapter failed")
+        let transport = StubTransport(#"{"answer":"a"}"#)
+        _ = try await client(transport).consortium(prompt: "Q", callID: "c1", notify: notify)
+        _ = try await client(transport).consortium(prompt: "Q", notify: notify)
+
+        let sent = try XCTUnwrap(sentBody(transport.requests[0])["notify"] as? [String: Any])
+        XCTAssertEqual(sent["topic"] as? String, "com.oeaio.infiniteaibook")
+        XCTAssertEqual(sent["title"] as? String, "Chapter ready")
+        XCTAssertEqual(sent["body"] as? String, "Trade routes")
+        XCTAssertEqual(sent["data"] as? [String: String], ["book": "salt-road"])
+        XCTAssertEqual(sent["failure_title"] as? String, "Chapter failed")
+        XCTAssertNil(sent["failure_body"])
+        XCTAssertNil(sentBody(transport.requests[1])["notify"], "a call without an id cannot be told about later")
+    }
 }
