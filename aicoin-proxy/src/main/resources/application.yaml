@@ -271,6 +271,9 @@ consortium:
   # How long a process's claim on a running call lasts unrenewed; after it a dead owner's calls
   # are resumed elsewhere. Env: AICOIN_PROXY_CONSORTIUM_CALL_LEASE_SECONDS.
   callLeaseSeconds: 30
+  # A call paused by its caller (POST /consortium/{call_id}/pause) is kept this long to be resumed,
+  # then deleted; its id answers 410 for a week after. Env: AICOIN_PROXY_CONSORTIUM_PAUSED_RETENTION_HOURS.
+  pausedRetentionHours: 24
   # How much of the panel's shared record one turn may be given. Every panelist sees the record on
   # every turn, so this is multiplied by the panel size and by the rounds, and every character is
   # billed as input. Past it the oldest rounds are dropped; the request, the caller's background and
