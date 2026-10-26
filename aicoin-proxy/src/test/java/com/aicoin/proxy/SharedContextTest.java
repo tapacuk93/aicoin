@@ -91,4 +91,22 @@ class SharedContextTest {
         assertTrue(turn.contains("What is 2+2?"));
         assertTrue(turn.trim().endsWith("Review the answer."), "the task line comes last, after the record");
     }
+
+    @Test
+    void theLibraryIndexAndReadPartsAreNeverDroppedAndDoNotCrowdOutTheRounds() {
+        // Small limit: the rounds alone fit, the library parts alone would not.
+        SharedContext context = new SharedContext("Write 2.1", null, 400);
+        context.addLibraryIndex("1  Origins  (900 words)\n2.1  Routes  <== being written now");
+        context.addLibraryRead("Part 1 \u201cOrigins\u201d of the work — read at Kimi's request while drafting",
+                "x".repeat(2000));
+        context.addAnswer("The answer as it now stands", "the chapter");
+        context.addReviews(1, List.of("openai"), List.of("too short"), List.of());
+
+        String rendered = context.render();
+        assertTrue(rendered.contains("Origins  (900 words)"), "the index is kept whole");
+        assertTrue(rendered.contains("x".repeat(2000)), "a part that was read stays read");
+        assertTrue(rendered.contains("read at Kimi's request"), "and says who asked for it");
+        assertTrue(rendered.contains("too short"), "reads are outside the limit, so the round still fits");
+        assertFalse(rendered.contains("[truncated]"));
+    }
 }

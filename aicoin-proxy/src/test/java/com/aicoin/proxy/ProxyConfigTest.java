@@ -323,4 +323,38 @@ class ProxyConfigTest {
         assertEquals("kimi-key-123", kimi.getApiKey());
         assertEquals("http://localhost:3333", kimi.getBaseUrl());
     }
+
+    @Test
+    void bestModelsAreConfiguredAndFallBackToTheEverydayModel() {
+        ConsortiumConfig consortium = ProxyConfig.load(new HashMap<>()).getConsortium();
+        assertEquals("claude-opus-5-5", consortium.modelFor("anthropic", true));
+        assertEquals("claude-sonnet-5", consortium.modelFor("anthropic", false));
+        // No best model is configured for Mistral, so "best" keeps its seat with its usual model.
+        assertEquals(consortium.modelFor("mistral"), consortium.modelFor("mistral", true));
+
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_CONSORTIUM_MISTRAL_BEST_MODEL", "mistral-huge");
+        assertEquals("mistral-huge", ProxyConfig.load(env).getConsortium().modelFor("mistral", true));
+    }
+
+    @Test
+    void aCallerMayRaiseTheOutputCapOnlyUpToTheCeiling() {
+        ConsortiumConfig consortium = ProxyConfig.load(new HashMap<>()).getConsortium();
+        assertEquals(32000, consortium.getMaxOutputTokensCeiling());
+        assertEquals(4000, consortium.outputTokensFor(null), "no ask: the default");
+        assertEquals(20000, consortium.outputTokensFor(20000));
+        assertEquals(32000, consortium.outputTokensFor(1_000_000), "clamped, not refused");
+        assertEquals(600, consortium.getTurnReadTimeoutSeconds());
+        assertEquals(600000, consortium.getMaxLibraryChars());
+        assertEquals(2000, consortium.getMaxLibraryEntries());
+        assertEquals(3, consortium.getMaxReadsPerTurn());
+        assertEquals(20, consortium.getMaxLibraryReads());
+
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS_CEILING", "8000");
+        env.put("AICOIN_PROXY_CONSORTIUM_MAX_LIBRARY_READS", "2");
+        ConsortiumConfig narrowed = ProxyConfig.load(env).getConsortium();
+        assertEquals(8000, narrowed.outputTokensFor(20000));
+        assertEquals(2, narrowed.getMaxLibraryReads());
+    }
 }

@@ -129,4 +129,33 @@ class ConsortiumPromptsTest {
         assertNull(ConsortiumPrompts.editedAnswer("<<<ANSWER\n\nANSWER>>>"));
         assertNull(ConsortiumPrompts.editedAnswer(null));
     }
+
+    @Test
+    void aReplyOfOnlyReadLinesIsARequestToRead() {
+        assertEquals(java.util.List.of("2.3", "1"), ConsortiumPrompts.readRequest("READ 2.3\nread 1\n"));
+        assertEquals(java.util.List.of("4.1"), ConsortiumPrompts.readRequest("**READ 4.1.**"),
+                "emphasis and a closing full stop are how models write a line, not part of the ref");
+        assertEquals(java.util.List.of("2"), ConsortiumPrompts.readRequest("READ 2\n\nREAD 2"),
+                "asking twice in one reply is one request");
+        assertEquals(java.util.List.of("1", "2"), ConsortiumPrompts.readRequest("- READ 1\n- READ 2"));
+    }
+
+    @Test
+    void aReplyThatAlsoSaysAnythingElseIsAnAnswer() {
+        // Strict for the reason NO COMMENTS is: a chapter that happens to contain "READ 2" must
+        // stay a chapter, not be thrown away and paid for again.
+        assertEquals(null, ConsortiumPrompts.readRequest("I need more context.\nREAD 2.3"));
+        assertEquals(null, ConsortiumPrompts.readRequest("READ 2.3 and 2.4"));
+        assertEquals(null, ConsortiumPrompts.readRequest("READ"));
+        assertEquals(null, ConsortiumPrompts.readRequest(""));
+        assertEquals(null, ConsortiumPrompts.readRequest(null));
+    }
+
+    @Test
+    void theLibraryTaskSaysWhetherReadingIsOpen() {
+        assertTrue(ConsortiumPrompts.libraryTask(true, 5, null).contains("at most 5 more parts"));
+        String closed = ConsortiumPrompts.libraryTask(false, 0, "You asked to read 9. 9 is not in the contents.");
+        assertTrue(closed.contains("Reading is closed"));
+        assertTrue(closed.contains("9 is not in the contents"), "the turn hears what came of its request");
+    }
 }

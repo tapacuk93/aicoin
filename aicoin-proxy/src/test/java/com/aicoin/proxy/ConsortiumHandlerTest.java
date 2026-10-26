@@ -157,4 +157,21 @@ class ConsortiumHandlerTest {
         List<String> panel = ConsortiumHandler.panel(ProxyConfig.load(env), null, "writing", null);
         assertEquals(List.of("anthropic", "mistral"), panel);
     }
+
+    @Test
+    void aBestPanelSeatsEveryoneAnEverydayPanelWould() {
+        // "best" changes which model a provider sends, never who is on the panel: Mistral has no
+        // best model configured and keeps its seat with its usual one.
+        ProxyConfig config = configWithKeys("anthropic", "mistral");
+        assertEquals(ConsortiumHandler.panel(config, null, null, null, false),
+                ConsortiumHandler.panel(config, null, null, null, true));
+    }
+
+    @Test
+    void aLibraryDoesNotCountTowardsLeadingTheCall() {
+        // Only `context` decides auto; the library's text is not in the record, so its size says
+        // nothing about how much each drafter would be re-reading.
+        assertFalse(ConsortiumHandler.isLeadMode("auto", null, 8000));
+        assertFalse(ConsortiumHandler.isLeadMode("auto", "short context", 8000));
+    }
 }

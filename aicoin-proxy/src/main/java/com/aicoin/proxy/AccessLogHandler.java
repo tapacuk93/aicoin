@@ -5,6 +5,9 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpContent;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.LastHttpContent;
 import java.util.Optional;
 
 /**
@@ -46,6 +49,14 @@ final class AccessLogHandler extends ChannelDuplexHandler {
     private long startNanos;
     private UpstreamTimer upstreamTimer = UpstreamTimer.NONE;
     private boolean pending;
+    /**
+     * A streamed response in flight ({@code POST /consortium} with {@code stream: true}): its
+     * status went out with the headers, its bytes are counted as the chunks pass, and the line
+     * is written when the last chunk does — that is when the call is over and its cost (sent as
+     * an {@code X-Aicoin-Charged} trailer, since it was not known when the headers left) exists.
+     */
+    private int streamStatus = -1;
+    private int streamBytes;
 
     AccessLogHandler(AccessLog accessLog) {
         this.accessLog = accessLog;
@@ -72,6 +83,7 @@ final class AccessLogHandler extends ChannelDuplexHandler {
             startNanos = System.nanoTime();
             upstreamTimer = UpstreamTimer.startRequest(ctx.channel());
             pending = true;
+            streamStatus = -1;
         }
         ctx.fireChannelRead(msg);
     }
@@ -84,6 +96,18 @@ final class AccessLogHandler extends ChannelDuplexHandler {
             long[] timing = timing();
             response.headers().set(X_OVERHEAD_HEADER, Long.toString(timing[2]));
             log(response.status().code(), response.content().readableBytes(), coins, "ok", timing);
+        } else if (pending && msg instanceof HttpResponse) {
+            streamStatus = ((HttpResponse) msg).status().code();
+            streamBytes = 0;
+        } else if (pending && streamStatus >= 0 && msg instanceof HttpContent) {
+            streamBytes += ((HttpContent) msg).content().readableBytes();
+            if (msg instanceof LastHttpContent) {
+                String coins = Optional.ofNullable(((LastHttpContent) msg).trailingHeaders().get(X_CHARGED_HEADER))
+                        .orElse("");
+                int status = streamStatus;
+                streamStatus = -1;
+                log(status, streamBytes, coins, "ok", timing());
+            }
         }
         ctx.write(msg, promise);
     }

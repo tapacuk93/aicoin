@@ -19,6 +19,13 @@ import java.util.List;
  * is billed. Past {@code maxChars} the oldest <em>rounds</em> are dropped, in order, and their
  * absence is stated in the text; the request, the caller's background and the current answer are
  * never dropped, because a turn without those is not answerable at all.
+ *
+ * <p>A call that carries a {@link ConsortiumLibrary library} adds two more kinds of block, and
+ * both sit outside that limit: the library's contents index, and each chapter a panelist asked to
+ * read. Neither is round history the panel has moved past — the index is how a turn knows what it
+ * can ask for, and a chapter that was read was read because a turn needed it, so dropping it would
+ * only make the next turn ask (and pay) again. They are bounded elsewhere instead: the index by
+ * the library's entry limit, the reads by {@code consortium.maxLibraryReads}.
  */
 final class SharedContext {
 
@@ -28,11 +35,18 @@ final class SharedContext {
         private final String body;
         /** False for the request, the background and the latest answer — the parts a turn cannot do without. */
         private final boolean droppable;
+        /** True for the library index and chapters read from it: never dropped, not counted. */
+        private final boolean exempt;
 
         Entry(String heading, String body, boolean droppable) {
+            this(heading, body, droppable, false);
+        }
+
+        Entry(String heading, String body, boolean droppable, boolean exempt) {
             this.heading = heading;
             this.body = body;
-            this.droppable = droppable;
+            this.droppable = droppable && !exempt;
+            this.exempt = exempt;
         }
 
         int size() {
@@ -57,6 +71,22 @@ final class SharedContext {
         if (background != null && !background.trim().isEmpty()) {
             entries.add(new Entry("Background from the caller", background, false));
         }
+    }
+
+    /**
+     * The library's contents index. Kept whole and outside the size limit — see the class note.
+     */
+    synchronized void addLibraryIndex(String index) {
+        entries.add(new Entry("Contents of the work (the library) — read any written part with READ <ref>",
+                index, false, true));
+    }
+
+    /**
+     * A part of the library a panelist asked to read, under a heading saying which part and who
+     * asked at which stage — so a later turn can see it was read, and why, without asking again.
+     */
+    synchronized void addLibraryRead(String heading, String text) {
+        entries.add(new Entry(heading, text, false, true));
     }
 
     /** The drafts, labelled by panelist. Droppable: once merged, they are history. */
@@ -107,8 +137,13 @@ final class SharedContext {
     synchronized String render() {
         boolean[] dropped = new boolean[entries.size()];
         int total = OMITTED.length();
+        int exemptChars = 0;
         for (Entry entry : entries) {
-            total += entry.size();
+            if (entry.exempt) {
+                exemptChars += entry.size();
+            } else {
+                total += entry.size();
+            }
         }
         // Oldest first: the earliest rounds are the ones the panel has already moved past.
         for (int i = 0; i < entries.size() && total > maxChars; i++) {
@@ -134,8 +169,8 @@ final class SharedContext {
         // Everything left is undroppable and still too long — a single enormous request or answer.
         // Truncating the tail keeps the turn answerable rather than failing it upstream on a
         // context-length error.
-        if (rendered.length() > maxChars) {
-            return rendered.substring(0, maxChars) + "\n[truncated]\n";
+        if (rendered.length() > maxChars + exemptChars) {
+            return rendered.substring(0, maxChars + exemptChars) + "\n[truncated]\n";
         }
         return rendered;
     }

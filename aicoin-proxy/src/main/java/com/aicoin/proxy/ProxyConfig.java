@@ -593,6 +593,8 @@ public final class ProxyConfig {
      *   editor: ""            # empty: the first panelist
      *   models:
      *     anthropic: claude-sonnet-5
+     *   bestModels:           # quality: "best"; a provider without one keeps its model above
+     *     anthropic: claude-opus-5-5
      * </pre>
      */
     private static ConsortiumConfig parseConsortium(Map<String, Object> yaml, Map<String, String> env) {
@@ -618,6 +620,31 @@ public final class ProxyConfig {
             models.put(provider, model);
         }
 
+        // The models a `quality: "best"` call seats. No built-in defaults: an id here has to have
+        // been confirmed against the provider, and a provider with no entry falls back to its
+        // ordinary model (ConsortiumConfig#modelFor), so leaving one out costs nothing but strength.
+        Map<String, String> bestModels = new LinkedHashMap<>();
+        for (String provider : defaults.keySet()) {
+            String model = getString(yaml, "consortium.bestModels." + provider, "");
+            model = envStr(env, "AICOIN_PROXY_CONSORTIUM_" + provider.toUpperCase(java.util.Locale.ROOT)
+                    + "_BEST_MODEL", model);
+            if (model != null && !model.trim().isEmpty()) {
+                bestModels.put(provider, model.trim());
+            }
+        }
+        int maxOutputTokensCeiling = getInt(yaml, "consortium.maxOutputTokensCeiling", 32000);
+        int turnReadTimeoutSeconds = getInt(yaml, "consortium.turnReadTimeoutSeconds", 600);
+        int maxLibraryChars = getInt(yaml, "consortium.maxLibraryChars", 600000);
+        int maxLibraryEntries = getInt(yaml, "consortium.maxLibraryEntries", 2000);
+        int maxReadsPerTurn = getInt(yaml, "consortium.maxReadsPerTurn", 3);
+        int maxLibraryReads = getInt(yaml, "consortium.maxLibraryReads", 20);
+        maxOutputTokensCeiling = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS_CEILING", maxOutputTokensCeiling);
+        turnReadTimeoutSeconds = envInt(env, "AICOIN_PROXY_CONSORTIUM_TURN_READ_TIMEOUT_SECONDS", turnReadTimeoutSeconds);
+        maxLibraryChars = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_LIBRARY_CHARS", maxLibraryChars);
+        maxLibraryEntries = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_LIBRARY_ENTRIES", maxLibraryEntries);
+        maxReadsPerTurn = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_READS_PER_TURN", maxReadsPerTurn);
+        maxLibraryReads = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_LIBRARY_READS", maxLibraryReads);
+
         enabled = envBool(env, "AICOIN_PROXY_CONSORTIUM_ENABLED", enabled);
         maxRounds = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_ROUNDS", maxRounds);
         maxOutputTokens = envInt(env, "AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS", maxOutputTokens);
@@ -631,7 +658,9 @@ public final class ProxyConfig {
             maxRounds = 1;
         }
         return new ConsortiumConfig(enabled, maxRounds, maxOutputTokens, maxContextChars,
-                leadContextChars, editor, models);
+                leadContextChars, editor, models, bestModels, maxOutputTokensCeiling,
+                turnReadTimeoutSeconds, maxLibraryChars, maxLibraryEntries, maxReadsPerTurn,
+                maxLibraryReads);
     }
 
     /**

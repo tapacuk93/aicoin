@@ -164,6 +164,9 @@ pricing:
         claude-sonnet-5:  { inputUsdPerMillionTokens: 3.00, outputUsdPerMillionTokens: 15.00 }
         claude-haiku-4-5: { inputUsdPerMillionTokens: 1.00, outputUsdPerMillionTokens: 5.00 }
         claude-opus-5:    { inputUsdPerMillionTokens: 5.00, outputUsdPerMillionTokens: 25.00 }
+        # The consortium's `quality: "best"` Anthropic panelist; without this line it would match
+        # claude-opus-5 above and be over-recorded by a quarter.
+        claude-opus-5-5:  { inputUsdPerMillionTokens: 4.00, outputUsdPerMillionTokens: 20.00 }
     # Non-Anthropic rates below are unverified starting points — check each provider's own pricing
     # page and correct them here.
     openai:
@@ -174,6 +177,9 @@ pricing:
         # is dearer on input than GPT-5 actually is, and a rate this proxy gets wrong in either
         # direction ends up in GET /price.
         gpt-5: { inputUsdPerMillionTokens: 1.25, outputUsdPerMillionTokens: 10.00 }
+        # The `quality: "best"` panelist (developers.openai.com/api/docs/pricing, 2026-10-26; input
+        # over 272K tokens is 4.00 / 15.00, which no consortium turn reaches).
+        gpt-6.1-sol: { inputUsdPerMillionTokens: 2.00, outputUsdPerMillionTokens: 10.00 }
         # Billed per image and per clip. Both are reached through POST /image and POST /audio,
         # whose responses report either no usage at all or a token count that has nothing to do
         # with the price — so a flat figure is the only honest one. Check and correct these when
@@ -189,6 +195,10 @@ pricing:
         # rate. Without this line every consortium call through Gemini would be recorded at a
         # fraction of what it cost.
         gemini-3.5-flash: { inputUsdPerMillionTokens: 1.50, outputUsdPerMillionTokens: 9.00 }
+        # The `quality: "best"` Google panelist. Listed at 2.00 / 10.00 until 2026-11-30 and 4.00 /
+        # 20.00 from 2026-12-01 (ai.google.dev pricing); the later rate is used now, since
+        # under-recording is the failure this table exists to prevent and the change is weeks away.
+        gemini-4-argon: { inputUsdPerMillionTokens: 4.00, outputUsdPerMillionTokens: 20.00 }
         # Billed per image, not by the tokens the response happens to report. Left here as well as
         # in the built-in defaults so the figure can be corrected without a release when Google
         # moves it.
@@ -205,6 +215,10 @@ pricing:
       outputUsdPerMillionTokens: 15.00
       models:
         kimi-k3:                    { inputUsdPerMillionTokens: 3.00, outputUsdPerMillionTokens: 15.00 }
+        # K3.1 Pro is the `quality: "best"` panelist; its high-speed variant costs double, and its
+        # longer id wins the prefix match (platform.kimi.ai pricing, 2026-10-26).
+        kimi-k3.1-pro-highspeed:    { inputUsdPerMillionTokens: 4.00, outputUsdPerMillionTokens: 20.00 }
+        kimi-k3.1-pro:              { inputUsdPerMillionTokens: 2.00, outputUsdPerMillionTokens: 10.00 }
         kimi-k2.7-code-highspeed:   { inputUsdPerMillionTokens: 0.95, outputUsdPerMillionTokens: 8.00 }
         kimi-k2.7-code:             { inputUsdPerMillionTokens: 0.95, outputUsdPerMillionTokens: 4.00 }
         kimi-k2.6:                  { inputUsdPerMillionTokens: 0.95, outputUsdPerMillionTokens: 4.00 }
@@ -228,6 +242,27 @@ consortium:
   # thinking, and a turn that runs out mid-thought comes back with no text at all.
   # Env: AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS.
   maxOutputTokens: 4000
+  # The most a caller's `max_output_tokens` may raise that to; higher asks are clamped. A
+  # chapter-length answer in HTML, from a model that thinks before it writes, does not fit in the
+  # default and comes back cut off — paid for, then rejected. This bounds what one turn can cost.
+  # Env: AICOIN_PROXY_CONSORTIUM_MAX_OUTPUT_TOKENS_CEILING.
+  maxOutputTokensCeiling: 32000
+  # How long one turn may go without the provider sending a byte. Turns are not streamed, so a
+  # provider says nothing until the whole answer is written, and a long answer from a thinking
+  # model takes minutes; upstream.readTimeoutSeconds (60) abandoned every one of those just before
+  # it arrived. Env: AICOIN_PROXY_CONSORTIUM_TURN_READ_TIMEOUT_SECONDS.
+  turnReadTimeoutSeconds: 600
+  # A `library` (the larger work a request belongs to — see CONTRACT.md): most characters of text
+  # in total, and most entries. Over either is a 400. Only its index goes into the record; text
+  # comes in only when a panelist asks for it with READ <ref>.
+  # Env: AICOIN_PROXY_CONSORTIUM_MAX_LIBRARY_CHARS, _MAX_LIBRARY_ENTRIES.
+  maxLibraryChars: 600000
+  maxLibraryEntries: 2000
+  # How many READ requests one turn may make before it is told reading is closed (each re-runs the
+  # turn, and each re-run is a paid call), and how many parts one call may add to the record in all.
+  # Env: AICOIN_PROXY_CONSORTIUM_MAX_READS_PER_TURN, _MAX_LIBRARY_READS.
+  maxReadsPerTurn: 3
+  maxLibraryReads: 20
   # How much of the panel's shared record one turn may be given. Every panelist sees the record on
   # every turn, so this is multiplied by the panel size and by the rounds, and every character is
   # billed as input. Past it the oldest rounds are dropped; the request, the caller's background and
@@ -252,6 +287,19 @@ consortium:
     google: gemini-3.5-flash
     mistral: mistral-large-latest
     kimi: kimi-k2.6
+  # What each panelist answers with on a `quality: "best"` call: the strongest text model each
+  # provider listed on 2026-10-26, every id taken from that provider's own models API and confirmed
+  # with a one-line generation — except where the comment says otherwise. A provider with no entry
+  # keeps its model above, so leaving one out costs strength, never a seat.
+  # Env: AICOIN_PROXY_CONSORTIUM_<PROVIDER>_BEST_MODEL.
+  bestModels:
+    anthropic: claude-opus-5-5
+    # Newest flagship-tier ("sol") model listed. Listed but NOT confirmed by a generation: the
+    # OpenAI account had no credits left on 2026-10-26 (429 credit_balance_exhausted on every model).
+    openai: gpt-6.1-sol
+    google: gemini-4-argon
+    kimi: kimi-k3.1-pro
+    # mistral: none. No Mistral key exists locally or in production to list its models with.
 # The consolidated endpoints: POST /text, POST /image, POST /audio. One shape in, one shape out,
 # with the provider chosen here from the ratings below rather than named by the caller. See
 # CONTRACT.md's "Capability endpoints" section.

@@ -1,6 +1,10 @@
 package com.aicoin.proxy;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * The words a consortium call puts in front of each panelist, and the one signal it reads back out
@@ -42,6 +46,15 @@ final class ConsortiumPrompts {
      */
     static final String ANSWER_OPEN = "<<<ANSWER";
     static final String ANSWER_CLOSE = "ANSWER>>>";
+
+    /**
+     * The word a turn starts each line with to ask for a part of the library: {@code READ 2.3}.
+     * Read as strictly as {@link #CLEAN_REVIEW}: only a reply made of nothing but such lines is a
+     * request to read — see {@link #readRequest}.
+     */
+    static final String READ = "READ";
+
+    private static final Pattern READ_LINE = Pattern.compile("(?i)^READ\\s+(\\S+)$");
 
     private static final String ENVELOPE = "\n\nWrite the whole answer, from its first word to its last,"
             + " between a line containing only " + ANSWER_OPEN + " and a line containing only "
@@ -257,5 +270,78 @@ final class ConsortiumPrompts {
         }
         String stripped = review.trim().replaceAll("[*_`#.!\\s]+$", "").replaceAll("^[*_`#\\s]+", "");
         return stripped.toUpperCase(Locale.ROOT).equals(CLEAN_REVIEW);
+    }
+
+    /**
+     * The refs a reply asks to read, or null when the reply is not a request to read.
+     *
+     * <p>A reply is a request only when every non-blank line is {@code READ <ref>} — allowing the
+     * emphasis and backticks a model wraps a line in, and a full stop after it — and there is at
+     * least one. Strict for the reason {@link #isClean} is, with the failure running the other
+     * way: a draft that happens to contain the line "READ 2" in the middle of a chapter must stay
+     * a draft, and treating it as a request would throw the chapter away and pay to write it again.
+     */
+    static List<String> readRequest(String reply) {
+        if (reply == null) {
+            return null;
+        }
+        List<String> refs = new ArrayList<>();
+        for (String raw : reply.split("\\R")) {
+            String line = raw.trim().replaceAll("^[*_`#>\\-\\s]+", "").replaceAll("[*_`\\s]+$", "");
+            if (line.isEmpty()) {
+                continue;
+            }
+            Matcher matcher = READ_LINE.matcher(line);
+            if (!matcher.matches()) {
+                return null;
+            }
+            String ref = matcher.group(1).replaceAll("[*_`]+", "");
+            // "READ 2.3." — the full stop ends the sentence, not the ref.
+            while (ref.endsWith(".") || ref.endsWith(",") || ref.endsWith(";")) {
+                ref = ref.substring(0, ref.length() - 1);
+            }
+            if (ref.isEmpty()) {
+                return null;
+            }
+            if (!refs.contains(ref)) {
+                refs.add(ref);
+            }
+        }
+        return refs.isEmpty() ? null : refs;
+    }
+
+    /**
+     * What every system prompt gains when the call carries a library: what the index is, and the
+     * one way to read from it. Brief on purpose — it is repeated on every turn and billed each time.
+     */
+    static String librarySystem() {
+        return "\n\nThe shared record includes the contents of the larger work this request belongs to:"
+                + " every part in reading order, with its ref, title and length, the part being written"
+                + " now marked. Only the index is in the record. To read the text of a written part,"
+                + " reply with nothing but one line per part, in the form " + READ + " <ref> (for example"
+                + " \"" + READ + " 2.3\"); its text is then added to the shared record for the whole panel"
+                + " and you are asked the same thing again. Read what you actually need to get this right"
+                + " — continuity, earlier definitions, what was already said — not everything. A part"
+                + " already in the record does not need reading again.";
+    }
+
+    /**
+     * The line added to a turn's task when a library is present: how much reading is left, or
+     * that reading is closed — plus what came of this turn's last request, if it made one.
+     */
+    static String libraryTask(boolean readingOpen, int readsLeft, String lastReadNote) {
+        StringBuilder out = new StringBuilder();
+        if (lastReadNote != null && !lastReadNote.isEmpty()) {
+            out.append("\n\n").append(lastReadNote);
+        }
+        if (readingOpen) {
+            out.append("\n\nIf you need to read parts of the work first, reply with only " + READ
+                    + " <ref> lines (at most ").append(readsLeft).append(" more part")
+                    .append(readsLeft == 1 ? "" : "s").append(" this call); otherwise do the task.");
+        } else {
+            out.append("\n\nReading is closed for this turn: do the task now from what is in the record."
+                    + " Do not reply with " + READ + " lines.");
+        }
+        return out.toString();
     }
 }

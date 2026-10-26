@@ -132,6 +132,17 @@ final class UpstreamCall {
     static void post(EventLoopGroup group, ProxyConfig config, ProviderHealthTracker healthTracker,
                       String provider, String path, List<Map.Entry<String, String>> headers, byte[] body,
                       UpstreamTimer timer, Consumer<Result> onResult) {
+        post(group, config, healthTracker, provider, path, headers, body, timer,
+                config.getUpstreamReadTimeoutSeconds(), onResult);
+    }
+
+    /**
+     * As above, with the read timeout named by the caller — a consortium turn, which writes a
+     * whole long answer before sending its first byte, needs far longer than a forwarded call.
+     */
+    static void post(EventLoopGroup group, ProxyConfig config, ProviderHealthTracker healthTracker,
+                      String provider, String path, List<Map.Entry<String, String>> headers, byte[] body,
+                      UpstreamTimer timer, int readTimeoutSeconds, Consumer<Result> onResult) {
         ProviderConfig providerConfig = config.getProvider(provider);
         if (providerConfig == null) {
             onResult.accept(Result.failed("unknown provider " + provider));
@@ -185,7 +196,7 @@ final class UpstreamCall {
                             SslContext sslCtx = SslContextBuilder.forClient().build();
                             ch.pipeline().addLast(sslCtx.newHandler(ch.alloc(), host, port));
                         }
-                        ch.pipeline().addLast(new ReadTimeoutHandler(config.getUpstreamReadTimeoutSeconds()));
+                        ch.pipeline().addLast(new ReadTimeoutHandler(readTimeoutSeconds));
                         ch.pipeline().addLast(new HttpClientCodec());
                         ch.pipeline().addLast(new HttpObjectAggregator(MAX_CONTENT_LENGTH));
                         ch.pipeline().addLast(new ResponseHandler(provider, healthTracker, once));
