@@ -102,7 +102,11 @@ struct OverviewView: View {
             .task { await load() }
             .confirmationDialog(confirmTitle, isPresented: Binding(get: { raiseBy != nil }, set: { if !$0 { raiseBy = nil } }),
                                 titleVisibility: .visible) {
-                Button("Raise to \(newCeiling.usd)") { Task { await raise() } }
+                // The amount is read here, not inside the task: tapping a dialog button dismisses it,
+                // and the dismissal clears `raiseBy` before the task gets to run.
+                if let by = raiseBy {
+                    Button("Raise to \(newCeiling.usd)") { Task { await raise(by: by) } }
+                }
             }
             .disabled(busy)
         }
@@ -113,9 +117,9 @@ struct OverviewView: View {
         "Raise the spend ceiling from \((budget?.budget_usd ?? 0).usd) by \((raiseBy ?? 0).usd)?"
     }
 
-    private func raise() async {
-        guard let by = raiseBy, by > 0 else { return }
-        busy = true; defer { busy = false; raiseBy = nil }
+    private func raise(by: Double) async {
+        guard by > 0 else { return }
+        busy = true; defer { busy = false }
         // Read it fresh, so two phones raising at once each add their own amount.
         do {
             let now = try await client.budget()
