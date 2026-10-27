@@ -71,6 +71,30 @@ class AppCapsTest {
             spend.merge(app + ":" + day, usd, Double::sum);
             return CompletableFuture.completedFuture(null);
         }
+
+        final Map<String, Double> topUps = new HashMap<>();
+        List<String> catalog = List.of();
+
+        @Override
+        public CompletionStage<Double> topUp(String app, LocalDate day) {
+            return CompletableFuture.completedFuture(topUps.getOrDefault(app + ":" + day, 0.0));
+        }
+
+        @Override
+        public CompletionStage<Double> addTopUp(String app, LocalDate day, double usd) {
+            return CompletableFuture.completedFuture(topUps.merge(app + ":" + day, usd, Double::sum));
+        }
+
+        @Override
+        public CompletionStage<Void> clearTopUp(String app, LocalDate day) {
+            topUps.remove(app + ":" + day);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<List<String>> catalogApps() {
+            return CompletableFuture.completedFuture(catalog);
+        }
     }
 
     private final MemoryStore store = new MemoryStore();
@@ -259,5 +283,119 @@ class AppCapsTest {
         caps.put("roomy", true, 1000.0, List.of(), MORNING, r -> { });
         caps.recordSpend(EE_WALLET, 2, MORNING);
         assertTrue(decide(EE_WALLET, "roomy", MORNING).isCapped());
+    }
+
+    private AppCaps.TopUpResult topUp(String app, Double usd, Instant now) {
+        AtomicReference<AppCaps.TopUpResult> out = new AtomicReference<>();
+        caps.topUp(app, usd, now, out::set);
+        return out.get();
+    }
+
+    private List<AppCaps.AppStatus> listed(Instant now) {
+        AtomicReference<Optional<List<AppCaps.AppStatus>>> out = new AtomicReference<>();
+        caps.list(now, out::set);
+        return out.get().get();
+    }
+
+    @Test
+    void aTopUpLetsTheAppSpendPastItsCapTodayWithoutChangingTheCap() {
+        putEarthEmpire(5);
+        caps.recordSpend(EE_WALLET, 5, MORNING);
+        assertTrue(decide(EE_WALLET, MORNING).isCapped());
+
+        AppCaps.TopUpResult r = topUp("earth-empire", 5.0, MORNING);
+        assertNull(r.getRefusal());
+        assertEquals(5.0, store.apps.get("earth-empire").getUsdPerDay());
+        assertFalse(decide(EE_WALLET, MORNING).isCapped());
+        String json = r.getStatus().toJson();
+        assertTrue(json.contains("\"usd_per_day\":5.0"), json);
+        assertTrue(json.contains("\"top_up_usd\":5.0"), json);
+        assertTrue(json.contains("\"top_up_remaining_usd\":5.0"), json);
+        assertTrue(json.contains("\"limit_today_usd\":10.0"), json);
+        assertTrue(json.contains("\"remaining_usd\":5.0"), json);
+
+        caps.recordSpend(EE_WALLET, 3, MORNING);
+        assertEquals(2.0, listed(MORNING).get(0).getTopUpRemainingUsd(), 1e-9);
+        caps.recordSpend(EE_WALLET, 2, MORNING);
+        AppCaps.Decision d = decide(EE_WALLET, MORNING);
+        assertTrue(d.isCapped());
+        assertTrue(d.errorJson().contains("\"top_up_usd\":5.0"), d.errorJson());
+    }
+
+    @Test
+    void theDailyCapIsSpentBeforeTheTopUp() {
+        putEarthEmpire(5);
+        topUp("earth-empire", 5.0, MORNING);
+        caps.recordSpend(EE_WALLET, 4, MORNING);
+        AppCaps.AppStatus s = listed(MORNING).get(0);
+        assertEquals(5.0, s.getTopUpRemainingUsd(), 1e-9);
+        assertEquals(10.0, s.getLimitTodayUsd(), 1e-9);
+    }
+
+    @Test
+    void topUpsAddUpAndEndAtUtcMidnight() {
+        putEarthEmpire(5);
+        topUp("earth-empire", 2.0, MORNING);
+        assertEquals(5.0, topUp("earth-empire", 3.0, MORNING).getStatus().getTopUpTodayUsd(), 1e-9);
+        caps.recordSpend(EE_WALLET, 7, MORNING);
+        assertFalse(decide(EE_WALLET, MORNING).isCapped());
+        Instant tomorrow = Instant.parse("2026-10-26T09:00:00Z");
+        caps.recordSpend(EE_WALLET, 5, tomorrow);
+        assertTrue(decide(EE_WALLET, tomorrow).isCapped());
+        assertEquals(0.0, listed(tomorrow).get(0).getTopUpTodayUsd(), 1e-9);
+    }
+
+    @Test
+    void clearingATopUp() {
+        putEarthEmpire(5);
+        topUp("earth-empire", 5.0, MORNING);
+        assertEquals(0.0, topUp("earth-empire", null, MORNING).getStatus().getTopUpTodayUsd(), 1e-9);
+    }
+
+    @Test
+    void onlyACappedConfiguredAppCanBeToppedUp() {
+        assertEquals("no such app", topUp("nobody", 5.0, MORNING).getRefusal());
+        caps.put("free-app", true, null, List.of(), MORNING, r -> { });
+        assertNotNull(topUp("free-app", 5.0, MORNING).getRefusal());
+        assertTrue(store.topUps.isEmpty());
+    }
+
+    @Test
+    void topUpBodyParsing() {
+        assertNull(AppCapsHandler.topUpProblem(Json.load("{\"usd\":5}")));
+        assertNotNull(AppCapsHandler.topUpProblem(Json.load("{\"usd\":0}")));
+        assertNotNull(AppCapsHandler.topUpProblem(Json.load("{\"usd\":-5}")));
+        assertNotNull(AppCapsHandler.topUpProblem(Json.load("{\"usd\":1001}")));
+        assertNotNull(AppCapsHandler.topUpProblem(Json.load("{}")));
+        assertNotNull(AppCapsHandler.topUpProblem(null));
+    }
+
+    @Test
+    void catalogAppsAreListedUnderTheCommonBudget() {
+        store.catalog = AppCaps.appsOfCatalog("[{\"product_id\":\"com.tarasmaslov.infiniteairadio.aicoin.small\",\"coins\":100},"
+                + "{\"product_id\":\"com.tarasmaslov.infiniteairadio.aicoin.xl\",\"coins\":5000},"
+                + "{\"product_id\":\"com.oeaio.infiniteaibook.aicoin.small\",\"coins\":100},"
+                + "{\"product_id\":\"weird\",\"coins\":1}]");
+        assertEquals(List.of("com.tarasmaslov.infiniteairadio", "com.oeaio.infiniteaibook"), store.catalog);
+        putEarthEmpire(5);
+        List<AppCaps.AppStatus> apps = listed(MORNING);
+        assertEquals(3, apps.size());
+        AppCaps.AppStatus radio = apps.stream()
+                .filter(a -> a.getConfig().getApp().equals("com.tarasmaslov.infiniteairadio")).findFirst().get();
+        assertFalse(radio.isConfigured());
+        assertTrue(radio.toJson().contains("\"uses_common_budget\":true"), radio.toJson());
+        assertTrue(radio.toJson().contains("\"configured\":false"), radio.toJson());
+        assertTrue(apps.stream().filter(a -> a.getConfig().getApp().equals("earth-empire")).findFirst().get().isConfigured());
+    }
+
+    @Test
+    void aCatalogAppNamedInTheHeaderIsTrackedAndCanBeCapped() {
+        store.catalog = List.of("com.tarasmaslov.infiniteairadio");
+        assertFalse(decide(OTHER_WALLET, "com.tarasmaslov.infiniteairadio", MORNING).isCapped());
+        caps.recordSpend(OTHER_WALLET, 3, MORNING);
+        assertEquals(3.0, store.spend.get("com.tarasmaslov.infiniteairadio:2026-10-25"), 1e-9);
+        // Its own cap, set from the Apps tab, then applies.
+        caps.put("com.tarasmaslov.infiniteairadio", true, 2.0, null, MORNING, r -> assertNull(r.getConflict()));
+        assertTrue(decide(OTHER_WALLET, "com.tarasmaslov.infiniteairadio", MORNING).isCapped());
     }
 }

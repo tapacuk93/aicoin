@@ -148,6 +148,12 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             AppCapsHandler.serveList(ctx, request, ledger, config);
             return;
         }
+        if (path.startsWith("/admin/apps/") && path.endsWith("/top-up")
+                && (request.method() == HttpMethod.POST || request.method() == HttpMethod.DELETE)) {
+            AppCapsHandler.serveTopUp(ctx, request, ledger, config,
+                    path.substring("/admin/apps/".length(), path.length() - "/top-up".length()));
+            return;
+        }
         if (path.startsWith("/admin/apps/")
                 && (request.method() == HttpMethod.PUT || request.method() == HttpMethod.DELETE)) {
             AppCapsHandler.serveWrite(ctx, request, ledger, config, path.substring("/admin/apps/".length()));

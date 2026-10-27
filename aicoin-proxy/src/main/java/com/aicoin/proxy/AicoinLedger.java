@@ -60,7 +60,7 @@ class AicoinLedger implements AutoCloseable {
     private static final String EVENTS_KEY = "aicoin:" + TAG + ":events";
     private static final String FREE_COINS_REMAINING_KEY = "aicoin:" + TAG + ":free-coins-remaining";
     private static final String KNOWN_WALLETS_KEY = "aicoin:" + TAG + ":known-wallets";
-    private static final String IAP_PACKAGES_KEY = "aicoin:" + TAG + ":iap-packages";
+    static final String IAP_PACKAGES_KEY = "aicoin:" + TAG + ":iap-packages";
     private static final String OFFER_KEY = "aicoin:" + TAG + ":offer";
     /** The operator's total spend ceiling in USD — see CONTRACT.md's "Spend budget". Unset means no ceiling. */
     private static final String BUDGET_KEY = "aicoin:" + TAG + ":budget";

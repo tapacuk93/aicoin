@@ -816,14 +816,40 @@ crossed finish, and a day can end slightly over the cap by what those cost (a co
 counts as one request). A Redis failure during the check lets the call through — the wallet's own
 balance gate still applies.
 
-- `GET /admin/apps` → `{"apps":[{"app":"earth-empire","usd_per_day":20.0,"spent_today_usd":1.23,"remaining_usd":18.77,"capped":false,"reset_at":"2026-10-26T00:00:00Z","wallets":["bd08…"]}]}`
+- `GET /admin/apps` → `{"apps":[{"app":"earth-empire","configured":true,"usd_per_day":20.0,"uses_common_budget":false,"top_up_usd":5.0,"top_up_remaining_usd":5.0,"limit_today_usd":25.0,"spent_today_usd":1.23,"remaining_usd":23.77,"capped":false,"reset_at":"2026-10-26T00:00:00Z","wallets":["bd08…"],"wallet_coins":{"bd08…":812.0}}]}`
 - `PUT /admin/apps/{app}` — body `{"usd_per_day":20,"wallets":["<64 hex>"]}`. `usd_per_day` absent
   keeps the cap, `null` removes it (spend is still tracked), otherwise a positive number. `wallets`
   absent keeps the mapping, otherwise replaces it. A wallet already in another app is `409` and
   nothing is written. App names: `[a-z0-9][a-z0-9._-]{0,63}`. Returns the app as `GET` lists it.
 - `DELETE /admin/apps/{app}` — removes the app and unmaps its wallets; `404` if there is none.
+  An app the catalog knows is still listed afterwards, back on the common budget.
+- `POST /admin/apps/{app}/top-up` — body `{"usd":5}` (0 < usd ≤ 1000): a **one-time top-up** for
+  the current UTC day. The app may spend that much more today on top of its daily cap; the cap
+  itself (`usd_per_day`) is unchanged and tomorrow's limit is the cap alone. Top-ups on one day add
+  up; what is left at UTC midnight is gone (Redis `aicoin:{aicoin}:app-topup:<app>:<yyyy-mm-dd>`,
+  expiring after 8 days, like spend). Spend draws on the cap first and on the top-up only after, so
+  `top_up_remaining_usd` = min(top-up, cap + top-up − spent). Only a configured app with a cap can
+  be topped up: `404` for no such app, `409` for an app with no cap of its own (it is under the
+  common budget, so there is nothing to extend). `DELETE /admin/apps/{app}/top-up` clears today's.
+  Both return the app as `GET` lists it. A top-up is not coins: a server wallet that is out of coins
+  still gets `402` (see `wallet_coins`).
 
-All three are `X-Admin-Token` gated.
+**Every app the proxy knows is listed.** Besides the configured apps, `GET /admin/apps` lists each
+app the IAP catalog (`aicoin:{aicoin}:iap-packages`) sells coins for — the bundle-id prefix of each
+`<bundle>.aicoin.<tier>` product id, e.g. `com.tarasmaslov.infiniteairadio` — with
+`"configured":false`, `"usd_per_day":null`. An app with no cap of its own has
+`"uses_common_budget":true`: nothing limits it but the common spend budget (see "Spend budget").
+`PUT /admin/apps/{app}` with a `usd_per_day` gives it its own daily cap. A catalog app counts as
+known for `X-AICoin-App` too, so a client that sends its bundle id there has its spend tracked
+(and, once it has a cap, capped) even before it is configured.
+
+Each listed app also carries `top_up_usd` (today's top-ups), `top_up_remaining_usd`,
+`limit_today_usd` (cap + top-up, `null` without a cap), and — for an app with wallets —
+`wallet_coins` (`{"<wallet>": coins}`, `null` for a wallet whose balance could not be read).
+`remaining_usd` and `capped` are measured against `limit_today_usd`; the `429` body carries
+`top_up_usd` too.
+
+All of these are `X-Admin-Token` gated.
 
 ### Admin alerts (push notifications)
 

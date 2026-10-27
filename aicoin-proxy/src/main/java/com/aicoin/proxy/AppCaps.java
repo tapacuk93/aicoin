@@ -96,15 +96,28 @@ final class AppCaps {
         }
     }
 
-    /** One app's cap and today's spend, as {@code GET /admin/apps} reports it. */
+    /**
+     * One app's cap, today's one-time top-up and today's spend, as {@code GET /admin/apps} reports
+     * it. An app that is not configured (one the proxy knows only from the IAP catalog) has no cap
+     * of its own: it uses the common spend budget.
+     */
     static final class AppStatus {
         private final AppConfig config;
+        private final boolean configured;
         private final double spentTodayUsd;
+        private final double topUpTodayUsd;
         private final Instant resetAt;
+        private Map<String, Double> walletCoins;
 
         AppStatus(AppConfig config, double spentTodayUsd, Instant resetAt) {
+            this(config, true, spentTodayUsd, 0, resetAt);
+        }
+
+        AppStatus(AppConfig config, boolean configured, double spentTodayUsd, double topUpTodayUsd, Instant resetAt) {
             this.config = config;
+            this.configured = configured;
             this.spentTodayUsd = spentTodayUsd;
+            this.topUpTodayUsd = topUpTodayUsd;
             this.resetAt = resetAt;
         }
 
@@ -112,28 +125,69 @@ final class AppCaps {
             return config;
         }
 
+        boolean isConfigured() {
+            return configured;
+        }
+
         double getSpentTodayUsd() {
             return spentTodayUsd;
+        }
+
+        double getTopUpTodayUsd() {
+            return topUpTodayUsd;
         }
 
         Instant getResetAt() {
             return resetAt;
         }
 
+        /** Today's limit: the daily cap plus today's top-up; null when the app has no cap. */
+        Double getLimitTodayUsd() {
+            Double cap = config.getUsdPerDay();
+            return cap == null ? null : cap + topUpTodayUsd;
+        }
+
+        /** What is left of today's top-up: it is spent only after the daily cap itself is. */
+        double getTopUpRemainingUsd() {
+            Double limit = getLimitTodayUsd();
+            if (limit == null) {
+                return topUpTodayUsd;
+            }
+            return Math.max(0, Math.min(topUpTodayUsd, limit - spentTodayUsd));
+        }
+
         boolean isCapped() {
-            return isAtCap(config.getUsdPerDay(), spentTodayUsd);
+            return isAtCap(getLimitTodayUsd(), spentTodayUsd);
+        }
+
+        /** Coins each of the app's wallets holds, filled in by the admin handler; null when not looked up. */
+        void setWalletCoins(Map<String, Double> walletCoins) {
+            this.walletCoins = walletCoins;
         }
 
         String toJson() {
             Double cap = config.getUsdPerDay();
+            Double limit = getLimitTodayUsd();
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("app", config.getApp());
+            m.put("configured", configured);
             m.put("usd_per_day", cap);
+            m.put("uses_common_budget", cap == null);
+            m.put("top_up_usd", round(topUpTodayUsd));
+            m.put("top_up_remaining_usd", round(getTopUpRemainingUsd()));
+            m.put("limit_today_usd", limit == null ? null : round(limit));
             m.put("spent_today_usd", round(spentTodayUsd));
-            m.put("remaining_usd", cap == null ? null : round(Math.max(0, cap - spentTodayUsd)));
+            m.put("remaining_usd", limit == null ? null : round(Math.max(0, limit - spentTodayUsd)));
             m.put("capped", isCapped());
             m.put("reset_at", resetAt.toString());
             m.put("wallets", new ArrayList<Object>(config.getWallets()));
+            if (walletCoins != null) {
+                Map<String, Object> coins = new LinkedHashMap<>();
+                for (String w : config.getWallets()) {
+                    coins.put(w, walletCoins.get(w));
+                }
+                m.put("wallet_coins", coins);
+            }
             return Json.write(m);
         }
     }
@@ -174,9 +228,11 @@ final class AppCaps {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("error", "app_daily_cap_reached");
             m.put("message", "this app has reached its daily spend cap of $" + c.getUsdPerDay()
+                    + (capped.getTopUpTodayUsd() > 0 ? " (plus today's $" + round(capped.getTopUpTodayUsd()) + " top-up)" : "")
                     + "; requests resume at " + capped.getResetAt());
             m.put("app", c.getApp());
             m.put("usd_per_day", c.getUsdPerDay());
+            m.put("top_up_usd", round(capped.getTopUpTodayUsd()));
             m.put("spent_today_usd", round(capped.getSpentTodayUsd()));
             m.put("reset_at", capped.getResetAt().toString());
             return Json.write(m);
@@ -199,6 +255,20 @@ final class AppCaps {
         CompletionStage<Double> spend(String app, LocalDate day);
 
         CompletionStage<Void> addSpend(String app, LocalDate day, double usd);
+
+        /** The one-time top-up granted to {@code app} for that UTC day, in USD (0 when none). */
+        CompletionStage<Double> topUp(String app, LocalDate day);
+
+        /** Adds {@code usd} to that day's top-up; returns the new total. */
+        CompletionStage<Double> addTopUp(String app, LocalDate day, double usd);
+
+        CompletionStage<Void> clearTopUp(String app, LocalDate day);
+
+        /**
+         * The apps the IAP catalog sells coins for — each product id's bundle-id prefix
+         * ({@code com.tarasmaslov.infiniteairadio} from {@code com.tarasmaslov.infiniteairadio.aicoin.xl}).
+         */
+        CompletionStage<List<String>> catalogApps();
     }
 
     private final Store store;
@@ -257,8 +327,10 @@ final class AppCaps {
                 return CompletableFuture.completedFuture(mapped);
             }
             String named = headerApp.trim().toLowerCase(java.util.Locale.ROOT);
-            return store.getApp(named).thenApply(config -> {
-                if (config.isEmpty()) {
+            return store.getApp(named).thenCompose(config -> config.isPresent()
+                    ? CompletableFuture.completedFuture(true)
+                    : knownCatalogApps().thenApply(apps -> apps.contains(named))).thenApply(known -> {
+                if (!known) {
                     return Optional.<String>empty();
                 }
                 if (headerAppByWallet.size() > HEADER_APP_MEMORY) {
@@ -280,10 +352,11 @@ final class AppCaps {
                 if (config.isEmpty() || config.get().getUsdPerDay() == null) {
                     return CompletableFuture.completedFuture(Decision.allowed());
                 }
-                return store.spend(app.get(), dayOf(now)).thenApply(spent -> {
-                    AppStatus status = new AppStatus(config.get(), spent, resetAt(now));
+                LocalDate day = dayOf(now);
+                return store.spend(app.get(), day).thenCompose(spent -> store.topUp(app.get(), day).thenApply(topUp -> {
+                    AppStatus status = new AppStatus(config.get(), true, spent, topUp, resetAt(now));
                     return status.isCapped() ? Decision.capped(status) : Decision.allowed();
-                });
+                }));
             });
         }).whenComplete((decision, err) -> {
             if (err != null) {
@@ -331,14 +404,90 @@ final class AppCaps {
                 });
     }
 
-    /** Every app with today's spend, by name. */
+    /** How long the catalog's app list is reused before it is read again. */
+    private static final long CATALOG_TTL_MILLIS = 60_000;
+    private volatile List<String> catalogCache = List.of();
+    private volatile long catalogReadAt = Long.MIN_VALUE / 2;
+
+    /**
+     * The catalog's apps, cached for a minute: the header path asks on every request that names
+     * an unconfigured app. A failed read keeps whatever was known before.
+     */
+    CompletionStage<List<String>> knownCatalogApps() {
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - catalogReadAt < CATALOG_TTL_MILLIS) {
+            return CompletableFuture.completedFuture(catalogCache);
+        }
+        return store.catalogApps().handle((apps, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "catalog app list failed", err);
+                return catalogCache;
+            }
+            catalogCache = List.copyOf(apps);
+            catalogReadAt = nowMs;
+            return catalogCache;
+        });
+    }
+
+    /** The bundle-id prefix of an IAP product id ({@code <bundle>.aicoin.<tier>}), or null. */
+    static String appOfProduct(String productId) {
+        if (productId == null) {
+            return null;
+        }
+        int i = productId.indexOf(".aicoin.");
+        if (i <= 0) {
+            return null;
+        }
+        String app = productId.substring(0, i).toLowerCase(java.util.Locale.ROOT);
+        return isValidAppName(app) ? app : null;
+    }
+
+    /** The distinct apps in a catalog JSON array ({@code [{"product_id":...},...]}), in order. */
+    static List<String> appsOfCatalog(String catalogJson) {
+        List<String> out = new ArrayList<>();
+        if (catalogJson == null || catalogJson.isBlank()) {
+            return out;
+        }
+        Object parsed;
+        try {
+            parsed = Json.load(catalogJson);
+        } catch (RuntimeException e) {
+            return out;
+        }
+        if (parsed instanceof Map<?, ?> map) {
+            parsed = map.get("packages");
+        }
+        if (parsed instanceof List<?> list) {
+            for (Object entry : list) {
+                if (entry instanceof Map<?, ?> p && p.get("product_id") instanceof String id) {
+                    String app = appOfProduct(id);
+                    if (app != null && !out.contains(app)) {
+                        out.add(app);
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Every app the proxy knows, by name, with today's spend and top-up: the configured ones, and
+     * each app the IAP catalog sells coins for that is not configured (no cap of its own, so it
+     * uses the common spend budget).
+     */
     void list(Instant now, Consumer<Optional<List<AppStatus>>> onResult) {
-        store.listApps().thenCompose(configs -> {
+        LocalDate day = dayOf(now);
+        store.listApps().thenCompose(configs -> knownCatalogApps().thenCompose(catalog -> {
             List<CompletableFuture<AppStatus>> futures = new ArrayList<>();
+            java.util.Set<String> configured = new java.util.HashSet<>();
             for (AppConfig config : configs) {
-                futures.add(store.spend(config.getApp(), dayOf(now))
-                        .thenApply(spent -> new AppStatus(config, spent, resetAt(now)))
-                        .toCompletableFuture());
+                configured.add(config.getApp());
+                futures.add(status(config, true, day, now).toCompletableFuture());
+            }
+            for (String app : catalog) {
+                if (!configured.contains(app)) {
+                    futures.add(status(new AppConfig(app, null, List.of()), false, day, now).toCompletableFuture());
+                }
             }
             return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).thenApply(v -> {
                 List<AppStatus> out = new ArrayList<>();
@@ -348,13 +497,78 @@ final class AppCaps {
                 out.sort((a, b) -> a.getConfig().getApp().compareTo(b.getConfig().getApp()));
                 return out;
             });
-        }).whenComplete((list, err) -> {
+        })).whenComplete((list, err) -> {
             if (err != null) {
                 LOG.log(Level.WARNING, "app list failed", err);
                 onResult.accept(Optional.empty());
                 return;
             }
             onResult.accept(Optional.of(list));
+        });
+    }
+
+    private CompletionStage<AppStatus> status(AppConfig config, boolean configured, LocalDate day, Instant now) {
+        return store.spend(config.getApp(), day).thenCompose(spent -> store.topUp(config.getApp(), day)
+                .thenApply(topUp -> new AppStatus(config, configured, spent, topUp, resetAt(now))));
+    }
+
+    /** Largest single top-up: a guard against a mistyped zero, not a policy. */
+    static final double MAX_TOP_UP_USD = 1000;
+
+    /** Outcome of {@link #topUp}. */
+    static final class TopUpResult {
+        private final boolean reachable;
+        private final String refusal;
+        private final AppStatus status;
+
+        private TopUpResult(boolean reachable, String refusal, AppStatus status) {
+            this.reachable = reachable;
+            this.refusal = refusal;
+            this.status = status;
+        }
+
+        boolean isReachable() {
+            return reachable;
+        }
+
+        /** Why nothing was written (no such app, or an app with no cap to top up), or null. */
+        String getRefusal() {
+            return refusal;
+        }
+
+        AppStatus getStatus() {
+            return status;
+        }
+    }
+
+    /**
+     * Gives {@code app} a one-time top-up for the UTC day of {@code now}: {@code usd} more it may
+     * spend today on top of its daily cap, which itself stays as it is. Top-ups on the same day add
+     * up; at UTC midnight what is left of one is gone (the key is per day, like spend). Spend draws
+     * on the daily cap first and on the top-up only after. {@code usd} null clears today's top-up.
+     * Only a configured app with a cap can be topped up: an app without one has no limit of its own
+     * to extend — it is under the common spend budget.
+     */
+    void topUp(String app, Double usd, Instant now, Consumer<TopUpResult> onResult) {
+        LocalDate day = dayOf(now);
+        store.getApp(app).thenCompose(existing -> {
+            if (existing.isEmpty()) {
+                return CompletableFuture.completedFuture(new TopUpResult(true, "no such app", null));
+            }
+            if (existing.get().getUsdPerDay() == null) {
+                return CompletableFuture.completedFuture(new TopUpResult(true,
+                        "app has no daily cap of its own (it uses the common budget), so there is nothing to top up", null));
+            }
+            CompletionStage<?> write = usd == null ? store.clearTopUp(app, day) : store.addTopUp(app, day, usd);
+            return write.thenCompose(v -> status(existing.get(), true, day, now))
+                    .thenApply(status -> new TopUpResult(true, null, status));
+        }).whenComplete((result, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "app top-up failed for " + app, err);
+                onResult.accept(new TopUpResult(false, null, null));
+                return;
+            }
+            onResult.accept(result);
         });
     }
 
@@ -412,8 +626,8 @@ final class AppCaps {
                 dropped.removeAll(newWallets);
                 AppConfig config = new AppConfig(app, cap, newWallets);
                 return store.putApp(config, dropped)
-                        .thenCompose(ignored -> store.spend(app, dayOf(now)))
-                        .thenApply(spent -> new PutResult(true, null, new AppStatus(config, spent, resetAt(now))));
+                        .thenCompose(ignored -> status(config, true, dayOf(now), now))
+                        .thenApply(status -> new PutResult(true, null, status));
             });
         }).whenComplete((result, err) -> {
             if (err != null) {
@@ -476,6 +690,32 @@ final class AppCaps {
 
         static String spendKey(String app, LocalDate day) {
             return "aicoin:" + TAG + ":app-spend:" + app + ":" + day;
+        }
+
+        static String topUpKey(String app, LocalDate day) {
+            return "aicoin:" + TAG + ":app-topup:" + app + ":" + day;
+        }
+
+        @Override
+        public CompletionStage<Double> topUp(String app, LocalDate day) {
+            return commands.get(topUpKey(app, day)).thenApply(v -> v == null ? 0.0 : Double.parseDouble(v));
+        }
+
+        @Override
+        public CompletionStage<Double> addTopUp(String app, LocalDate day, double usd) {
+            String key = topUpKey(app, day);
+            return commands.incrbyfloat(key, usd)
+                    .thenCompose(total -> commands.expire(key, SPEND_TTL_SECONDS).thenApply(v -> total));
+        }
+
+        @Override
+        public CompletionStage<Void> clearTopUp(String app, LocalDate day) {
+            return commands.del(topUpKey(app, day)).thenApply(v -> null);
+        }
+
+        @Override
+        public CompletionStage<List<String>> catalogApps() {
+            return commands.get(AicoinLedger.IAP_PACKAGES_KEY).thenApply(AppCaps::appsOfCatalog);
         }
 
         @Override
