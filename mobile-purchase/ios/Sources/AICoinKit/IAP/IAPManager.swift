@@ -377,6 +377,12 @@ public final class IAPManager: ObservableObject {
             for await update in Transaction.updates {
                 let jws = update.jwsRepresentation
                 guard let transaction = try? Self.checkVerified(update) else { continue }
+                // `Transaction.updates` carries every purchase the app's Apple ID makes, not only
+                // coins — on 2026-10-27 a renewal of All Languages Learner's retired
+                // `premium.monthly` subscription was sent here, refused as an unknown product, and
+                // pushed to the operator as a purchase that was not credited. Anything else is the
+                // app's own business: left alone, and in particular not finished.
+                guard Self.isCoinProduct(transaction.productID) else { continue }
                 // A pin recorded before the app died still names what the user was shown. The
                 // server ignores it once it has expired, falling back to the live offer, so
                 // sending a stale one is harmless.
@@ -391,6 +397,12 @@ public final class IAPManager: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Whether `productID` is an aicoin pack — `<bundle id>.aicoin.<tier>`, the one shape the
+    /// server sells (its `CoinOffer.tierSuffix`).
+    nonisolated static func isCoinProduct(_ productID: String) -> Bool {
+        productID.contains(".aicoin.")
     }
 
     nonisolated static func checkVerified<T>(_ result: VerificationResult<T>) throws -> T {

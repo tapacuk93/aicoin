@@ -95,6 +95,11 @@ final class AICoinPackageTests: XCTestCase {
 
     // MARK: - IAPManager.filter static behavior mirrors the free-function extension
 
+    func testOnlyCoinProductsAreRedeemed() {
+        XCTAssertTrue(IAPManager.isCoinProduct("com.tarasmaslov.alllanguageslearner.aicoin.xl"))
+        XCTAssertFalse(IAPManager.isCoinProduct("com.tarasmaslov.alllanguageslearner.premium.monthly"))
+    }
+
     func testIAPManagerLoadPackagesFilteringIsConsistentWithArrayExtension() throws {
         let packages = try decodePackages()
         let viaExtension = packages.filtered(byBundleIDPrefix: "com.tarasmaslov.infiniteairadio")
