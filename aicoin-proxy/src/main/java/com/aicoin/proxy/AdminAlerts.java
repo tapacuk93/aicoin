@@ -258,25 +258,27 @@ final class AdminAlerts {
                 return;
             }
             double spent = result.getProductionSpendUsd();
-            budgetLevel(spent, limit).ifPresent(level -> {
-                String body = String.format(Locale.ROOT, "$%.2f of $%.2f spent.%s", spent, limit,
-                        level.equals("exhausted") ? " Nothing is on sale in any app until it is raised." : "");
-                if (level.equals("half")) {
-                    // An early heads-up, so once per ceiling rather than every few hours: spend
-                    // takes days to get from half to 90%, and that would be a push a quarter-day
-                    // the whole way. Keyed by the ceiling, so raising it arms the next one.
-                    fire(Kind.BUDGET, "half@" + Math.round(limit), "Spend budget at 50%", body, HALF_BUDGET_WINDOW_MINUTES);
-                } else {
-                    fire(Kind.BUDGET, level, level.equals("exhausted") ? "Spend budget exhausted" : "Spend budget at 90%", body);
-                }
-            });
+            String spentOf = String.format(Locale.ROOT, "$%.2f of $%.2f spent.", spent, limit);
+            // Its own check, not a level below "near": half-way through a raise can come after
+            // 90% of the whole ceiling ($1000 raised to $1200 is half-spent at $1100, past $1080).
+            // Once per ceiling rather than every few hours — keyed by it, so the next raise arms
+            // the next one.
+            if (halfOfRaiseSpent(spent, limit, result.getPreviousLimitUsd()) && spent < limit) {
+                fire(Kind.BUDGET, "half@" + Math.round(limit), "Half of the last budget raise spent",
+                        spentOf + String.format(Locale.ROOT, " The ceiling was raised from $%.2f.",
+                                result.getPreviousLimitUsd()),
+                        HALF_BUDGET_WINDOW_MINUTES);
+            }
+            budgetLevel(spent, limit).ifPresent(level -> fire(Kind.BUDGET, level,
+                    level.equals("exhausted") ? "Spend budget exhausted" : "Spend budget at 90%",
+                    spentOf + (level.equals("exhausted") ? " Nothing is on sale in any app until it is raised." : "")));
         });
     }
 
-    /** How long one ceiling's 50% alert holds off a repeat — in practice, once per ceiling. */
+    /** How long one ceiling's half-way alert holds off a repeat — in practice, once per ceiling. */
     static final int HALF_BUDGET_WINDOW_MINUTES = 60 * 24 * 60;
 
-    /** "exhausted", "near" (90%+), "half" (50%+), or nothing. */
+    /** "exhausted", "near" (90%+), or nothing. */
     static Optional<String> budgetLevel(double spent, double limit) {
         if (spent >= limit) {
             return Optional.of("exhausted");
@@ -284,10 +286,16 @@ final class AdminAlerts {
         if (spent >= 0.9 * limit) {
             return Optional.of("near");
         }
-        if (spent >= 0.5 * limit) {
-            return Optional.of("half");
-        }
         return Optional.empty();
+    }
+
+    /**
+     * Whether spend is half-way through the latest raise — from the ceiling it replaced to the
+     * current one. Needs that earlier ceiling: without one (a ceiling set before it was recorded,
+     * or a lowering) there is no raise to be half-way through.
+     */
+    static boolean halfOfRaiseSpent(double spent, double limit, Double previous) {
+        return previous != null && previous < limit && spent >= previous + 0.5 * (limit - previous);
     }
 
     private void checkWalletsAndResets() {

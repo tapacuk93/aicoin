@@ -50,11 +50,17 @@ class AdminAlertsTest {
 
     @Test
     void budgetLevels() {
-        assertEquals(Optional.empty(), AdminAlerts.budgetLevel(499, 1000));
-        assertEquals(Optional.of("half"), AdminAlerts.budgetLevel(500, 1000));
-        assertEquals(Optional.of("half"), AdminAlerts.budgetLevel(899, 1000));
+        assertEquals(Optional.empty(), AdminAlerts.budgetLevel(899, 1000));
         assertEquals(Optional.of("near"), AdminAlerts.budgetLevel(900, 1000));
         assertEquals(Optional.of("exhausted"), AdminAlerts.budgetLevel(1000, 1000));
+    }
+
+    @Test
+    void halfOfTheLastRaise() {
+        assertFalse(AdminAlerts.halfOfRaiseSpent(1099, 1200, 1000.0));
+        assertTrue(AdminAlerts.halfOfRaiseSpent(1100, 1200, 1000.0));
+        assertFalse(AdminAlerts.halfOfRaiseSpent(1100, 1200, null));
+        assertFalse(AdminAlerts.halfOfRaiseSpent(790, 800, 1000.0));
     }
 
     @Test

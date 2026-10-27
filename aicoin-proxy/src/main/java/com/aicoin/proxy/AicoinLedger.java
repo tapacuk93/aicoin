@@ -637,6 +637,7 @@ class AicoinLedger implements AutoCloseable {
                 return;
             }
             Double limitUsd = parseBudgetUsd(budgetJson);
+            Double previousLimitUsd = parseBudgetField(budgetJson, "previous_usd");
             commands.zrangeWithScores(EVENTS_KEY, 0, -1).whenComplete((entries, err) -> {
                 if (err != null) {
                     LOG.log(Level.WARNING, "ledger budget spend scan failed", err);
@@ -653,16 +654,23 @@ class AicoinLedger implements AutoCloseable {
                         productionSpend += cost;
                     }
                 }
-                onResult.accept(new BudgetResult(true, limitUsd, productionSpend, internalSpend));
+                onResult.accept(new BudgetResult(true, limitUsd, previousLimitUsd, productionSpend, internalSpend));
             });
         });
     }
 
     /** Writes the ceiling. A null {@code usd} removes it entirely, restoring "no ceiling". */
     void setBudget(Double usd, Consumer<Boolean> onResult) {
+        // The ceiling being replaced is kept beside the new one: the half-way alert is measured
+        // across the latest raise, from the old ceiling to the new (AdminAlerts#budgetLevel).
         java.util.concurrent.CompletionStage<?> write = usd == null
                 ? commands.del(BUDGET_KEY)
-                : commands.set(BUDGET_KEY, "{\"usd\":" + usd + ",\"set_at\":" + Instant.now().toEpochMilli() + "}");
+                : commands.get(BUDGET_KEY).thenCompose(old -> {
+                    Double previous = parseBudgetUsd(old);
+                    return commands.set(BUDGET_KEY, "{\"usd\":" + usd
+                            + (previous == null ? "" : ",\"previous_usd\":" + previous)
+                            + ",\"set_at\":" + Instant.now().toEpochMilli() + "}");
+                });
         write.whenComplete((reply, err) -> {
             if (err != null) {
                 LOG.log(Level.WARNING, "ledger budget update failed", err);
@@ -708,10 +716,14 @@ class AicoinLedger implements AutoCloseable {
 
     /** {@code {"usd":200.0,...}} → 200.0; absent/unparseable → null, i.e. no ceiling. */
     private static Double parseBudgetUsd(String json) {
+        return parseBudgetField(json, "usd");
+    }
+
+    private static Double parseBudgetField(String json, String field) {
         if (json == null || json.isEmpty()) {
             return null;
         }
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"usd\"\\s*:\\s*([0-9.]+)").matcher(json);
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"" + field + "\"\\s*:\\s*([0-9.]+)").matcher(json);
         if (!m.find()) {
             return null;
         }
@@ -726,18 +738,21 @@ class AicoinLedger implements AutoCloseable {
     static final class BudgetResult {
         private final boolean reachable;
         private final Double limitUsd;
+        private final Double previousLimitUsd;
         private final double productionSpendUsd;
         private final double internalSpendUsd;
 
-        private BudgetResult(boolean reachable, Double limitUsd, double productionSpendUsd, double internalSpendUsd) {
+        private BudgetResult(boolean reachable, Double limitUsd, Double previousLimitUsd,
+                             double productionSpendUsd, double internalSpendUsd) {
             this.reachable = reachable;
             this.limitUsd = limitUsd;
+            this.previousLimitUsd = previousLimitUsd;
             this.productionSpendUsd = productionSpendUsd;
             this.internalSpendUsd = internalSpendUsd;
         }
 
         static BudgetResult unreachable() {
-            return new BudgetResult(false, null, 0, 0);
+            return new BudgetResult(false, null, null, 0, 0);
         }
 
         boolean isReachable() {
@@ -747,6 +762,11 @@ class AicoinLedger implements AutoCloseable {
         /** Null means no ceiling is set — the state the proxy shipped in before budgets existed. */
         Double getLimitUsd() {
             return limitUsd;
+        }
+
+        /** The ceiling the current one replaced, or null when none was recorded. */
+        Double getPreviousLimitUsd() {
+            return previousLimitUsd;
         }
 
         double getProductionSpendUsd() {
