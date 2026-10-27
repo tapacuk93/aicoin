@@ -140,6 +140,16 @@ public struct BuyAICoinSheet: View {
                 // than one after the other — see `IAPManager.preload`, which is also what an app
                 // should call at launch so this sheet opens on what is already there.
                 await iapManager.preload()
+                // Nothing on sale is usually a passing state — the operator's spend budget ran
+                // out and is about to be raised, or sales were closed for a moment — so a sheet
+                // left open keeps asking rather than showing "nothing available" until it is
+                // closed and opened again. It stops asking once there is something to buy, and
+                // with the sheet, since `.task` is cancelled when the view goes away.
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: Self.emptyRecheckInterval)
+                    guard !Task.isCancelled, hasNothingToSell else { continue }
+                    await iapManager.preload()
+                }
             }
         }
         // A macOS sheet takes its size from what its content asks for, and this content asks for
@@ -159,6 +169,13 @@ public struct BuyAICoinSheet: View {
         #if os(macOS)
         .frame(minWidth: 460, idealWidth: 520, minHeight: 560, idealHeight: 640)
         #endif
+    }
+
+    /// How often an open sheet with nothing on sale asks the server again.
+    static let emptyRecheckInterval: Duration = .seconds(15)
+
+    private var hasNothingToSell: Bool {
+        iapManager.offer == nil && iapManager.purchasablePackages.isEmpty
     }
 
     private var buyTab: some View {
@@ -208,7 +225,7 @@ public struct BuyAICoinSheet: View {
                 Spacer()
             } else if iapManager.purchasablePackages.isEmpty {
                 Spacer()
-                Text("No aicoins packages are available right now.")
+                Text("No aicoins packages are available right now. This updates by itself when they are.")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
