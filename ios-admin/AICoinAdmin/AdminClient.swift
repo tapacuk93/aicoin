@@ -126,6 +126,16 @@ final class AdminClient: ObservableObject {
         _ = try await request("/admin/apps/\(name)", method: "DELETE", admin: true)
     }
 
+    /// A one-time top-up for today (UTC): this much more the app may spend today, on top of its daily cap.
+    func topUpApp(_ name: String, usd: Double) async throws {
+        _ = try await request("/admin/apps/\(name)/top-up", method: "POST", body: ["usd": usd], admin: true)
+    }
+
+    /// Clears today's top-up.
+    func clearTopUp(_ name: String) async throws {
+        _ = try await request("/admin/apps/\(name)/top-up", method: "DELETE", admin: true)
+    }
+
     // MARK: alerts
 
     func alerts() async throws -> AlertsInfo { try await get("/admin/alerts", admin: true) }
@@ -235,14 +245,27 @@ struct ActivityEntry: Decodable, Hashable {
 struct AppCaps: Decodable { let apps: [AppCap] }
 struct AppCap: Decodable, Identifiable, Hashable {
     let app: String
+    /// False for an app the proxy knows only from the IAP catalog (no cap of its own yet).
+    let configured: Bool?
     let usd_per_day: Double?
+    let top_up_usd: Double?
+    let top_up_remaining_usd: Double?
+    /// The daily cap plus today's top-up; nil without a cap.
+    let limit_today_usd: Double?
     let spent_today_usd: Double
     let remaining_usd: Double?
     let capped: Bool
     let reset_at: String
     let wallets: [String]
+    /// Coins each wallet holds (nil entry: could not be read). An empty server wallet gets 402 whatever the cap.
+    let wallet_coins: [String: Double?]?
     var id: String { app }
     var resetDate: Date? { ISO8601DateFormatter().date(from: reset_at) }
+    var isConfigured: Bool { configured ?? true }
+    var usesCommonBudget: Bool { usd_per_day == nil }
+    var topUp: Double { top_up_usd ?? 0 }
+    var limitToday: Double? { limit_today_usd ?? usd_per_day }
+    func coins(_ wallet: String) -> Double? { wallet_coins?[wallet] ?? nil }
 }
 
 struct AlertsInfo: Decodable {

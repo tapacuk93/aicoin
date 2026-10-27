@@ -10,9 +10,14 @@ The operator's controls for aicoin-proxy, on the phone.
   exhausted: the catalog is served empty then, and saving it would erase it.
 - **Wallets** - every wallet by balance, its transactions, and crediting coins
   (a negative amount takes them back), with a reason.
-- **Apps** - each app's daily dollar cap, today's spend against it with a
-  progress bar, and when it resets (midnight UTC). Edit a cap, or add an app
-  with its wallets. See CONTRACT.md "Per-app daily caps".
+- **Apps** - every app the proxy knows (configured ones and each app the IAP
+  catalog sells for). An app has its own daily dollar cap or uses the common
+  budget from Overview (the default). Today's spend against the cap with a
+  progress bar, when it resets (midnight UTC), and the coins each app wallet
+  holds (an empty one gets 402 whatever the cap). Edit a cap, add an app with
+  its wallets, or give a capped app a **one-time top-up**: extra dollars for
+  today only, on top of the cap, which stays as it is. See CONTRACT.md
+  "Per-app daily caps".
 - **Activity** (from Overview) - the latest movements across all wallets.
 - **Settings** - the proxy address, the admin token, marking wallets
   internal so their spend does not count against the budget, and
