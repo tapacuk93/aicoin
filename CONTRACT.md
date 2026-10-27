@@ -834,7 +834,7 @@ token-based auth. Kinds, each debounced per subject through Redis (`aicoin:{aico
 |---|---|---|
 | `app_cap` | an app's request is refused at its daily cap | once per app per day |
 | `app_cap_reset` | the UTC day after an app was capped | once per app per day |
-| `budget` | production spend reaches 90% (`near`) or 100% (`exhausted`) of the spend budget | 6 h per level |
+| `budget` | production spend reaches 50% (`half`), 90% (`near`) or 100% (`exhausted`) of the spend budget | 6 h per level; `half` once per ceiling (60 days, keyed by the ceiling, so a raise re-arms it) |
 | `provider_credit` | a provider answers with a credit/quota error (402, Anthropic "credit balance is too low", OpenAI `insufficient_quota`, Google `RESOURCE_EXHAUSTED`, …) | 1 h per provider |
 | `provider_down` | 5+ upstream 5xx from one provider in a minute | 30 min per provider |
 | `wallet_low` | a wallet assigned to an app holds fewer than `AICOIN_PROXY_ALERT_WALLET_LOW_COINS` (default 1000) coins, or none | 6 h per wallet and level |

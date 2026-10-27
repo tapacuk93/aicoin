@@ -47,7 +47,7 @@ final class AdminAlerts {
     enum Kind {
         APP_CAP("app_cap", "App reached its daily cap", 24 * 60),
         APP_CAP_RESET("app_cap_reset", "App's daily cap reset", 48 * 60),
-        BUDGET("budget", "Spend budget at 90% or exhausted", 6 * 60),
+        BUDGET("budget", "Spend budget at 50%, 90% or exhausted", 6 * 60),
         PROVIDER_CREDIT("provider_credit", "Provider out of credit or quota", 60),
         PROVIDER_DOWN("provider_down", "Provider outage", 30),
         WALLET_LOW("wallet_low", "Server wallet low or empty", 6 * 60),
@@ -258,20 +258,34 @@ final class AdminAlerts {
                 return;
             }
             double spent = result.getProductionSpendUsd();
-            budgetLevel(spent, limit).ifPresent(level -> fire(Kind.BUDGET, level,
-                    level.equals("exhausted") ? "Spend budget exhausted" : "Spend budget at 90%",
-                    String.format(Locale.ROOT, "$%.2f of $%.2f spent.%s", spent, limit,
-                            level.equals("exhausted") ? " Nothing is on sale in any app until it is raised." : "")));
+            budgetLevel(spent, limit).ifPresent(level -> {
+                String body = String.format(Locale.ROOT, "$%.2f of $%.2f spent.%s", spent, limit,
+                        level.equals("exhausted") ? " Nothing is on sale in any app until it is raised." : "");
+                if (level.equals("half")) {
+                    // An early heads-up, so once per ceiling rather than every few hours: spend
+                    // takes days to get from half to 90%, and that would be a push a quarter-day
+                    // the whole way. Keyed by the ceiling, so raising it arms the next one.
+                    fire(Kind.BUDGET, "half@" + Math.round(limit), "Spend budget at 50%", body, HALF_BUDGET_WINDOW_MINUTES);
+                } else {
+                    fire(Kind.BUDGET, level, level.equals("exhausted") ? "Spend budget exhausted" : "Spend budget at 90%", body);
+                }
+            });
         });
     }
 
-    /** "exhausted", "near" (90%+), or nothing. */
+    /** How long one ceiling's 50% alert holds off a repeat — in practice, once per ceiling. */
+    static final int HALF_BUDGET_WINDOW_MINUTES = 60 * 24 * 60;
+
+    /** "exhausted", "near" (90%+), "half" (50%+), or nothing. */
     static Optional<String> budgetLevel(double spent, double limit) {
         if (spent >= limit) {
             return Optional.of("exhausted");
         }
         if (spent >= 0.9 * limit) {
             return Optional.of("near");
+        }
+        if (spent >= 0.5 * limit) {
+            return Optional.of("half");
         }
         return Optional.empty();
     }
@@ -321,10 +335,15 @@ final class AdminAlerts {
 
     /** Records and pushes an alert unless the same kind and subject went out inside its window. */
     void fire(Kind kind, String subject, String title, String body) {
+        fire(kind, subject, title, body, kind.debounceMinutes);
+    }
+
+    /** As {@link #fire(Kind, String, String, String)}, with a window of its own instead of the kind's. */
+    void fire(Kind kind, String subject, String title, String body, int debounceMinutes) {
         if (redis == null) {
             return;
         }
-        long windowSeconds = Math.round(kind.debounceMinutes * 60 * debounceScale);
+        long windowSeconds = Math.round(debounceMinutes * 60L * debounceScale);
         CompletionStage<Boolean> acquired = windowSeconds <= 0
                 ? CompletableFuture.completedFuture(true)
                 : redis.set("aicoin:" + TAG + ":alert-sent:" + kind.id + ":" + subject, "1",

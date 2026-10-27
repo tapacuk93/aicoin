@@ -50,7 +50,9 @@ class AdminAlertsTest {
 
     @Test
     void budgetLevels() {
-        assertEquals(Optional.empty(), AdminAlerts.budgetLevel(899, 1000));
+        assertEquals(Optional.empty(), AdminAlerts.budgetLevel(499, 1000));
+        assertEquals(Optional.of("half"), AdminAlerts.budgetLevel(500, 1000));
+        assertEquals(Optional.of("half"), AdminAlerts.budgetLevel(899, 1000));
         assertEquals(Optional.of("near"), AdminAlerts.budgetLevel(900, 1000));
         assertEquals(Optional.of("exhausted"), AdminAlerts.budgetLevel(1000, 1000));
     }
