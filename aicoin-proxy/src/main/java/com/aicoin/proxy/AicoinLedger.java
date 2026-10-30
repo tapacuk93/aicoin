@@ -81,6 +81,23 @@ class AicoinLedger implements AutoCloseable {
             + "local poolSize = tonumber(ARGV[3]) "
             + "local amount = tonumber(ARGV[4]) "
             + "local last = redis.call('GET', KEYS[1]) "
+            // A wallet's first claim is its welcome: granted whatever the shared pool holds, up to a
+            // number of welcomes a day (KEYS[6], counted per UTC day, ARGV[6] the cap). The pool is
+            // counted in coins and held 5000 — fifty newcomers — so once it ran dry every new user got
+            // nothing at all.
+            + "if not last then "
+            + "  local welcomed = tonumber(redis.call('GET', KEYS[6]) or '0') "
+            + "  if welcomed < tonumber(ARGV[6]) then "
+            + "    redis.call('SET', KEYS[1], ARGV[1]) "
+            + "    local balance = redis.call('INCRBYFLOAT', KEYS[2], ARGV[4]) "
+            + "    redis.call('INCR', KEYS[6]) "
+            + "    redis.call('EXPIRE', KEYS[6], 172800) "
+            + "    redis.call('SADD', KEYS[4], ARGV[5]) "
+            + "    redis.call('RPUSH', KEYS[5], cjson.encode({type='claim', amount=amount, balance_after=tonumber(balance), at=now})) "
+            + "    redis.call('LTRIM', KEYS[5], -" + TX_LOG_CAP + ", -1) "
+            + "    return {1, tostring(now + cooldown), 'welcome'} "
+            + "  end "
+            + "end "
             + "if last and (now - tonumber(last)) < cooldown then "
             + "  return {0, tostring(tonumber(last) + cooldown), 'cooldown'} "
             + "end "
@@ -285,12 +302,27 @@ class AicoinLedger implements AutoCloseable {
         });
     }
 
+    /**
+     * How many wallets a day get their first claim regardless of the shared pool —
+     * {@code AICOIN_PROXY_WELCOMES_PER_DAY}, 200 by default. A wallet is only a key an app makes, so
+     * this is the ceiling on what a script minting wallets could take: 200 x 100 coins a day.
+     */
+    static final int WELCOMES_PER_DAY = Optional.ofNullable(System.getenv("AICOIN_PROXY_WELCOMES_PER_DAY"))
+            .flatMap(v -> { try { return Optional.of(Integer.parseInt(v.trim())); } catch (NumberFormatException e) { return Optional.empty(); } })
+            .orElse(200);
+
+    static String welcomeCountKey(Instant now) {
+        return "aicoin:" + TAG + ":welcomes:" + java.time.LocalDate.ofInstant(now, java.time.ZoneOffset.UTC);
+    }
+
     void claimFreeCoins(String userId, long cooldownSeconds, int poolSize, double claimAmount, Consumer<ClaimResult> onResult) {
         long nowMillis = Instant.now().toEpochMilli();
         long cooldownMillis = cooldownSeconds * 1000L;
         RedisFuture<List<Object>> future = commands.eval(CLAIM_SCRIPT, ScriptOutputType.MULTI,
-                new String[] {lastClaimKey(userId), balanceKey(userId), FREE_COINS_REMAINING_KEY, KNOWN_WALLETS_KEY, txKey(userId)},
-                String.valueOf(nowMillis), String.valueOf(cooldownMillis), String.valueOf(poolSize), String.valueOf(claimAmount), userId);
+                new String[] {lastClaimKey(userId), balanceKey(userId), FREE_COINS_REMAINING_KEY, KNOWN_WALLETS_KEY, txKey(userId),
+                        welcomeCountKey(Instant.now())},
+                String.valueOf(nowMillis), String.valueOf(cooldownMillis), String.valueOf(poolSize), String.valueOf(claimAmount), userId,
+                String.valueOf(WELCOMES_PER_DAY));
         future.whenComplete((raw, err) -> {
             if (err != null) {
                 LOG.log(Level.WARNING, "ledger claim failed for " + userId, err);

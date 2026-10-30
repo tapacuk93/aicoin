@@ -552,7 +552,11 @@ stale balance check and overdraw, two concurrent calls could both debit past
 zero, or two concurrent/retried IAP redemptions of the same `transactionId`
 could double-credit. All four run as single Redis Lua `EVAL` scripts, which
 Redis executes atomically with respect to every other client:
-- **Claim**: read `lastclaim:{address}`; if `now - lastclaim < cooldownMillis`
+- **Claim**: a wallet's first claim (no `lastclaim:{address}` yet) is its welcome: granted
+  the full amount without touching the pool, as long as fewer than
+  `AICOIN_PROXY_WELCOMES_PER_DAY` (default 200) wallets were welcomed that UTC day
+  (`aicoin:{aicoin}:welcomes:<date>`, kept two days). Past the cap it falls through to the
+  rules below. Otherwise: read `lastclaim:{address}`; if `now - lastclaim < cooldownMillis`
   return not-eligible (`reason:"cooldown"`). Else read the shared pool
   counter (lazily initialized to `aicoin.freeCoinsPoolSize` if never set);
   if `< freeClaimAmount` (100 aicoin) return not-eligible
