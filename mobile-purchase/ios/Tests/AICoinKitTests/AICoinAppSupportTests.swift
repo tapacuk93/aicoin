@@ -111,6 +111,17 @@ final class AICoinAppSupportTests: XCTestCase {
         XCTAssertEqual(transport.requests.count, 1)
     }
 
+    func testAnEmptyPoolIsAskedAgainNextLaunch() async {
+        let transport = RecordingTransport { reply(#"{"granted":false,"reason":"pool_exhausted"}"#, status: 429, for: $0) }
+        let client = WalletClient(transport: transport)
+
+        _ = await AICoinFaucet.claimIfNeeded(walletClient: client, identity: .generate(), defaults: defaults, key: "k")
+        _ = await AICoinFaucet.claimIfNeeded(walletClient: client, identity: .generate(), defaults: defaults, key: "k")
+
+        XCTAssertEqual(transport.requests.count, 2)
+        XCTAssertFalse(defaults.bool(forKey: "k"))
+    }
+
     func testAClaimThatNeverReachedTheServerIsRetriedNextTime() async {
         let transport = RecordingTransport { _ in throw URLError(.notConnectedToInternet) }
         let client = WalletClient(transport: transport)

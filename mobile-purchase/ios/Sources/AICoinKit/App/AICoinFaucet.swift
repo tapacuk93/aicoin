@@ -44,7 +44,14 @@ public enum AICoinFaucet {
         guard !defaults.bool(forKey: key) else { return nil }
         do {
             let result = try await walletClient.claimFreeCoins(identity: identity)
-            defaults.set(true, forKey: key)
+            // Settled only by a grant or a cooldown (this wallet has claimed before). An empty
+            // pool is not a verdict on this wallet: it was marked settled too, so everyone who
+            // installed while the pool was dry stayed at zero for good, even once the server
+            // started welcoming every new wallet (CONTRACT.md, "Claim"). It is asked again on the
+            // next launch instead — one request a launch at most.
+            if result.granted || result.reason != "pool_exhausted" {
+                defaults.set(true, forKey: key)
+            }
             return result
         } catch {
             return nil
