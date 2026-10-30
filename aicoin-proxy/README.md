@@ -851,15 +851,16 @@ rules are in CONTRACT.md's "Hosted Anyphone"; in short:
 | | |
 |---|---|
 | `GET /phone/price` | tiers (`gpu` g4dn.metal, `cpu` c8i.2xlarge) with `coinsPerMinute`, `usdPerHour`, `available`; `minimumMinutes` |
-| `POST /phone/start` `{"tier":"cpu"}` | needs `coinsPerMinute × minimumMinutes` in the balance; launches, charges minute 1, returns the status |
+| `POST /phone/start` `{"tier":"cpu","restore":true}` | `restore` optional (the app has a saved state to upload); needs `coinsPerMinute × minimumMinutes` in the balance; launches, charges minute 1, returns the status |
 | `GET /phone/status` | `phoneId`, `tier`, `state` (`none`/`starting`/`running`/`suspending`), `host`, `port` 443, `token`, `coinsPerMinute`, `chargedCoins`, `startedAt`, `balance`, `suspendAt` |
 | `POST /phone/suspend` `{}` / `{"force":true}` | the app calls it after downloading the phone's state; terminates the instance and stops the meter |
 
 All take the wallet's API token (`X-Api-Key`), like a paid AI call. Code: `HostedPhones` (start,
 suspend, the meter, the reaper), `PhoneStore` (Redis, atomic per-minute charges),
-`Ec2PhoneCloud` (RunInstances / DescribeInstances / TerminateInstances), `PhoneUserData` +
-`src/main/resources/anyphone/user-data.sh` (the instance's user data — the one place to change
-what a new instance runs), `PhoneHandler` (HTTP). Tests: `HostedPhonesTest` (start, metering,
+`Ec2PhoneCloud` (RunInstances / DescribeImages / DescribeInstances / TerminateInstances),
+`PhoneUserData` + `src/main/resources/anyphone/hosted-user-data.sh` (a verbatim copy of anyphone's
+`infra/aws/hosted-user-data.sh`: refresh it from there when that contract changes, or point
+`anyphone.userDataTemplate` at a newer copy), `PhoneHandler` (HTTP). Tests: `HostedPhonesTest` (start, metering,
 restart recovery, the lease, low balance and forced suspend, ownership, the reaper — against an
 in-memory store and a fake EC2), `PhonePricingTest`, `Ec2PhoneCloudTest` (the exact RunInstances
 request, against a stand-in `Ec2Client`), `PhoneUserDataTest`, and `PhoneStoreRedisTest`, which runs
@@ -879,18 +880,38 @@ override; tier fields `AICOIN_PROXY_ANYPHONE_<TIER>_<FIELD>`, e.g. `..._GPU_AVAI
 
 ```sh
 AICOIN_PROXY_ANYPHONE_ENABLED=true
-AICOIN_PROXY_ANYPHONE_AMI_ID=ami-...            # the prebaked Anyphone image
+AICOIN_PROXY_ANYPHONE_VERSION=v0.2.0             # REQUIRED: the anyphone release (and baked-image tag)
+AICOIN_PROXY_ANYPHONE_RELEASE_URL=https://.../releases   # REQUIRED, see below
 AICOIN_PROXY_ANYPHONE_SUBNET_ID=subnet-...       # a public subnet (route to an internet gateway)
-AICOIN_PROXY_ANYPHONE_SECURITY_GROUP_ID=sg-...   # 443/tcp in from anywhere; nothing else needed
+AICOIN_PROXY_ANYPHONE_SECURITY_GROUP_ID=sg-...   # inbound 443/tcp only; outbound all
+AICOIN_PROXY_ANYPHONE_AMI_ID=ami-...             # optional fallback when no baked image is tagged
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...  # the IAM user below (SDK default credential chain)
 ```
+
+**The release URL has no default, on purpose.** anyphone's `hosted-user-data.sh` defaults
+`ANYPHONE_REPO` to `https://anyphone-cfn-k7q2m9.s3.amazonaws.com/releases`, and that bucket was
+deleted on 2026-10-26. The proxy always rewrites that line to `anyphone.releaseUrl` and refuses to
+start a phone (`503 not_configured`) without one. Even on a baked image the URL matters: the
+script downloads the bootstrap from it whenever the image's baked version differs from
+`anyphone.version`. Publish a release somewhere first (anyphone's `publish.sh`) and set it.
+
+The image: the newest available self-owned AMI tagged `anyphone:baked=1`,
+`anyphone:version=<version>`, `anyphone:gpu=nvidia` (gpu tier) or `none` (cpu tier), as
+anyphone's `bake-ami.sh` tags them; `AMI_ID` only when there is none (`bakedAmi: false` turns the
+lookup off).
+
+Instances launch with shutdown behaviour *stop* (anyphone's contract: a poweroff must not
+destroy an unbacked-up phone). The meter treats a stopped or stopping instance as the end of the
+phone and terminates it, so nothing stays parked in the account.
 
 Turning it off while phones are running leaves their instances running with no meter and no
 reaper — suspend them first (or terminate everything tagged `anyphone:hosted=true`).
 
 ### IAM permissions for the proxy's credentials
 
-Account 798762732010, us-east-1. Replace the AMI, subnet and security group ids:
+Account 798762732010, us-east-1. Replace the subnet and security group ids. Images are `image/*`
+because the baked image changes with every bake; to pin them, add a condition
+`"ec2:ResourceTag/anyphone:baked": "1"` on a separate image statement.
 
 ```json
 {
@@ -901,7 +922,7 @@ Account 798762732010, us-east-1. Replace the AMI, subnet and security group ids:
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
       "Resource": [
-        "arn:aws:ec2:us-east-1::image/ami-XXXXXXXX",
+        "arn:aws:ec2:us-east-1::image/*",
         "arn:aws:ec2:us-east-1::snapshot/*",
         "arn:aws:ec2:us-east-1:798762732010:subnet/subnet-XXXXXXXX",
         "arn:aws:ec2:us-east-1:798762732010:security-group/sg-XXXXXXXX",
@@ -929,9 +950,9 @@ Account 798762732010, us-east-1. Replace the AMI, subnet and security group ids:
       "Condition": { "StringEquals": { "ec2:CreateAction": "RunInstances" } }
     },
     {
-      "Sid": "List",
+      "Sid": "ListInstancesAndBakedImages",
       "Effect": "Allow",
-      "Action": "ec2:DescribeInstances",
+      "Action": ["ec2:DescribeInstances", "ec2:DescribeImages"],
       "Resource": "*"
     },
     {
@@ -945,8 +966,7 @@ Account 798762732010, us-east-1. Replace the AMI, subnet and security group ids:
 }
 ```
 
-Also, only if used: `iam:PassRole` on the role behind `anyphone.instanceProfile` (empty by default:
-a hosted phone needs no AWS access); for a spot tier, the `AWSServiceRoleForEC2Spot`
+No `iam:PassRole`: a hosted phone launches with no instance profile. Only if used: for a spot tier, the `AWSServiceRoleForEC2Spot`
 service-linked role must exist in the account (created once by an admin —
 `aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`); if the AMI's snapshot
 is encrypted with a customer-managed KMS key, `kms:CreateGrant`, `kms:Decrypt`,

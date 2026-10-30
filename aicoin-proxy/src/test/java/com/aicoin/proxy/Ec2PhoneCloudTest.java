@@ -12,7 +12,11 @@ import java.util.Map;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.DescribeImagesRequest;
+import software.amazon.awssdk.services.ec2.model.DescribeImagesResponse;
 import software.amazon.awssdk.services.ec2.model.DescribeInstancesRequest;
+import software.amazon.awssdk.services.ec2.model.Filter;
+import software.amazon.awssdk.services.ec2.model.Image;
 import software.amazon.awssdk.services.ec2.model.DescribeInstancesResponse;
 import software.amazon.awssdk.services.ec2.model.Instance;
 import software.amazon.awssdk.services.ec2.model.InstanceStateName;
@@ -61,6 +65,15 @@ class Ec2PhoneCloudTest {
             }
 
             @Override
+            public DescribeImagesResponse describeImages(DescribeImagesRequest request) {
+                requests.add(request);
+                return DescribeImagesResponse.builder().images(
+                        Image.builder().imageId("ami-old").creationDate("2026-10-01T10:00:00.000Z").build(),
+                        Image.builder().imageId("ami-new").creationDate("2026-10-29T10:00:00.000Z").build(),
+                        Image.builder().imageId("ami-mid").creationDate("2026-10-15T10:00:00.000Z").build()).build();
+            }
+
+            @Override
             public TerminateInstancesResponse terminateInstances(TerminateInstancesRequest request) {
                 requests.add(request);
                 return TerminateInstancesResponse.builder().build();
@@ -68,9 +81,9 @@ class Ec2PhoneCloudTest {
         };
     }
 
-    private static AnyphoneConfig config(String instanceProfile) {
-        return new AnyphoneConfig(true, "us-east-1", "ami-default", "subnet-9", "sg-9", instanceProfile, "v1.2",
-                "tapacuk93/anyphone", "", "com.oeaio.anyphone", 0.009, 0.5, 10, 5, 180, 15, 300,
+    private static AnyphoneConfig config(String unused) {
+        return new AnyphoneConfig(true, "us-east-1", "ami-default", true, "subnet-9", "sg-9", 48, "v1.2",
+                "https://releases.example.com/releases", "", "com.oeaio.anyphone", 0.009, 0.5, 10, 5, 180, 15, 300,
                 AnyphoneConfig.defaultTiers());
     }
 
@@ -82,7 +95,7 @@ class Ec2PhoneCloudTest {
     void launchesTheCpuTierOnDemandWithNestedVirtualizationTagsAndUserData() {
         AnyphoneConfig config = config("anyphone-phone");
         Ec2PhoneCloud cloud = new Ec2PhoneCloud(client(), config);
-        String id = cloud.launch(new PhoneCloud.Launch("wallet1", "ph-42", config.tier("cpu"), "#!/bin/bash\necho hi\n"));
+        String id = cloud.launch(new PhoneCloud.Launch("wallet1", "ph-42", config.tier("cpu"), "ami-default", "#!/bin/bash\necho hi\n"));
         assertEquals("i-0abc", id);
 
         RunInstancesRequest r = (RunInstancesRequest) requests.get(0);
@@ -91,11 +104,17 @@ class Ec2PhoneCloudTest {
         assertEquals(1, r.minCount());
         assertEquals(1, r.maxCount());
         assertEquals("ph-42", r.clientToken());
-        assertEquals("terminate", r.instanceInitiatedShutdownBehaviorAsString());
+        assertEquals("stop", r.instanceInitiatedShutdownBehaviorAsString());
+        assertEquals(1, r.blockDeviceMappings().size());
+        assertEquals("/dev/sda1", r.blockDeviceMappings().get(0).deviceName());
+        assertEquals("gp3", r.blockDeviceMappings().get(0).ebs().volumeTypeAsString());
+        assertEquals(48, r.blockDeviceMappings().get(0).ebs().volumeSize());
+        assertTrue(r.blockDeviceMappings().get(0).ebs().encrypted());
+        assertTrue(r.blockDeviceMappings().get(0).ebs().deleteOnTermination());
         assertEquals("required", r.metadataOptions().httpTokensAsString());
         assertEquals("enabled", r.cpuOptions().nestedVirtualizationAsString());
         assertNull(r.instanceMarketOptions(), "on-demand");
-        assertEquals("anyphone-phone", r.iamInstanceProfile().name());
+        assertNull(r.iamInstanceProfile(), "a hosted phone has no instance profile");
         assertEquals("#!/bin/bash\necho hi\n",
                 new String(Base64.getDecoder().decode(r.userData()), StandardCharsets.UTF_8));
 
@@ -120,17 +139,17 @@ class Ec2PhoneCloudTest {
     @Test
     void aSpotTierCapsThePriceAtWhatTheCoinsWerePricedFrom() {
         AnyphoneConfig base = config("");
-        AnyphoneConfig.Tier spot = new AnyphoneConfig.Tier("gpu", "g4dn.metal", 4.5, true, true, false, "ami-gpu");
+        // nestedVirtualization wrongly on: metal still gets no CpuOptions.
+        AnyphoneConfig.Tier spot = new AnyphoneConfig.Tier("gpu", "g4dn.metal", 4.5, true, true, true, "", "nvidia");
         Ec2PhoneCloud cloud = new Ec2PhoneCloud(client(), base);
-        cloud.launch(new PhoneCloud.Launch("w", "ph-1", spot, "x"));
+        cloud.launch(new PhoneCloud.Launch("w", "ph-1", spot, "ami-gpu", "x"));
         RunInstancesRequest r = (RunInstancesRequest) requests.get(0);
-        assertEquals("ami-gpu", r.imageId(), "a tier's own AMI wins");
+        assertEquals("ami-gpu", r.imageId(), "the image the launch names");
         assertEquals(MarketType.SPOT, r.instanceMarketOptions().marketType());
         assertEquals("4.5000", r.instanceMarketOptions().spotOptions().maxPrice());
         assertEquals("one-time", r.instanceMarketOptions().spotOptions().spotInstanceTypeAsString());
         assertEquals("terminate", r.instanceMarketOptions().spotOptions().instanceInterruptionBehaviorAsString());
         assertNull(r.cpuOptions(), "metal needs no nested virtualization");
-        assertNull(r.iamInstanceProfile(), "no instance profile configured");
     }
 
     @Test
@@ -160,5 +179,17 @@ class Ec2PhoneCloudTest {
     void terminatesByInstanceId() {
         new Ec2PhoneCloud(client(), config("")).terminate("i-9");
         assertEquals(List.of("i-9"), ((TerminateInstancesRequest) requests.get(0)).instanceIds());
+    }
+
+    @Test
+    void findsTheNewestBakedImageForTheVersionAndGpuFlavour() {
+        assertEquals("ami-new", new Ec2PhoneCloud(client(), config("")).newestBakedImage("v0.2.0", "nvidia"));
+        DescribeImagesRequest r = (DescribeImagesRequest) requests.get(0);
+        assertEquals(List.of("self"), r.owners());
+        Map<String, List<String>> filters = r.filters().stream().collect(Collectors.toMap(Filter::name, Filter::values));
+        assertEquals(List.of("1"), filters.get("tag:anyphone:baked"));
+        assertEquals(List.of("v0.2.0"), filters.get("tag:anyphone:version"));
+        assertEquals(List.of("nvidia"), filters.get("tag:anyphone:gpu"));
+        assertEquals(List.of("available"), filters.get("state"));
     }
 }

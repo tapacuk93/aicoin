@@ -572,9 +572,10 @@ public final class ProxyConfig {
         String amiId = envStr(env, e + "AMI_ID", getString(yaml, p + "amiId", d.getAmiId()));
         String subnetId = envStr(env, e + "SUBNET_ID", getString(yaml, p + "subnetId", d.getSubnetId()));
         String securityGroupId = envStr(env, e + "SECURITY_GROUP_ID", getString(yaml, p + "securityGroupId", d.getSecurityGroupId()));
-        String instanceProfile = envStr(env, e + "INSTANCE_PROFILE", getString(yaml, p + "instanceProfile", d.getInstanceProfile()));
+        boolean bakedAmi = envBool(env, e + "BAKED_AMI", getBoolean(yaml, p + "bakedAmi", d.isBakedAmi()));
+        int rootVolumeGb = envInt(env, e + "ROOT_VOLUME_GB", getInt(yaml, p + "rootVolumeGb", d.getRootVolumeGb()));
         String version = envStr(env, e + "VERSION", getString(yaml, p + "version", d.getVersion()));
-        String repo = envStr(env, e + "REPO", getString(yaml, p + "repo", d.getRepo()));
+        String releaseUrl = envStr(env, e + "RELEASE_URL", getString(yaml, p + "releaseUrl", d.getReleaseUrl()));
         String userDataTemplate = envStr(env, e + "USER_DATA_TEMPLATE", getString(yaml, p + "userDataTemplate", d.getUserDataTemplate()));
         String pushTopic = envStr(env, e + "PUSH_TOPIC", getString(yaml, p + "pushTopic", d.getPushTopic()));
         double coinValue = envDouble(env, e + "COIN_VALUE_USD", getDouble(yaml, p + "coinValueUsd", coinValueUsd));
@@ -591,7 +592,7 @@ public final class ProxyConfig {
         Object yamlTiers = getNested(yaml, p + "tiers");
         if (yamlTiers instanceof Map) {
             for (Object id : ((Map<?, ?>) yamlTiers).keySet()) {
-                tiers.putIfAbsent(String.valueOf(id), new AnyphoneConfig.Tier(String.valueOf(id), "", 0, false, false, false, ""));
+                tiers.putIfAbsent(String.valueOf(id), new AnyphoneConfig.Tier(String.valueOf(id), "", 0, false, false, false, "", "none"));
             }
         }
         Map<String, AnyphoneConfig.Tier> parsed = new LinkedHashMap<>();
@@ -605,14 +606,15 @@ public final class ProxyConfig {
             boolean nested = envBool(env, te + "NESTED_VIRTUALIZATION",
                     getBoolean(yaml, tp + "nestedVirtualization", def.isNestedVirtualization()));
             String tierAmi = envStr(env, te + "AMI_ID", getString(yaml, tp + "amiId", def.getAmiId()));
+            String imageGpu = envStr(env, te + "IMAGE_GPU", getString(yaml, tp + "imageGpu", def.getImageGpu()));
             if (!"spot".equals(market) && !"on-demand".equals(market)) {
                 throw new IllegalArgumentException("anyphone.tiers." + def.getId() + ".market must be spot or on-demand");
             }
             parsed.put(def.getId(), new AnyphoneConfig.Tier(def.getId(), instanceType, usdPerHour, "spot".equals(market),
-                    available && !instanceType.isEmpty(), nested, tierAmi));
+                    available && !instanceType.isEmpty(), nested, tierAmi, imageGpu));
         }
-        return new AnyphoneConfig(enabled, region, amiId, subnetId, securityGroupId, instanceProfile, version, repo,
-                userDataTemplate, pushTopic, coinValue, feeMargin, minimumMinutes, warnMinutes, graceSeconds,
+        return new AnyphoneConfig(enabled, region, amiId, bakedAmi, subnetId, securityGroupId, rootVolumeGb, version,
+                releaseUrl, userDataTemplate, pushTopic, coinValue, feeMargin, minimumMinutes, warnMinutes, graceSeconds,
                 meterIntervalSeconds, startTimeoutSeconds, parsed);
     }
 

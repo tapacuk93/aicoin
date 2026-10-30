@@ -11,17 +11,27 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * The user data a hosted phone boots with: {@code src/main/resources/anyphone/user-data.sh} (or the
- * file {@code anyphone.userDataTemplate} names) with its {@code {{NAME}}} placeholders filled in.
- * The template is the one place the script lives; this class only substitutes.
+ * The user data a hosted phone boots with: anyphone's own {@code infra/aws/hosted-user-data.sh},
+ * bundled verbatim as {@code src/main/resources/anyphone/hosted-user-data.sh} (or the file
+ * {@code anyphone.userDataTemplate} names — point it at a newer copy without a rebuild).
+ *
+ * <p>That script's contract (anyphone's infra/aws/README.md, "Hosted phones"): the proxy replaces
+ * {@code __TOKEN__}, {@code __PHONE_ID__}, {@code __VERSION__}, {@code __REGION__} and
+ * {@code __RESTORE__} in the {@code stack.env} block; every value one line, no quotes or spaces.
+ * {@code ANYPHONE_REPO} is not a placeholder there — the script carries a default release URL —
+ * so its line is rewritten to {@code anyphone.releaseUrl}, which is required: the default bucket
+ * no longer exists.
  */
 final class PhoneUserData {
 
-    static final String BUNDLED = "/anyphone/user-data.sh";
+    static final String BUNDLED = "/anyphone/hosted-user-data.sh";
 
-    /** Every value goes into a shell heredoc and a URL, so it is held to characters that are inert in both. */
-    private static final Pattern SAFE = Pattern.compile("[A-Za-z0-9._/@:+=-]{1,200}");
-    private static final Pattern PLACEHOLDER = Pattern.compile("\\{\\{([A-Z_]+)}}");
+    /** Inert in a quoted heredoc, a sourced env file and a URL: no quotes, spaces, $ or backticks. */
+    private static final Pattern SAFE = Pattern.compile("[A-Za-z0-9._/:+=-]{0,200}");
+    private static final Pattern TOKEN = Pattern.compile("[A-Za-z0-9_-]{32,200}");
+    private static final Pattern URL = Pattern.compile("https://[A-Za-z0-9._/:-]{1,300}");
+    private static final Pattern LEFTOVER = Pattern.compile("__[A-Z][A-Z_]*__");
+    private static final Pattern REPO_LINE = Pattern.compile("(?m)^ANYPHONE_REPO=.*$");
 
     private PhoneUserData() {
     }
@@ -42,33 +52,48 @@ final class PhoneUserData {
         }
     }
 
-    static Map<String, String> values(AnyphoneConfig config, String phoneId, String token) {
+    /** The placeholder values for one launch. {@code restore}: the app will upload a saved state right away. */
+    static Map<String, String> values(AnyphoneConfig config, String phoneId, String token, boolean restore) {
         Map<String, String> values = new LinkedHashMap<>();
-        values.put("ANYPHONE_TOKEN", token);
-        values.put("ANYPHONE_PHONE_ID", phoneId);
-        values.put("ANYPHONE_VERSION", config.getVersion());
-        values.put("ANYPHONE_REPO", config.getRepo());
-        values.put("AWS_REGION", config.getRegion());
+        values.put("__TOKEN__", token);
+        values.put("__PHONE_ID__", phoneId);
+        values.put("__VERSION__", config.getVersion());
+        values.put("__REGION__", config.getRegion());
+        values.put("__RESTORE__", restore ? "expected" : "");
         return values;
     }
 
-    /** Fills every placeholder. An unknown placeholder or an unsafe value is an error, never a silent blank. */
-    static String render(String template, Map<String, String> values) {
+    /**
+     * Fills every placeholder and sets the release URL. An unsafe value, a leftover placeholder or
+     * a template without an {@code ANYPHONE_REPO=} line is an error, never a silently broken phone.
+     */
+    static String render(String template, Map<String, String> values, String releaseUrl) {
         for (Map.Entry<String, String> e : values.entrySet()) {
-            if (e.getValue() == null || !SAFE.matcher(e.getValue()).matches()) {
-                throw new IllegalArgumentException(e.getKey() + " is not shell-safe");
+            String v = e.getValue();
+            if (v == null || !SAFE.matcher(v).matches()) {
+                throw new IllegalArgumentException(e.getKey() + " is not a single shell-safe line");
             }
         }
-        Matcher m = PLACEHOLDER.matcher(template);
-        StringBuilder out = new StringBuilder();
-        while (m.find()) {
-            String value = values.get(m.group(1));
-            if (value == null) {
-                throw new IllegalArgumentException("user-data template has an unknown placeholder {{" + m.group(1) + "}}");
-            }
-            m.appendReplacement(out, Matcher.quoteReplacement(value));
+        String token = values.get("__TOKEN__");
+        if (token == null || !TOKEN.matcher(token).matches()) {
+            throw new IllegalArgumentException("__TOKEN__ must be at least 32 base64url characters");
         }
-        m.appendTail(out);
-        return out.toString();
+        if (releaseUrl == null || !URL.matcher(releaseUrl).matches()) {
+            throw new IllegalArgumentException("anyphone.releaseUrl must be an https URL");
+        }
+        String out = template;
+        for (Map.Entry<String, String> e : values.entrySet()) {
+            out = out.replace(e.getKey(), e.getValue());
+        }
+        Matcher repo = REPO_LINE.matcher(out);
+        if (!repo.find()) {
+            throw new IllegalArgumentException("user-data template has no ANYPHONE_REPO= line");
+        }
+        out = repo.replaceAll(Matcher.quoteReplacement("ANYPHONE_REPO=" + releaseUrl));
+        Matcher leftover = LEFTOVER.matcher(out);
+        if (leftover.find()) {
+            throw new IllegalArgumentException("user-data template has an unknown placeholder " + leftover.group());
+        }
+        return out;
     }
 }

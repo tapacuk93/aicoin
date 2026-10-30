@@ -34,6 +34,15 @@ class HostedPhonesTest {
         boolean failTerminate;
         boolean failList;
         int next = 1;
+        /** Baked images by "version/gpu"; lookups counted. */
+        final Map<String, String> baked = new java.util.HashMap<>();
+        int imageLookups;
+
+        @Override
+        public synchronized String newestBakedImage(String version, String gpu) {
+            imageLookups++;
+            return baked.get(version + "/" + gpu);
+        }
 
         @Override
         public synchronized String launch(Launch launch) {
@@ -102,9 +111,9 @@ class HostedPhonesTest {
 
     private static AnyphoneConfig config(boolean gpuAvailable) {
         Map<String, AnyphoneConfig.Tier> tiers = AnyphoneConfig.defaultTiers();
-        tiers.put("gpu", new AnyphoneConfig.Tier("gpu", "g4dn.metal", 7.82, false, gpuAvailable, false, ""));
-        return new AnyphoneConfig(true, "us-east-1", "ami-123", "subnet-1", "sg-1", "", "main", "tapacuk93/anyphone",
-                "", "com.oeaio.anyphone", 0.009, 0.5, 10, 5, 180, 15, 300, tiers);
+        tiers.put("gpu", new AnyphoneConfig.Tier("gpu", "g4dn.metal", 7.82, false, gpuAvailable, false, "", "nvidia"));
+        return new AnyphoneConfig(true, "us-east-1", "ami-123", true, "subnet-1", "sg-1", 40, "v0.2.0",
+                "https://releases.example.com/releases", "", "com.oeaio.anyphone", 0.009, 0.5, 10, 5, 180, 15, 300, tiers);
     }
 
     private HostedPhones phones() {
@@ -534,5 +543,91 @@ class HostedPhonesTest {
         assertEquals("{\"aps\":{\"alert\":{\"title\":\"T\",\"body\":\"B\"},\"sound\":\"default\"},"
                 + "\"anyphone\":{\"event\":\"balance_low\",\"phoneId\":\"ph-1\"}}",
                 HostedPhones.payload("T", "B", "balance_low", "ph-1"));
+    }
+
+    // ------------------------------------------------------------------ hosted contract
+
+    @Test
+    void restoreAsksTheFirstBootToWaitForTheUpload() {
+        store.balances.put(A, 1000.0);
+        HostedPhones phones = phones();
+        assertEquals(200, phones.start(A, "cpu", true).status());
+        assertTrue(cloud.launches.get(0).userData().contains("\nANYPHONE_RESTORE=expected\n"));
+        phones.suspend(A, true);
+        assertEquals(200, phones.start(A, "cpu", false).status());
+        assertTrue(cloud.launches.get(1).userData().contains("\nANYPHONE_RESTORE=\n"));
+        assertTrue(cloud.launches.get(1).userData().contains("\nANYPHONE_REPO=https://releases.example.com/releases\n"));
+    }
+
+    @Test
+    void launchesTheNewestBakedImageOfTheTiersFlavourAndCachesTheLookup() {
+        store.balances.put(A, 10_000.0);
+        store.balances.put(B, 10_000.0);
+        cloud.baked.put("v0.2.0/none", "ami-baked-cpu");
+        cloud.baked.put("v0.2.0/nvidia", "ami-baked-gpu");
+        HostedPhones phones = phones(config(true));
+        phones.start(A, "cpu");
+        phones.start(B, "gpu");
+        assertEquals("ami-baked-cpu", cloud.launches.get(0).imageId());
+        assertEquals("ami-baked-gpu", cloud.launches.get(1).imageId());
+        phones.suspend(A, true);
+        phones.start(A, "cpu");
+        assertEquals(2, cloud.imageLookups, "one lookup per tier within ten minutes");
+    }
+
+    @Test
+    void withNoBakedImageTheConfiguredAmiIsUsed() {
+        store.balances.put(A, 1000.0);
+        startCpu(phones(), A);
+        assertEquals("ami-123", cloud.launches.get(0).imageId());
+    }
+
+    @Test
+    void withoutAReleaseUrlNothingStarts() {
+        store.balances.put(A, 1000.0);
+        AnyphoneConfig c = new AnyphoneConfig(true, "us-east-1", "ami-123", true, "subnet-1", "sg-1", 40, "v0.2.0",
+                "", "", "com.oeaio.anyphone", 0.009, 0.5, 10, 5, 180, 15, 300, AnyphoneConfig.defaultTiers());
+        HostedPhones.Reply reply = phones(c).start(A, "cpu");
+        assertEquals(503, reply.status());
+        assertEquals("not_configured", reply.body().get("error"));
+        assertTrue(cloud.launches.isEmpty());
+    }
+
+    @Test
+    void aStoppedInstanceEndsThePhoneIsTerminatedAndChargesNothingMore() {
+        store.balances.put(A, 1000.0);
+        HostedPhones phones = phones();
+        startCpu(phones, A);
+        String phoneId = cloud.launches.get(0).phoneId();
+        cloud.set("i-1", "running", "203.0.113.7");
+        advance(3 * MIN);
+        phones.tick();
+        double balance = store.balance(A);
+        cloud.set("i-1", "stopped", ""); // Android powered off; shutdown behaviour is stop
+        advance(5 * MIN);
+        phones.tick();
+        assertEquals(List.of("i-1"), cloud.terminated);
+        assertNull(store.get(A));
+        assertEquals(balance, store.balance(A), 1e-9, "no minutes charged for the stopped time");
+        assertEquals(List.of(new Push(A, "phone_stopped", phoneId)), pushes);
+    }
+
+    @Test
+    void aStoppingInstanceWhoseTerminateFailsStaysSuspendingUnmetered() {
+        store.balances.put(A, 1000.0);
+        HostedPhones phones = phones();
+        startCpu(phones, A);
+        cloud.set("i-1", "stopping", "");
+        cloud.failTerminate = true;
+        double balance = store.balance(A);
+        advance(4 * MIN);
+        phones.tick();
+        assertEquals("suspending", store.get(A).state);
+        advance(4 * MIN);
+        phones.tick();
+        assertEquals(balance, store.balance(A), 1e-9);
+        cloud.failTerminate = false;
+        phones.tick();
+        assertEquals(List.of("i-1"), cloud.terminated);
     }
 }

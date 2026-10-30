@@ -29,9 +29,10 @@ final class PhoneHandler {
                 Map<?, ?> json = parse(body);
                 Object tier = json == null ? null : json.get("tier");
                 if (!(tier instanceof String)) {
-                    immediate = badRequest("body must be {\"tier\":\"gpu\"|\"cpu\"}");
+                    immediate = badRequest("body must be {\"tier\":\"gpu\"|\"cpu\",\"restore\":true|false}");
                 } else {
-                    work = () -> phones.start(wallet, (String) tier);
+                    boolean restore = Boolean.TRUE.equals(json.get("restore"));
+                    work = () -> phones.start(wallet, (String) tier, restore);
                 }
                 break;
             }

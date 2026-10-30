@@ -390,6 +390,13 @@ class ProxyConfigTest {
         assertEquals(0.009, anyphone.getCoinValueUsd(), 1e-12);
         assertEquals(0.5, anyphone.getFeeMargin(), 1e-12);
         assertEquals("com.oeaio.anyphone", anyphone.getPushTopic());
+        assertEquals("", anyphone.getVersion(), "required, no default");
+        assertEquals("", anyphone.getReleaseUrl(), "required: the script's default bucket is gone");
+        assertTrue(anyphone.isBakedAmi());
+        assertEquals(40, anyphone.getRootVolumeGb());
+        assertEquals("nvidia", anyphone.tier("gpu").getImageGpu());
+        assertEquals("none", anyphone.tier("cpu").getImageGpu());
+        assertFalse(anyphone.tier("gpu").isNestedVirtualization());
         assertEquals(List.of("gpu", "cpu"), List.copyOf(anyphone.getTiers().keySet()));
         assertEquals("g4dn.metal", anyphone.tier("gpu").getInstanceType());
         assertFalse(anyphone.tier("gpu").isAvailable());
@@ -408,6 +415,8 @@ class ProxyConfigTest {
         env.put("AICOIN_PROXY_ANYPHONE_SUBNET_ID", "subnet-1");
         env.put("AICOIN_PROXY_ANYPHONE_SECURITY_GROUP_ID", "sg-1");
         env.put("AICOIN_PROXY_ANYPHONE_GPU_AVAILABLE", "true");
+        env.put("AICOIN_PROXY_ANYPHONE_VERSION", "v0.2.0");
+        env.put("AICOIN_PROXY_ANYPHONE_RELEASE_URL", "https://r.example.com/releases");
         env.put("AICOIN_PROXY_ANYPHONE_GPU_MARKET", "spot");
         env.put("AICOIN_PROXY_ANYPHONE_GPU_USD_PER_HOUR", "4.5");
         env.put("AICOIN_PROXY_COIN_VALUE_USD", "0.01");
@@ -416,6 +425,8 @@ class ProxyConfigTest {
         assertEquals("ami-1", anyphone.getAmiId());
         assertEquals("subnet-1", anyphone.getSubnetId());
         assertEquals("sg-1", anyphone.getSecurityGroupId());
+        assertEquals("v0.2.0", anyphone.getVersion());
+        assertEquals("https://r.example.com/releases", anyphone.getReleaseUrl());
         assertTrue(anyphone.tier("gpu").isAvailable());
         assertTrue(anyphone.tier("gpu").isSpot());
         assertEquals(4.5, anyphone.tier("gpu").getUsdPerHour(), 1e-12);

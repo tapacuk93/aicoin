@@ -22,9 +22,10 @@ final class AnyphoneConfig {
         private final boolean available;
         private final boolean nestedVirtualization;
         private final String amiId;
+        private final String imageGpu;
 
         Tier(String id, String instanceType, double usdPerHour, boolean spot, boolean available,
-             boolean nestedVirtualization, String amiId) {
+             boolean nestedVirtualization, String amiId, String imageGpu) {
             this.id = id;
             this.instanceType = instanceType;
             this.usdPerHour = usdPerHour;
@@ -32,6 +33,7 @@ final class AnyphoneConfig {
             this.available = available;
             this.nestedVirtualization = nestedVirtualization;
             this.amiId = amiId == null ? "" : amiId;
+            this.imageGpu = imageGpu == null || imageGpu.isEmpty() ? "none" : imageGpu;
         }
 
         String getId() {
@@ -60,14 +62,22 @@ final class AnyphoneConfig {
             return available;
         }
 
-        /** The {@code c8i} family runs the emulator under KVM inside the VM, which needs this. */
+        /** The {@code c8i} family runs the emulator under KVM inside the VM, which needs this. Never on metal. */
         boolean isNestedVirtualization() {
             return nestedVirtualization;
         }
 
-        /** This tier's own AMI, or "" to use the block's {@code amiId}. */
+        /** This tier's own fallback AMI, or "" to use the block's {@code amiId}. */
         String getAmiId() {
             return amiId;
+        }
+
+        /**
+         * The {@code anyphone:gpu} tag of the baked image this tier runs: {@code nvidia} for the
+         * GPU tier (driver installed), {@code none} otherwise.
+         */
+        String getImageGpu() {
+            return imageGpu;
         }
     }
 
@@ -76,9 +86,10 @@ final class AnyphoneConfig {
     private final String amiId;
     private final String subnetId;
     private final String securityGroupId;
-    private final String instanceProfile;
+    private final boolean bakedAmi;
+    private final int rootVolumeGb;
     private final String version;
-    private final String repo;
+    private final String releaseUrl;
     private final String userDataTemplate;
     private final String pushTopic;
     private final double coinValueUsd;
@@ -90,8 +101,9 @@ final class AnyphoneConfig {
     private final int startTimeoutSeconds;
     private final Map<String, Tier> tiers;
 
-    AnyphoneConfig(boolean enabled, String region, String amiId, String subnetId, String securityGroupId,
-                   String instanceProfile, String version, String repo, String userDataTemplate, String pushTopic,
+    AnyphoneConfig(boolean enabled, String region, String amiId, boolean bakedAmi, String subnetId,
+                   String securityGroupId, int rootVolumeGb, String version, String releaseUrl,
+                   String userDataTemplate, String pushTopic,
                    double coinValueUsd, double feeMargin, int minimumMinutes, int warnMinutes, int graceSeconds,
                    int meterIntervalSeconds, int startTimeoutSeconds, Map<String, Tier> tiers) {
         this.enabled = enabled;
@@ -99,9 +111,10 @@ final class AnyphoneConfig {
         this.amiId = amiId;
         this.subnetId = subnetId;
         this.securityGroupId = securityGroupId;
-        this.instanceProfile = instanceProfile;
+        this.bakedAmi = bakedAmi;
+        this.rootVolumeGb = rootVolumeGb;
         this.version = version;
-        this.repo = repo;
+        this.releaseUrl = releaseUrl;
         this.userDataTemplate = userDataTemplate;
         this.pushTopic = pushTopic;
         this.coinValueUsd = coinValueUsd;
@@ -116,15 +129,15 @@ final class AnyphoneConfig {
 
     /** The bundled defaults, disabled — what a config built without the block gets. */
     static AnyphoneConfig disabled(double coinValueUsd) {
-        return new AnyphoneConfig(false, "us-east-1", "", "", "", "", "main", "tapacuk93/anyphone", "",
+        return new AnyphoneConfig(false, "us-east-1", "", true, "", "", 40, "", "", "",
                 "com.oeaio.anyphone", coinValueUsd, AppStorePriceRounding.FEE_MARGIN, 10, 5, 180, 15, 300,
                 defaultTiers());
     }
 
     static Map<String, Tier> defaultTiers() {
         Map<String, Tier> tiers = new LinkedHashMap<>();
-        tiers.put("gpu", new Tier("gpu", "g4dn.metal", 7.82, false, false, false, ""));
-        tiers.put("cpu", new Tier("cpu", "c8i.2xlarge", 0.38, false, true, true, ""));
+        tiers.put("gpu", new Tier("gpu", "g4dn.metal", 7.82, false, false, false, "", "nvidia"));
+        tiers.put("cpu", new Tier("cpu", "c8i.2xlarge", 0.38, false, true, true, "", "none"));
         return tiers;
     }
 
@@ -148,22 +161,34 @@ final class AnyphoneConfig {
         return securityGroupId;
     }
 
-    /** Instance profile name or ARN for the phone, or "" for none (a hosted phone needs no AWS access). */
-    String getInstanceProfile() {
-        return instanceProfile;
+    /**
+     * Whether to launch the newest available self-owned image tagged {@code anyphone:baked=1},
+     * {@code anyphone:version=<version>}, {@code anyphone:gpu=<tier's imageGpu>} (from
+     * anyphone's {@code bake-ami.sh}), falling back to {@link #getAmiId} when there is none.
+     */
+    boolean isBakedAmi() {
+        return bakedAmi;
     }
 
-    /** {@code ANYPHONE_VERSION}: the anyphone git ref the bootstrap installs. */
+    /** Size of the root gp3 volume; never below the 40 GB the phone needs. */
+    int getRootVolumeGb() {
+        return Math.max(40, rootVolumeGb);
+    }
+
+    /** {@code ANYPHONE_VERSION}: the anyphone release to run ({@code releases/<version>/} must exist). Required. */
     String getVersion() {
         return version;
     }
 
-    /** {@code ANYPHONE_REPO}: owner/name on GitHub. */
-    String getRepo() {
-        return repo;
+    /**
+     * {@code ANYPHONE_REPO}: https base URL of the anyphone releases (the bucket's {@code
+     * releases/} prefix). Required: the script's built-in default bucket no longer exists.
+     */
+    String getReleaseUrl() {
+        return releaseUrl;
     }
 
-    /** Path of a user-data template file, or "" for the bundled {@code anyphone/user-data.sh}. */
+    /** Path of a user-data template file, or "" for the bundled {@code anyphone/hosted-user-data.sh}. */
     String getUserDataTemplate() {
         return userDataTemplate;
     }
@@ -215,7 +240,7 @@ final class AnyphoneConfig {
         return id == null ? null : tiers.get(id);
     }
 
-    /** The AMI a tier launches from. */
+    /** The configured AMI for a tier — the fallback when no baked image is found. */
     String amiFor(Tier tier) {
         return tier.getAmiId().isEmpty() ? amiId : tier.getAmiId();
     }

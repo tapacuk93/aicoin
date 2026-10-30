@@ -167,8 +167,16 @@ final class HostedPhones {
         return new Reply(200, statusBody(record, store.balance(wallet)));
     }
 
-    /** {@code POST /phone/start}. */
+    /** {@code POST /phone/start} for a fresh phone. */
     synchronized Reply start(String wallet, String tierId) {
+        return start(wallet, tierId, false);
+    }
+
+    /**
+     * {@code POST /phone/start}. {@code restore}: the app has a saved state it will upload right
+     * away, so Android's first boot waits for it ({@code ANYPHONE_RESTORE=expected}).
+     */
+    synchronized Reply start(String wallet, String tierId, boolean restore) {
         AnyphoneConfig.Tier tier = config.tier(tierId);
         if (tier == null) {
             Reply reply = error(400, "unknown_tier", "tier must be one of " + config.getTiers().keySet());
@@ -177,7 +185,8 @@ final class HostedPhones {
         if (!tier.isAvailable()) {
             return error(409, "tier_unavailable", "the " + tier.getId() + " phone cannot be started yet");
         }
-        if (config.amiFor(tier).isEmpty() || config.getSubnetId().isEmpty() || config.getSecurityGroupId().isEmpty()) {
+        if (config.getSubnetId().isEmpty() || config.getSecurityGroupId().isEmpty()
+                || config.getVersion().isEmpty() || config.getReleaseUrl().isEmpty()) {
             return error(503, "not_configured", "hosted phones are not configured");
         }
         PhoneRecord existing = store.get(wallet);
@@ -185,6 +194,10 @@ final class HostedPhones {
             Reply reply = error(409, "phone_exists", "this wallet already has a phone");
             reply.body().put("phone", statusBody(existing, store.balance(wallet)));
             return reply;
+        }
+        String imageId = image(tier);
+        if (imageId.isEmpty()) {
+            return error(503, "not_configured", "no image for the " + tier.getId() + " phone");
         }
         long cpm = PhonePricing.coinsPerMinute(tier, config);
         long required = cpm * config.getMinimumMinutes();
@@ -209,14 +222,14 @@ final class HostedPhones {
         record.state = PhoneRecord.STARTING;
         record.launchedAt = now;
         String userData = PhoneUserData.render(template.get(),
-                PhoneUserData.values(config, record.phoneId, record.token));
+                PhoneUserData.values(config, record.phoneId, record.token, restore), config.getReleaseUrl());
         if (!store.create(record)) {
             return error(409, "phone_exists", "this wallet already has a phone");
         }
 
         String instanceId;
         try {
-            instanceId = cloud.launch(new PhoneCloud.Launch(wallet, record.phoneId, tier, userData));
+            instanceId = cloud.launch(new PhoneCloud.Launch(wallet, record.phoneId, tier, imageId, userData));
         } catch (RuntimeException e) {
             // Nothing launched, nothing charged: forget the phone so the wallet can try again.
             LOG.log(Level.WARNING, "could not launch a " + tier.getId() + " phone for " + wallet + ": " + e.getMessage());
@@ -245,7 +258,7 @@ final class HostedPhones {
             return error(409, "not_running",
                     "the phone has not finished starting; send {\"force\":true} to terminate it anyway");
         }
-        Long charged = suspendNow(record, "requested");
+        Long charged = suspendNow(record, "requested", true);
         Map<String, Object> body = statusBody(charged != null ? null : store.get(wallet), store.balance(wallet));
         if (charged != null) {
             // The phone is gone; say which one ended and what it came to.
@@ -264,9 +277,9 @@ final class HostedPhones {
      * the instance and forgets the phone. Returns the coins the phone was charged in all, or null
      * when AWS refused the terminate: the phone then stays {@code suspending} and the meter retries.
      */
-    private Long suspendNow(PhoneRecord record, String why) {
+    private Long suspendNow(PhoneRecord record, String why, boolean chargeToNow) {
         long now = clock.getAsLong();
-        if (!PhoneRecord.SUSPENDING.equals(record.state)) {
+        if (chargeToNow && !PhoneRecord.SUSPENDING.equals(record.state)) {
             store.charge(record.wallet, record.phoneId, PhonePricing.startedMinutes(record.launchedAt, now), now);
         }
         PhoneRecord current = update(record.wallet, record.phoneId, r -> r.state = PhoneRecord.SUSPENDING);
@@ -376,7 +389,7 @@ final class HostedPhones {
             if (listed && (instance == null || instance.isGone())) {
                 store.delete(record.wallet, record.phoneId);
             } else {
-                suspendNow(record, "retry");
+                suspendNow(record, "retry", false);
             }
             return;
         }
@@ -386,6 +399,19 @@ final class HostedPhones {
             store.delete(record.wallet, record.phoneId);
             notifier.notify(record.wallet, "phone_stopped", record.phoneId, "Your phone stopped",
                     "Its cloud machine was taken back. Start it again to restore your last backup.");
+            return;
+        }
+        if (instance != null && instance.isStopped()) {
+            // Android powered off (shutdown behaviour is stop). A hosted phone is never resumed
+            // from a stopped instance: it is over. Nothing is charged for the time since it
+            // stopped; terminating removes the volume. If AWS refuses, the phone stays
+            // suspending (unmetered) and the next pass retries.
+            LOG.info("hosted phone " + record.phoneId + " for " + record.wallet + ": instance " + record.instanceId
+                    + " is " + instance.state() + "; ending it");
+            if (suspendNow(record, "instance stopped", false) != null) {
+                notifier.notify(record.wallet, "phone_stopped", record.phoneId, "Your phone was shut down",
+                        "Android powered off, so the phone was ended. Start it again to restore your last backup.");
+            }
             return;
         }
         if (instance != null && instance.isRunning() && !instance.publicIp().isEmpty()
@@ -423,7 +449,7 @@ final class HostedPhones {
                 notifier.notify(record.wallet, "balance_exhausted", record.phoneId, "Your phone is about to be suspended",
                         "Out of AICoins. Add coins within " + minutes + " min or the phone is suspended without a backup.");
             } else if (now - record.exhaustedAt >= config.getGraceSeconds() * 1000L) {
-                if (suspendNow(record, "balance exhausted") != null) {
+                if (suspendNow(record, "balance exhausted", true) != null) {
                     notifier.notify(record.wallet, "suspended", record.phoneId, "Your phone was suspended",
                             "It ran out of AICoins. Changes since your last backup were not saved.");
                 }
@@ -478,6 +504,40 @@ final class HostedPhones {
     }
 
     // ------------------------------------------------------------------ helpers
+
+    private static final long IMAGE_CACHE_MILLIS = 10 * 60_000L;
+    private final Map<String, String> imageByTier = new HashMap<>();
+    private final Map<String, Long> imageCheckedAt = new HashMap<>();
+
+    /**
+     * The AMI a tier launches: the newest baked image for the configured version and the tier's
+     * GPU flavour (looked up at most every ten minutes), else the configured id; "" when neither.
+     */
+    private String image(AnyphoneConfig.Tier tier) {
+        String fallback = config.amiFor(tier);
+        if (!config.isBakedAmi()) {
+            return fallback;
+        }
+        long now = clock.getAsLong();
+        Long checked = imageCheckedAt.get(tier.getId());
+        if (checked == null || now - checked >= IMAGE_CACHE_MILLIS) {
+            try {
+                String found = cloud.newestBakedImage(config.getVersion(), tier.getImageGpu());
+                imageByTier.put(tier.getId(), found == null ? "" : found);
+                imageCheckedAt.put(tier.getId(), now);
+                if (found == null) {
+                    LOG.warning("no baked anyphone image for " + config.getVersion() + "/" + tier.getImageGpu()
+                            + "; using " + (fallback.isEmpty() ? "nothing" : fallback));
+                }
+            } catch (RuntimeException e) {
+                // Not cached: the next start asks again.
+                LOG.log(Level.WARNING, "could not look up baked anyphone images: " + e.getMessage());
+                return fallback;
+            }
+        }
+        String baked = imageByTier.getOrDefault(tier.getId(), "");
+        return baked.isEmpty() ? fallback : baked;
+    }
 
     /**
      * Applies {@code change} to the stored phone and saves it, re-reading and re-applying when a

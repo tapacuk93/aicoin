@@ -408,21 +408,30 @@ anyphone:
   # endpoints answer 404, no AWS client is built and no meter runs. Env: AICOIN_PROXY_ANYPHONE_ENABLED.
   # Turning it off while phones run leaves their instances running unmetered: suspend them first.
   enabled: false
-  # Where phones are launched, and from what. The AMI is the prebaked Anyphone image (emulator,
-  # system image and bootstrap installed); the subnet must route to the internet and the security
-  # group must allow 443/tcp in. Env: AICOIN_PROXY_ANYPHONE_REGION / _AMI_ID / _SUBNET_ID /
-  # _SECURITY_GROUP_ID / _INSTANCE_PROFILE (name or ARN; empty = none, a hosted phone needs no
-  # AWS access of its own).
+  # Where phones are launched. The subnet must give a public IPv4 route to the internet; the
+  # security group must allow inbound 443/tcp only (anyphoned: TLS + token) and all outbound.
+  # No instance profile: a hosted phone calls no AWS API.
+  # Env: AICOIN_PROXY_ANYPHONE_REGION / _SUBNET_ID / _SECURITY_GROUP_ID.
   region: us-east-1
-  amiId: ""
   subnetId: ""
   securityGroupId: ""
-  instanceProfile: ""
-  # ANYPHONE_VERSION / ANYPHONE_REPO written to the instance's /etc/anyphone/stack.env.
-  version: main
-  repo: tapacuk93/anyphone
-  # The user data: empty uses the bundled src/main/resources/anyphone/user-data.sh; a path uses
-  # that file instead (change the script without a rebuild). Env: _USER_DATA_TEMPLATE.
+  # The image: with bakedAmi, the newest available self-owned image tagged anyphone:baked=1,
+  # anyphone:version=<version>, anyphone:gpu=<tier imageGpu> (anyphone's bake-ami.sh), looked up
+  # at most every 10 minutes; amiId (or a tier's own amiId) when there is none.
+  # Env: _BAKED_AMI / _AMI_ID.
+  bakedAmi: true
+  amiId: ""
+  # Root /dev/sda1: gp3, encrypted, deleted with the instance, never below 40 GB. Env: _ROOT_VOLUME_GB.
+  rootVolumeGb: 40
+  # REQUIRED. ANYPHONE_VERSION: the anyphone release to run (releases/<version>/ must exist at
+  # releaseUrl). Env: _VERSION.
+  version: ""
+  # REQUIRED. ANYPHONE_REPO: https base URL of the anyphone releases (the release bucket's
+  # releases/ prefix). The user-data script's built-in default (anyphone-cfn-k7q2m9) was deleted
+  # on 2026-10-26, so this has no default. Env: _RELEASE_URL.
+  releaseUrl: ""
+  # The user data: empty uses the bundled src/main/resources/anyphone/hosted-user-data.sh (a copy
+  # of anyphone's infra/aws/hosted-user-data.sh); a path uses that file instead. Env: _USER_DATA_TEMPLATE.
   userDataTemplate: ""
   # The Anyphone app's bundle id: low-balance warnings are pushed to the wallet's devices that
   # registered (POST /push/devices) under this topic.
@@ -444,20 +453,24 @@ anyphone:
   startTimeoutSeconds: 300
   tiers:
     # usdPerHour is what an hour costs the operator — on-demand list price, or for market: spot the
-    # most it will pay (sent as the spot max price). Env per tier: AICOIN_PROXY_ANYPHONE_GPU_AVAILABLE,
-    # _GPU_INSTANCE_TYPE, _GPU_USD_PER_HOUR, _GPU_MARKET, _GPU_AMI_ID, _GPU_NESTED_VIRTUALIZATION.
+    # most it will pay (sent as the spot max price). imageGpu is the anyphone:gpu tag of its baked
+    # image. Env per tier: AICOIN_PROXY_ANYPHONE_GPU_AVAILABLE, _GPU_INSTANCE_TYPE,
+    # _GPU_USD_PER_HOUR, _GPU_MARKET, _GPU_AMI_ID, _GPU_IMAGE_GPU, _GPU_NESTED_VIRTUALIZATION.
     gpu:
       instanceType: g4dn.metal
       usdPerHour: 7.82
       market: on-demand
       # False until the account's GPU vCPU quota allows a g4dn.metal.
       available: false
+      imageGpu: nvidia
+      # Metal: no nested-virtualization option.
       nestedVirtualization: false
     cpu:
       instanceType: c8i.2xlarge
       usdPerHour: 0.38
       market: on-demand
       available: true
+      imageGpu: none
       # The emulator needs KVM inside the VM.
       nestedVirtualization: true
 iap:
