@@ -133,6 +133,8 @@ public struct AICoinRouter: HTTPTransport {
         newRequest.url = newURL
         newRequest.setValue(provider.rawValue, forHTTPHeaderField: "X-AI")
         newRequest.setValue(token, forHTTPHeaderField: "X-Api-Key")
+        // Which app and what for: labels for the proxy's transaction log, never needed by it.
+        AICoinCallTags.tag(&newRequest)
         return newRequest
     }
 

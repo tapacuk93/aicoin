@@ -106,7 +106,7 @@ public struct AICoinCapabilityClient: Sendable {
     public func text(
         prompt: String, context: String? = nil, subject: String? = nil, provider: String? = nil,
         escalate: Bool? = nil, maxTokens: Int? = nil, timeout: TimeInterval = 120,
-        fastest: Bool? = nil
+        fastest: Bool? = nil, purpose: String? = nil
     ) async throws -> TextAnswer {
         var body: [String: Any] = ["prompt": prompt]
         // Whoever answers soonest among the providers rated for it, rather than the best-rated:
@@ -117,7 +117,7 @@ public struct AICoinCapabilityClient: Sendable {
         if let provider { body["provider"] = provider }
         if let escalate { body["escalate"] = escalate }
         if let maxTokens { body["max_tokens"] = maxTokens }
-        let data = try await post("text", body: body, timeout: timeout)
+        let data = try await post("text", body: body, timeout: timeout, purpose: purpose)
         return try decodeAnswer(data)
     }
 
@@ -153,7 +153,7 @@ public struct AICoinCapabilityClient: Sendable {
         maxRounds: Int? = nil, timeout: TimeInterval = 600,
         library: ConsortiumLibrary? = nil, quality: ConsortiumQuality? = nil,
         maxOutputTokens: Int? = nil, callID: String? = nil, idleTimeout: TimeInterval = 45,
-        notify: ConsortiumNotify? = nil, skip: [String] = [],
+        notify: ConsortiumNotify? = nil, skip: [String] = [], purpose: String? = nil,
         onEvent: (@Sendable (ConsortiumEvent) -> Void)? = nil
     ) async throws -> TextAnswer {
         var body: [String: Any] = ["prompt": prompt, "mode": mode]
@@ -172,14 +172,15 @@ public struct AICoinCapabilityClient: Sendable {
         if let maxOutputTokens { body["max_output_tokens"] = maxOutputTokens }
         guard let onEvent else {
             do {
-                let data = try await post("consortium", body: body, timeout: timeout)
+                let data = try await post("consortium", body: body, timeout: timeout, purpose: purpose)
                 return try decodeAnswer(data)
             } catch AICoinError.server(let status, let message) where status == 409 && message == "call paused" {
                 throw ConsortiumPausedError(callID: callID, phase: nil, round: nil)
             }
         }
         body["stream"] = true
-        return try await streamConsortium(body: body, timeout: timeout, idleTimeout: idleTimeout, onEvent: onEvent)
+        return try await streamConsortium(body: body, timeout: timeout, idleTimeout: idleTimeout,
+                                          purpose: purpose, onEvent: onEvent)
     }
 
     /// The `userInfo` key marking the `URLError` a silent stream is reported with.
@@ -204,10 +205,10 @@ public struct AICoinCapabilityClient: Sendable {
     /// Refusals decided before the panel starts (no token, an empty wallet, a bad body) are
     /// ordinary HTTP errors, exactly as without streaming.
     private func streamConsortium(
-        body: [String: Any], timeout: TimeInterval, idleTimeout: TimeInterval,
+        body: [String: Any], timeout: TimeInterval, idleTimeout: TimeInterval, purpose: String?,
         onEvent: @escaping @Sendable (ConsortiumEvent) -> Void
     ) async throws -> TextAnswer {
-        let request = try makeRequest("consortium", body: body, timeout: timeout)
+        let request = try makeRequest("consortium", body: body, timeout: timeout, purpose: purpose)
         let lines: AsyncThrowingStream<String, Error>
         let response: URLResponse
         if let streaming = transport as? any HTTPLineStreamingTransport {
@@ -351,12 +352,13 @@ public struct AICoinCapabilityClient: Sendable {
 
     /// `POST /image`. `size` is the provider-neutral `"1024x1024"` form.
     public func image(
-        prompt: String, provider: String? = nil, size: String? = nil, timeout: TimeInterval = 120
+        prompt: String, provider: String? = nil, size: String? = nil, timeout: TimeInterval = 120,
+        purpose: String? = nil
     ) async throws -> Media {
         var body: [String: Any] = ["prompt": prompt]
         if let provider { body["provider"] = provider }
         if let size { body["size"] = size }
-        let data = try await post("image", body: body, timeout: timeout)
+        let data = try await post("image", body: body, timeout: timeout, purpose: purpose)
         return try Self.media(from: data)
     }
 
@@ -364,20 +366,21 @@ public struct AICoinCapabilityClient: Sendable {
     /// Text-to-Speech, which will not infer it; the others read it from the text.
     public func audio(
         prompt: String, provider: String? = nil, voice: String? = nil, language: String? = nil,
-        timeout: TimeInterval = 120
+        timeout: TimeInterval = 120, purpose: String? = nil
     ) async throws -> Media {
         var body: [String: Any] = ["prompt": prompt]
         if let provider { body["provider"] = provider }
         if let voice { body["voice"] = voice }
         if let language { body["language"] = language }
-        let data = try await post("audio", body: body, timeout: timeout)
+        let data = try await post("audio", body: body, timeout: timeout, purpose: purpose)
         return try Self.media(from: data)
     }
 
     // MARK: - Plumbing
 
-    private func post(_ path: String, body: [String: Any], timeout: TimeInterval) async throws -> Data {
-        let request = try makeRequest(path, body: body, timeout: timeout)
+    private func post(_ path: String, body: [String: Any], timeout: TimeInterval,
+                      purpose: String? = nil) async throws -> Data {
+        let request = try makeRequest(path, body: body, timeout: timeout, purpose: purpose)
         let (data, response) = try await transport.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         try check(status: status, data: data)
@@ -398,13 +401,17 @@ public struct AICoinCapabilityClient: Sendable {
         }
     }
 
-    private func makeRequest(_ path: String, body: [String: Any], timeout: TimeInterval) throws -> URLRequest {
+    /// `purpose` labels the call in the proxy's transaction log; nil falls back to
+    /// `AICoinCallTags.withPurpose`, and to no label at all — see `AICoinCallTags`.
+    private func makeRequest(_ path: String, body: [String: Any], timeout: TimeInterval,
+                             purpose: String? = nil) throws -> URLRequest {
         guard let token = token(), !token.isEmpty else { throw AICoinError.missingToken }
         var request = URLRequest(url: WalletClient.endpointURL(baseURL, "/\(path)"))
         request.httpMethod = "POST"
         request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(token, forHTTPHeaderField: "X-Api-Key")
+        AICoinCallTags.tag(&request, purpose: purpose)
         // Slashes unescaped: the proxy reads bodies with a YAML parser, which has no `\/`, and a
         // prompt with a "/" in it came back 400 "body must be JSON".
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])

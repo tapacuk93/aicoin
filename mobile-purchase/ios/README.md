@@ -127,6 +127,26 @@ do {
 }
 ```
 
+### Saying what a call is for (`AICoinCallTags`)
+
+Every proxied call carries `X-AICoin-App` (the bundle id) on its own. Say what each call is
+for, so the operator's transaction list (`GET /admin/transactions`, the admin app's Transactions
+tab) shows more than "unspecified" — a short lowercase word: `narrate`, `translate`, `chat`,
+`lesson`, `image`:
+
+```swift
+// Around anything that ends in paid calls, however deep (shared kits, queues started inside):
+let audio = try await AICoinCallTags.withPurpose("narrate") { try await narrator.speak(text) }
+// On a request the app builds itself:
+request.setValue("translate", forHTTPHeaderField: AICoinCallTags.purposeHeader)
+// On the proxy's own endpoints:
+let answer = try await capabilities.text(prompt: prompt, purpose: "lesson")
+```
+
+A header already on the request wins over the argument, which wins over `withPurpose`. Both
+headers are optional and only labels: a call without them is priced and charged exactly the
+same, and is listed as purpose `unspecified`. `Task.detached` does not inherit `withPurpose`.
+
 ## App support
 
 Every app used to hand-write the same few hundred lines of glue around the pieces above — a
