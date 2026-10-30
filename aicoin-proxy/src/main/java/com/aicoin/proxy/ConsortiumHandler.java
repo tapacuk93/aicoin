@@ -403,6 +403,7 @@ final class ConsortiumHandler {
                 calls == null ? null : callId, calls == null ? null : calls.store(), prompt, background, panel, editor,
                 models, maxRounds, includeTranscript, lead, poll, subject, null, best, maxOutputTokens, library,
                 UpstreamTimer.of(ctx.channel()), 0, 0, Map.of());
+        session.tag(Transactions.Tag.of(ctx.channel()));
         session.seating(seated, skip);
         // Told by push when it ends with nobody watching — durable calls only, since only those run
         // on without a client; a `notify` on a call without an id is ignored.
@@ -476,7 +477,7 @@ final class ConsortiumHandler {
         new ConsortiumSession(config, clientGroup, healthTracker, ledger, wallet, null, null, prompt, background,
                 panel, editor, models, config.getConsortium().getMaxRounds(), false, false, false, subject, from,
                 false, config.getConsortium().getMaxOutputTokens(), null, UpstreamTimer.of(ctx.channel()),
-                priorCalls, priorCoins, priorSpend).start(ctx, false);
+                priorCalls, priorCoins, priorSpend).tag(Transactions.Tag.of(ctx.channel())).start(ctx, false);
     }
 
     private static Map<?, ?> parseBody(byte[] bytes) {

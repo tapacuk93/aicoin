@@ -184,6 +184,17 @@ final class ConsortiumSession {
     private boolean aborted;
     private Runnable onFinished = () -> { };
 
+    /**
+     * The app and purpose the request that started this call named, for the {@link Transactions}
+     * log. Not kept with a durable call: one resumed by another process logs its turns unlabelled.
+     */
+    private volatile Transactions.Tag tag = Transactions.Tag.NONE;
+
+    ConsortiumSession tag(Transactions.Tag tag) {
+        this.tag = tag == null ? Transactions.Tag.NONE : tag;
+        return this;
+    }
+
     ConsortiumSession(ProxyConfig config, EventLoopGroup group, ProviderHealthTracker healthTracker,
                       AicoinLedger ledger, String wallet, String callId, ConsortiumStore store,
                       String prompt, String background, List<String> panel, String editor,
@@ -1261,6 +1272,8 @@ final class ConsortiumSession {
         byte[] body = ChatAdapter.body(provider, model, fullSystem, context.forTurn(fullTask), maxOutputTokens);
         String path = ChatAdapter.path(provider, model);
         Attempt attempt = new Attempt();
+        Transactions.Call record = Transactions.Call.of(wallet, tag, provider).model(model)
+                .endpoint(Transactions.endpointOf(path));
         synchronized (this) {
             // Paused, or taken off the panel: this turn is not to run. Nothing is said to the
             // stage — a pause resumes it from the checkpoint, a removal ends the provider's part.
@@ -1289,6 +1302,7 @@ final class ConsortiumSession {
                 return;
             }
             if (!debit.isSuccess()) {
+                Transactions.recordCall(record.failed(402, "insufficient balance"));
                 synchronized (this) {
                     insufficient = true;
                 }
@@ -1323,6 +1337,8 @@ final class ConsortiumSession {
                             // over yet. Unless the account cannot pay: then every model behind it
                             // refuses alike, and the error says so in the provider's words.
                             ledger.refund(wallet, CALL_COST_AICOIN, provider);
+                            Transactions.recordCall(record.failed(
+                                    result.getStatus() > 0 ? result.getStatus() : 502, result.getError()));
                             synchronized (this) {
                                 pendingHolds.remove(provider);
                             }
@@ -1353,6 +1369,7 @@ final class ConsortiumSession {
                             charged = CoinMeter.coinsFor(priced.getCostUsd(), config.getCoinValueUsd());
                             ledger.settleCall(wallet, charged - CALL_COST_AICOIN, provider);
                         }
+                        Transactions.recordCall(record.succeeded(result.getStatus(), charged, priced.getCostUsd()));
                         synchronized (this) {
                             pendingHolds.remove(provider);
                             coinsCharged += charged;

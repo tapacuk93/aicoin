@@ -94,18 +94,33 @@ final class BilledCall {
                       AicoinLedger ledger, String wallet, String provider, String path,
                       List<Map.Entry<String, String>> headers, byte[] body, String billingModel,
                       UpstreamTimer timer, Consumer<Outcome> onDone) {
+        post(group, config, healthTracker, ledger, wallet, provider, path, headers, body, billingModel, timer,
+                Transactions.Tag.NONE, onDone);
+    }
+
+    /** @param tag the app and purpose the client request named, for the {@link Transactions} log */
+    static void post(EventLoopGroup group, ProxyConfig config, ProviderHealthTracker healthTracker,
+                      AicoinLedger ledger, String wallet, String provider, String path,
+                      List<Map.Entry<String, String>> headers, byte[] body, String billingModel,
+                      UpstreamTimer timer, Transactions.Tag tag, Consumer<Outcome> onDone) {
+        Transactions.Call record = Transactions.Call.of(wallet, tag, provider)
+                .model(billingModel != null ? billingModel : Transactions.modelOf(path, body))
+                .endpoint(Transactions.endpointOf(path));
         ledger.debitForCall(wallet, CALL_COST_AICOIN, provider, debit -> {
             if (!debit.isReachable()) {
                 onDone.accept(new Outcome(false, false, "could not validate wallet", null, 0));
                 return;
             }
             if (!debit.isSuccess()) {
+                Transactions.recordCall(record.failed(402, "insufficient balance"));
                 onDone.accept(new Outcome(true, false, "insufficient balance", null, 0));
                 return;
             }
             UpstreamCall.post(group, config, healthTracker, provider, path, headers, body, timer, result -> {
                 if (!result.isOk()) {
                     ledger.refund(wallet, CALL_COST_AICOIN, provider);
+                    Transactions.recordCall(record.failed(result.getStatus() > 0 ? result.getStatus() : 502,
+                            result.getError()));
                     onDone.accept(new Outcome(false, true, result.getError(), null, 0));
                     return;
                 }
@@ -123,6 +138,7 @@ final class BilledCall {
                     charged = CoinMeter.coinsFor(priced.getCostUsd(), config.getCoinValueUsd());
                     ledger.settleCall(wallet, charged - CALL_COST_AICOIN, provider);
                 }
+                Transactions.recordCall(record.succeeded(result.getStatus(), charged, priced.getCostUsd()));
                 onDone.accept(new Outcome(false, true, null, result, charged));
             });
         });

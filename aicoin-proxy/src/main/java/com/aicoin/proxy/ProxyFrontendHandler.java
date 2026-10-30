@@ -99,6 +99,10 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) {
         String path = pathOnly(request.uri());
+        // The app and purpose this request names, for the transaction log. Both optional labels:
+        // a request without them is served exactly the same. See Transactions.
+        Transactions.Tag.set(ctx.channel(), Transactions.Tag.fromHeaders(
+                request.headers().get(AppCaps.APP_HEADER), request.headers().get(Transactions.PURPOSE_HEADER)));
 
         if (request.method() == HttpMethod.GET && "/price".equals(path)) {
             sendPrice(ctx);
@@ -142,6 +146,10 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         }
         if (request.method() == HttpMethod.DELETE && path.startsWith("/admin/devices/")) {
             AlertsHandler.serveUnregister(ctx, request, config, path.substring("/admin/devices/".length()));
+            return;
+        }
+        if (request.method() == HttpMethod.GET && "/admin/transactions".equals(path)) {
+            TransactionsHandler.serve(ctx, request, config);
             return;
         }
         if (request.method() == HttpMethod.GET && "/admin/apps".equals(path)) {
@@ -414,6 +422,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             if (name.equalsIgnoreCase(X_AI_HEADER)
                     || name.equalsIgnoreCase(X_API_KEY_HEADER)
                     || name.equalsIgnoreCase(AppCaps.APP_HEADER)
+                    || name.equalsIgnoreCase(Transactions.PURPOSE_HEADER)
                     || name.equalsIgnoreCase(HttpHeaderNames.HOST.toString())
                     || name.equalsIgnoreCase(HttpHeaderNames.CONTENT_LENGTH.toString())
                     || name.equalsIgnoreCase(HttpHeaderNames.AUTHORIZATION.toString())
@@ -497,6 +506,9 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             if (!debit.isReachable()) {
                 sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
             } else if (!debit.isSuccess()) {
+                Transactions.recordCall(Transactions.Call.of(walletAddress, Transactions.Tag.of(ctx.channel()), provider)
+                        .endpoint(Transactions.endpointOf(forwardUri))
+                        .failed(402, "insufficient balance"));
                 sendInsufficientBalance(ctx, debit.getBalance());
             } else {
                 UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, forwardUri,
@@ -514,6 +526,8 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         Instant now = Instant.now();
         ledger.appCaps().gate(walletAddress, appHeader, now, onAllowed, decision -> {
             AdminAlerts.get().appCapReached(decision.getStatus());
+            Transactions.recordCall(Transactions.Call.of(walletAddress, Transactions.Tag.of(ctx.channel()), null)
+                    .failed(429, "app daily cap reached"));
             byte[] bytes = decision.errorJson().getBytes(CharsetUtil.UTF_8);
             FullHttpResponse response = new DefaultFullHttpResponse(
                     HttpVersion.HTTP_1_1, HttpResponseStatus.TOO_MANY_REQUESTS, Unpooled.wrappedBuffer(bytes));

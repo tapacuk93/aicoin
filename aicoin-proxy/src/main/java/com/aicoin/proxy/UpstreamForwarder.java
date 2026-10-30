@@ -116,11 +116,19 @@ final class UpstreamForwarder {
                          String walletAddress,
                          double callCostAicoin,
                          ResponseHook hook) {
+        // What the transaction log says about this call, when it is a paid one. Read now: the
+        // channel's tag belongs to the request being served, and the body's model is known here.
+        Recorder recorder = callCostAicoin > 0
+                ? new Recorder(Transactions.Call.of(walletAddress, Transactions.Tag.of(clientCtx.channel()), provider)
+                        .model(Transactions.modelOf(Transactions.endpointOf(forwardUri), body))
+                        .endpoint(Transactions.endpointOf(forwardUri)))
+                : Recorder.NONE;
         URI upstreamUri;
         try {
             upstreamUri = new URI(baseUrl);
         } catch (Exception e) {
             refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+            recorder.failed(502, "invalid provider baseUrl");
             sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "invalid provider baseUrl");
             return;
         }
@@ -130,6 +138,7 @@ final class UpstreamForwarder {
         int port = upstreamUri.getPort() != -1 ? upstreamUri.getPort() : (tls ? 443 : 80);
         if (host == null) {
             refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+            recorder.failed(502, "invalid provider baseUrl");
             sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "invalid provider baseUrl");
             return;
         }
@@ -168,7 +177,7 @@ final class UpstreamForwarder {
                         ch.pipeline().addLast(new HttpObjectAggregator(MAX_CONTENT_LENGTH));
                         ch.pipeline().addLast(new UpstreamResponseHandler(
                                 config, healthTracker, ledger, clientCtx, provider, walletAddress, callCostAicoin,
-                                settled, span, hook));
+                                settled, span, hook, recorder));
                     }
                 });
 
@@ -178,6 +187,7 @@ final class UpstreamForwarder {
                 LOG.log(Level.WARNING, "upstream connect failed for provider " + provider + " at " + baseUrl, future.cause());
                 if (settled.compareAndSet(false, true)) {
                     refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+                    recorder.failed(502, "upstream connection failed");
                     sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream connection failed");
                 }
                 return;
@@ -198,6 +208,7 @@ final class UpstreamForwarder {
                 if (settled.compareAndSet(false, true)) {
                     LOG.log(Level.FINE, "client gone before upstream answered; aborting " + provider + " call");
                     refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+                    recorder.failed(499, "client gone before the provider answered");
                 }
                 upstreamCh.close();
             };
@@ -227,6 +238,7 @@ final class UpstreamForwarder {
                     LOG.log(Level.WARNING, "upstream write failed for provider " + provider, writeFuture.cause());
                     if (settled.compareAndSet(false, true)) {
                         refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+                        recorder.failed(502, "upstream write failed");
                         sendSynthetic(clientCtx, HttpResponseStatus.BAD_GATEWAY, "upstream write failed");
                     }
                     upstreamCh.close();
@@ -283,6 +295,32 @@ final class UpstreamForwarder {
         return new String(bodyBytes, CharsetUtil.UTF_8);
     }
 
+    /**
+     * Writes a paid call's outcome to the {@link Transactions} log, once. {@link #NONE} (a free
+     * target) writes nothing. Never throws: the log is best effort.
+     */
+    static final class Recorder {
+        static final Recorder NONE = new Recorder(null);
+        private final Transactions.Call call;
+        private final AtomicBoolean done = new AtomicBoolean(false);
+
+        Recorder(Transactions.Call call) {
+            this.call = call;
+        }
+
+        void succeeded(int status, long coins, double costUsd) {
+            if (call != null && done.compareAndSet(false, true)) {
+                Transactions.recordCall(call.succeeded(status, coins, costUsd));
+            }
+        }
+
+        void failed(int status, String error) {
+            if (call != null && done.compareAndSet(false, true)) {
+                Transactions.recordCall(call.failed(status, error));
+            }
+        }
+    }
+
     private static void refundIfBilled(AicoinLedger ledger, String walletAddress, double callCostAicoin, String provider) {
         if (callCostAicoin > 0) {
             ledger.refund(walletAddress, callCostAicoin, provider);
@@ -328,17 +366,20 @@ final class UpstreamForwarder {
         private final AtomicBoolean settled;
         private final UpstreamTimer.Span span;
         private final ResponseHook hook;
+        private final Recorder recorder;
 
         UpstreamResponseHandler(ProxyConfig config, ProviderHealthTracker healthTracker, AicoinLedger ledger,
                                  ChannelHandlerContext clientCtx, String provider, String walletAddress, double callCostAicoin,
                                  AtomicBoolean settled, UpstreamTimer.Span span) {
-            this(config, healthTracker, ledger, clientCtx, provider, walletAddress, callCostAicoin, settled, span, null);
+            this(config, healthTracker, ledger, clientCtx, provider, walletAddress, callCostAicoin, settled, span, null,
+                    Recorder.NONE);
         }
 
         UpstreamResponseHandler(ProxyConfig config, ProviderHealthTracker healthTracker, AicoinLedger ledger,
                                  ChannelHandlerContext clientCtx, String provider, String walletAddress, double callCostAicoin,
-                                 AtomicBoolean settled, UpstreamTimer.Span span, ResponseHook hook) {
+                                 AtomicBoolean settled, UpstreamTimer.Span span, ResponseHook hook, Recorder recorder) {
             this.hook = hook;
+            this.recorder = recorder == null ? Recorder.NONE : recorder;
             this.config = config;
             this.healthTracker = healthTracker;
             this.ledger = ledger;
@@ -404,6 +445,7 @@ final class UpstreamForwarder {
                     // Told to the client either way, so a caller can show what a call cost and can
                     // tell metered from flat billing without being configured for it.
                     toClient.headers().set("X-Aicoin-Charged", Long.toString(charged));
+                    recorder.succeeded(status.code(), charged, costUsd);
                 }
                 if (hook != null) {
                     byte[] decoded = decodedForPricing(response.headers(), bodyBytes).getBytes(CharsetUtil.UTF_8);
@@ -420,6 +462,10 @@ final class UpstreamForwarder {
             } else {
                 clientCtx.writeAndFlush(toClient);
                 refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+                if (callCostAicoin > 0) {
+                    recorder.failed(status.code(), Transactions.upstreamError(status.code(),
+                            decodedForPricing(response.headers(), bodyBytes).getBytes(CharsetUtil.UTF_8)));
+                }
             }
 
             upstreamCtx.close();
@@ -440,6 +486,7 @@ final class UpstreamForwarder {
             }
             if (settled.compareAndSet(false, true)) {
                 refundIfBilled(ledger, walletAddress, callCostAicoin, provider);
+                recorder.failed(timedOut ? 504 : 502, timedOut ? "upstream timed out" : "upstream error");
                 sendSynthetic(clientCtx,
                         timedOut ? HttpResponseStatus.GATEWAY_TIMEOUT : HttpResponseStatus.BAD_GATEWAY,
                         timedOut ? "upstream timed out" : "upstream error");

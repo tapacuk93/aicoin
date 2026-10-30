@@ -902,6 +902,62 @@ Each listed app also carries `top_up_usd` (today's top-ups), `top_up_remaining_u
 
 All of these are `X-Admin-Token` gated.
 
+### Transactions (paid calls by app and purpose)
+
+Every paid call the proxy meters — a forwarded provider call, each provider call behind `/text`,
+`/image`, `/audio`, and each consortium turn — is logged with its wallet, app, purpose, provider,
+model, outcome and charge. So are the paid calls refused up front: `402` (insufficient balance) and
+`429` (app daily cap), with 0 coins. Free targets are not logged.
+
+**Labelling a call: `X-AICoin-App` and `X-AICoin-Purpose`.** Both request headers are optional
+and are labels only: they change nothing about auth, pricing, limits, the request forwarded (the
+proxy strips both before forwarding) or the response. A client that sends neither — every build
+made before they existed — is served exactly as before.
+
+- app: `X-AICoin-App` when sent (any name; it is only a label here, unlike the cap attribution
+  above), else the app the wallet is assigned to with `PUT /admin/apps/{app}`, else `unknown`.
+- purpose: `X-AICoin-Purpose`, a short word for what the call is for (`translate`, `narrate`,
+  `chat`, `lesson`, `image` …), else `unspecified`.
+
+Both are cleaned the same way: printable ASCII only, whitespace collapsed, lowercased, at most 64
+characters. AICoinKit sends the app (bundle id) on every call and the purpose when the app gives one
+(`AICoinCallTags`).
+
+Recording is best effort and asynchronous: a Redis failure is logged and the call goes on. Entries
+are kept 90 days (`AICOIN_PROXY_TRANSACTIONS_RETENTION_DAYS`) and at most 100 000 of them
+(`AICOIN_PROXY_TRANSACTIONS_MAX_ENTRIES`), in the sorted set `aicoin:{aicoin}:tx` (scored by time),
+with per-UTC-day totals in `aicoin:{aicoin}:tx-agg:<yyyy-mm-dd>` hashes that expire with the window.
+
+`GET /admin/transactions` (`X-Admin-Token`), newest first. Query parameters, all optional:
+`limit` (1-200, default 50), `before` (the previous page's `next_before`), and the filters `app`,
+`purpose`, `ok` (`true`/`false`) and `wallet`.
+
+```json
+{"transactions":[{"id":"1800000000000123","at":"2026-10-30T20:15:02.511Z","wallet":"bd08…",
+  "app":"earth-empire","purpose":"translate","provider":"anthropic","model":"claude-sonnet-4-5",
+  "endpoint":"/v1/messages","ok":true,"status":200,"error":null,"coins":3,"usd":0.0255,"cost_usd":0.0191}],
+ "next_before":"1800000000000123",
+ "totals":{"count":5120,"failures":31,"coins":15800,"usd":134.3,"cost_usd":98.7},
+ "apps":["com.tarasmaslov.infiniteairadio","earth-empire","unknown"],
+ "purposes":["narrate","translate","unspecified"],
+ "retention_days":90,"coin_value_usd":0.0085}
+```
+
+- `usd` is the charge's dollar equivalent, `coins × coin_value_usd` (`pricing.coinValueUsd`);
+  `cost_usd` is what the provider call cost the proxy. Both are 0 for a failed call.
+- `status` is the provider's HTTP status, or the proxy's own for a call that never got one: `402`,
+  `429`, `499` (the client hung up first), `502` (no connection / no answer), `504` (timed out).
+  `error` is a short reason for a failure.
+- `next_before` is `null` at the end. A page may hold fewer than `limit` entries while
+  `next_before` is not `null`: one request reads at most 5 000 entries, so a narrow filter over old
+  history is continued by asking again.
+- `totals` cover the whole filtered set, not the page: with `app`/`purpose`/`ok` filters, the whole
+  retention window (from the daily totals, even past the entry cap); with `wallet`, the entries kept.
+  `apps` and `purposes` are every value seen in the window, for filter pickers.
+- `400` for a malformed parameter; `503` when the log cannot be read, or
+  `{"error":"transactions are not recorded on this server"}` when it is off. A proxy older than this
+  answers `404`.
+
 ### Admin alerts (push notifications)
 
 The proxy pushes the operator's AICoin Admin app (`com.tarasmaslov.aicoinadmin`) through APNs with

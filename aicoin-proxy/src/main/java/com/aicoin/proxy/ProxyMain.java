@@ -43,6 +43,8 @@ public final class ProxyMain {
         PushDevices.install(new PushDevices(new PushDevices.Redis(ledger.redis()),
                 (device, payload) -> apns.send(device.token(), device.sandbox(), device.topic(), payload), accessLog));
         AdminAlerts.install(alerts);
+        // Every paid call, by app and purpose, for GET /admin/transactions — see Transactions.
+        Transactions.install(Transactions.create(ledger, config, System.getenv()));
         // Hosted Anyphone — off unless anyphone.enabled. The meter keeps running instances billed
         // and reaps any no record owns, so it starts with the process, not with the first request.
         HostedPhones phones = null;
