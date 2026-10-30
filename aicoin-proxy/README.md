@@ -842,6 +842,118 @@ back would be a debit with no call behind it.
     validation failure. See `scripts/set-coin-packages.sh` for the CLI
     wrapper around this endpoint.
 
+## Hosted Anyphone (`/phone/*`)
+
+An Android phone ([Anyphone](https://github.com/tapacuk93/anyphone)) on an EC2 instance in the
+operator's AWS account, paid by the minute in aicoin. The endpoint contract, pricing and metering
+rules are in CONTRACT.md's "Hosted Anyphone"; in short:
+
+| | |
+|---|---|
+| `GET /phone/price` | tiers (`gpu` g4dn.metal, `cpu` c8i.2xlarge) with `coinsPerMinute`, `usdPerHour`, `available`; `minimumMinutes` |
+| `POST /phone/start` `{"tier":"cpu"}` | needs `coinsPerMinute × minimumMinutes` in the balance; launches, charges minute 1, returns the status |
+| `GET /phone/status` | `phoneId`, `tier`, `state` (`none`/`starting`/`running`/`suspending`), `host`, `port` 443, `token`, `coinsPerMinute`, `chargedCoins`, `startedAt`, `balance`, `suspendAt` |
+| `POST /phone/suspend` `{}` / `{"force":true}` | the app calls it after downloading the phone's state; terminates the instance and stops the meter |
+
+All take the wallet's API token (`X-Api-Key`), like a paid AI call. Code: `HostedPhones` (start,
+suspend, the meter, the reaper), `PhoneStore` (Redis, atomic per-minute charges),
+`Ec2PhoneCloud` (RunInstances / DescribeInstances / TerminateInstances), `PhoneUserData` +
+`src/main/resources/anyphone/user-data.sh` (the instance's user data — the one place to change
+what a new instance runs), `PhoneHandler` (HTTP). Tests: `HostedPhonesTest` (start, metering,
+restart recovery, the lease, low balance and forced suspend, ownership, the reaper — against an
+in-memory store and a fake EC2), `PhonePricingTest`, `Ec2PhoneCloudTest` (the exact RunInstances
+request, against a stand-in `Ec2Client`), `PhoneUserDataTest`, and `PhoneStoreRedisTest`, which runs
+the Lua scripts against a real Redis only when `AICOIN_TEST_REDIS_URL` names a throwaway one
+(it flushes that database):
+
+```sh
+redis-server --port 6391 --save '' --daemonize yes
+AICOIN_TEST_REDIS_URL=redis://localhost:6391/15 ./gradlew test --tests '*PhoneStoreRedisTest'
+```
+
+### Configuration
+
+The `anyphone` block in `application.yaml` (every key has an `AICOIN_PROXY_ANYPHONE_<KEY>` env
+override; tier fields `AICOIN_PROXY_ANYPHONE_<TIER>_<FIELD>`, e.g. `..._GPU_AVAILABLE=true`,
+`..._GPU_MARKET=spot`, `..._GPU_USD_PER_HOUR=4.5`). Off by default. To turn it on:
+
+```sh
+AICOIN_PROXY_ANYPHONE_ENABLED=true
+AICOIN_PROXY_ANYPHONE_AMI_ID=ami-...            # the prebaked Anyphone image
+AICOIN_PROXY_ANYPHONE_SUBNET_ID=subnet-...       # a public subnet (route to an internet gateway)
+AICOIN_PROXY_ANYPHONE_SECURITY_GROUP_ID=sg-...   # 443/tcp in from anywhere; nothing else needed
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...  # the IAM user below (SDK default credential chain)
+```
+
+Turning it off while phones are running leaves their instances running with no meter and no
+reaper — suspend them first (or terminate everything tagged `anyphone:hosted=true`).
+
+### IAM permissions for the proxy's credentials
+
+Account 798762732010, us-east-1. Replace the AMI, subnet and security group ids:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LaunchFromTheAnyphoneImageIntoItsSubnet",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:us-east-1::image/ami-XXXXXXXX",
+        "arn:aws:ec2:us-east-1::snapshot/*",
+        "arn:aws:ec2:us-east-1:798762732010:subnet/subnet-XXXXXXXX",
+        "arn:aws:ec2:us-east-1:798762732010:security-group/sg-XXXXXXXX",
+        "arn:aws:ec2:us-east-1:798762732010:network-interface/*",
+        "arn:aws:ec2:us-east-1:798762732010:volume/*"
+      ]
+    },
+    {
+      "Sid": "OnlyHostedPhoneInstancesOfTheTwoTypes",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:us-east-1:798762732010:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/anyphone:hosted": "true",
+          "ec2:InstanceType": ["c8i.2xlarge", "g4dn.metal"]
+        }
+      }
+    },
+    {
+      "Sid": "TagOnLaunchOnly",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:us-east-1:798762732010:*/*",
+      "Condition": { "StringEquals": { "ec2:CreateAction": "RunInstances" } }
+    },
+    {
+      "Sid": "List",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*"
+    },
+    {
+      "Sid": "TerminateOnlyHostedPhones",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "arn:aws:ec2:us-east-1:798762732010:instance/*",
+      "Condition": { "StringEquals": { "aws:ResourceTag/anyphone:hosted": "true" } }
+    }
+  ]
+}
+```
+
+Also, only if used: `iam:PassRole` on the role behind `anyphone.instanceProfile` (empty by default:
+a hosted phone needs no AWS access); for a spot tier, the `AWSServiceRoleForEC2Spot`
+service-linked role must exist in the account (created once by an admin —
+`aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`); if the AMI's snapshot
+is encrypted with a customer-managed KMS key, `kms:CreateGrant`, `kms:Decrypt`,
+`kms:GenerateDataKeyWithoutPlaintext` and `kms:ReEncrypt*` on that key. The access token is in the
+user data, so anyone in the account with `ec2:DescribeInstanceAttribute` can read a running
+phone's token — keep that permission to administrators.
+
 ## IAP: buying aicoin with real money (App Store)
 
 The free faucet remains for onboarding; in-app purchase is the actual

@@ -56,10 +56,10 @@ class AicoinLedger implements AutoCloseable {
      * scheme and giving up cross-wallet atomicity, which is a much larger design change than a
      * bigger node.
      */
-    private static final String TAG = "{aicoin}";
+    static final String TAG = "{aicoin}";
     private static final String EVENTS_KEY = "aicoin:" + TAG + ":events";
     private static final String FREE_COINS_REMAINING_KEY = "aicoin:" + TAG + ":free-coins-remaining";
-    private static final String KNOWN_WALLETS_KEY = "aicoin:" + TAG + ":known-wallets";
+    static final String KNOWN_WALLETS_KEY = "aicoin:" + TAG + ":known-wallets";
     static final String IAP_PACKAGES_KEY = "aicoin:" + TAG + ":iap-packages";
     private static final String OFFER_KEY = "aicoin:" + TAG + ":offer";
     /** The operator's total spend ceiling in USD — see CONTRACT.md's "Spend budget". Unset means no ceiling. */
@@ -73,7 +73,7 @@ class AicoinLedger implements AutoCloseable {
      */
     private static final String INTERNAL_WALLETS_KEY = "aicoin:" + TAG + ":internal-wallets";
     /** Per-wallet transaction logs are capped at this many most-recent entries (draft/prototype: no pagination, no archival). */
-    private static final int TX_LOG_CAP = 200;
+    static final int TX_LOG_CAP = 200;
 
     private static final String CLAIM_SCRIPT =
             "local now = tonumber(ARGV[1]) "
@@ -1278,7 +1278,7 @@ class AicoinLedger implements AutoCloseable {
         client.shutdown();
     }
 
-    private static String balanceKey(String userId) {
+    static String balanceKey(String userId) {
         return "aicoin:" + TAG + ":balance:" + userId;
     }
 
@@ -1379,7 +1379,7 @@ class AicoinLedger implements AutoCloseable {
         return "aicoin:" + TAG + ":authorize:" + id;
     }
 
-    private static String txKey(String address) {
+    static String txKey(String address) {
         return "aicoin:" + TAG + ":tx:" + address;
     }
 

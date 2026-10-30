@@ -46,6 +46,8 @@ public final class ProxyConfig {
      * constructor is unchanged; a config built any other way gets the bundled lists.
      */
     private Map<String, List<String>> allowedPaths = AllowedTargets.DEFAULTS;
+    /** The {@code anyphone} block — set by {@link #load} like {@link #allowedPaths}; null means disabled. */
+    private AnyphoneConfig anyphone;
     private final ModelPricing modelPricing;
     private final double coinValueUsd;
     private final boolean meteredBilling;
@@ -313,6 +315,11 @@ public final class ProxyConfig {
         return consortium;
     }
 
+    /** @return the {@code anyphone} block (hosted phones) — see {@link HostedPhones}. Disabled unless configured. */
+    AnyphoneConfig getAnyphone() {
+        return anyphone != null ? anyphone : AnyphoneConfig.disabled(coinValueUsd);
+    }
+
     public static ProxyConfig load() {
         return load(System.getenv());
     }
@@ -457,6 +464,7 @@ public final class ProxyConfig {
                 accessLogPath, accessLogMaxBytes, accessLogCount, upstreamReadTimeoutSeconds, consortium,
                 healthProbe, capabilities);
         loaded.allowedPaths = Map.copyOf(allowedPaths);
+        loaded.anyphone = parseAnyphone(yaml, env, coinValueUsd);
         return loaded;
     }
 
@@ -550,6 +558,64 @@ public final class ProxyConfig {
      * and reports {@code unknown} — the escape hatch for a provider that has no free endpoint, or
      * one whose listing endpoint starts costing money.
      */
+    /**
+     * Reads the {@code anyphone} block. Every scalar has an {@code AICOIN_PROXY_ANYPHONE_<NAME>}
+     * override; a tier's fields have {@code AICOIN_PROXY_ANYPHONE_<TIER>_<FIELD>} (e.g.
+     * {@code AICOIN_PROXY_ANYPHONE_GPU_AVAILABLE=true}).
+     */
+    private static AnyphoneConfig parseAnyphone(Map<String, Object> yaml, Map<String, String> env, double coinValueUsd) {
+        AnyphoneConfig d = AnyphoneConfig.disabled(coinValueUsd);
+        String p = "anyphone.";
+        String e = "AICOIN_PROXY_ANYPHONE_";
+        boolean enabled = envBool(env, e + "ENABLED", getBoolean(yaml, p + "enabled", d.isEnabled()));
+        String region = envStr(env, e + "REGION", getString(yaml, p + "region", d.getRegion()));
+        String amiId = envStr(env, e + "AMI_ID", getString(yaml, p + "amiId", d.getAmiId()));
+        String subnetId = envStr(env, e + "SUBNET_ID", getString(yaml, p + "subnetId", d.getSubnetId()));
+        String securityGroupId = envStr(env, e + "SECURITY_GROUP_ID", getString(yaml, p + "securityGroupId", d.getSecurityGroupId()));
+        String instanceProfile = envStr(env, e + "INSTANCE_PROFILE", getString(yaml, p + "instanceProfile", d.getInstanceProfile()));
+        String version = envStr(env, e + "VERSION", getString(yaml, p + "version", d.getVersion()));
+        String repo = envStr(env, e + "REPO", getString(yaml, p + "repo", d.getRepo()));
+        String userDataTemplate = envStr(env, e + "USER_DATA_TEMPLATE", getString(yaml, p + "userDataTemplate", d.getUserDataTemplate()));
+        String pushTopic = envStr(env, e + "PUSH_TOPIC", getString(yaml, p + "pushTopic", d.getPushTopic()));
+        double coinValue = envDouble(env, e + "COIN_VALUE_USD", getDouble(yaml, p + "coinValueUsd", coinValueUsd));
+        double feeMargin = envDouble(env, e + "FEE_MARGIN", getDouble(yaml, p + "feeMargin", d.getFeeMargin()));
+        int minimumMinutes = envInt(env, e + "MINIMUM_MINUTES", getInt(yaml, p + "minimumMinutes", d.getMinimumMinutes()));
+        int warnMinutes = envInt(env, e + "WARN_MINUTES", getInt(yaml, p + "warnMinutes", d.getWarnMinutes()));
+        int graceSeconds = envInt(env, e + "GRACE_SECONDS", getInt(yaml, p + "graceSeconds", d.getGraceSeconds()));
+        int meterIntervalSeconds = envInt(env, e + "METER_INTERVAL_SECONDS",
+                getInt(yaml, p + "meterIntervalSeconds", d.getMeterIntervalSeconds()));
+        int startTimeoutSeconds = envInt(env, e + "START_TIMEOUT_SECONDS",
+                getInt(yaml, p + "startTimeoutSeconds", d.getStartTimeoutSeconds()));
+
+        Map<String, AnyphoneConfig.Tier> tiers = new LinkedHashMap<>(AnyphoneConfig.defaultTiers());
+        Object yamlTiers = getNested(yaml, p + "tiers");
+        if (yamlTiers instanceof Map) {
+            for (Object id : ((Map<?, ?>) yamlTiers).keySet()) {
+                tiers.putIfAbsent(String.valueOf(id), new AnyphoneConfig.Tier(String.valueOf(id), "", 0, false, false, false, ""));
+            }
+        }
+        Map<String, AnyphoneConfig.Tier> parsed = new LinkedHashMap<>();
+        for (AnyphoneConfig.Tier def : tiers.values()) {
+            String tp = p + "tiers." + def.getId() + ".";
+            String te = e + def.getId().toUpperCase(Locale.ROOT) + "_";
+            String instanceType = envStr(env, te + "INSTANCE_TYPE", getString(yaml, tp + "instanceType", def.getInstanceType()));
+            double usdPerHour = envDouble(env, te + "USD_PER_HOUR", getDouble(yaml, tp + "usdPerHour", def.getUsdPerHour()));
+            String market = envStr(env, te + "MARKET", getString(yaml, tp + "market", def.isSpot() ? "spot" : "on-demand"));
+            boolean available = envBool(env, te + "AVAILABLE", getBoolean(yaml, tp + "available", def.isAvailable()));
+            boolean nested = envBool(env, te + "NESTED_VIRTUALIZATION",
+                    getBoolean(yaml, tp + "nestedVirtualization", def.isNestedVirtualization()));
+            String tierAmi = envStr(env, te + "AMI_ID", getString(yaml, tp + "amiId", def.getAmiId()));
+            if (!"spot".equals(market) && !"on-demand".equals(market)) {
+                throw new IllegalArgumentException("anyphone.tiers." + def.getId() + ".market must be spot or on-demand");
+            }
+            parsed.put(def.getId(), new AnyphoneConfig.Tier(def.getId(), instanceType, usdPerHour, "spot".equals(market),
+                    available && !instanceType.isEmpty(), nested, tierAmi));
+        }
+        return new AnyphoneConfig(enabled, region, amiId, subnetId, securityGroupId, instanceProfile, version, repo,
+                userDataTemplate, pushTopic, coinValue, feeMargin, minimumMinutes, warnMinutes, graceSeconds,
+                meterIntervalSeconds, startTimeoutSeconds, parsed);
+    }
+
     private static HealthProbeConfig parseHealthProbe(Map<String, Object> yaml, Map<String, String> env) {
         boolean enabled = envBool(env, "AICOIN_PROXY_HEALTH_PROBE_ENABLED",
                 getBoolean(yaml, "health.probe.enabled", true));

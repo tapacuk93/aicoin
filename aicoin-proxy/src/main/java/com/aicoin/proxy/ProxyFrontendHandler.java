@@ -298,6 +298,22 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
 
+        // Hosted Anyphone (see HostedPhones): the wallet's own phone, paid by the minute. Every
+        // call takes the same API token a paid AI call does; none is held to the app's daily cap,
+        // since phone minutes are not AI spend (they are charged by the meter, not per request).
+        if (path.startsWith("/phone/")) {
+            HostedPhones phones = HostedPhones.get();
+            if (phones == null) {
+                sendJsonError(ctx, HttpResponseStatus.NOT_FOUND, "hosted phones are not enabled");
+                return;
+            }
+            byte[] phoneBody = ByteBufUtil.getBytes(request.content());
+            String phoneMethod = request.method().name();
+            requireApiToken(ctx, request, false, walletAddress ->
+                    PhoneHandler.serve(ctx, phones, phoneMethod, path, phoneBody, walletAddress));
+            return;
+        }
+
         // The consolidated endpoints: one shape in, one shape out, provider chosen here rather
         // than named by the caller. See CapabilityHandler.
         Optional<Capability> capability = Capability.fromPath(path);

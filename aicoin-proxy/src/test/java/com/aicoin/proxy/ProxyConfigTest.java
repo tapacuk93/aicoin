@@ -380,4 +380,46 @@ class ProxyConfigTest {
         assertEquals(24, consortium.getCallRetentionHours());
         assertEquals(30, consortium.getCallLeaseSeconds());
     }
+
+    @Test
+    void hostedPhonesAreOffByDefaultWithTheGpuUnavailable() {
+        AnyphoneConfig anyphone = ProxyConfig.load(new HashMap<>()).getAnyphone();
+        assertFalse(anyphone.isEnabled());
+        assertEquals("us-east-1", anyphone.getRegion());
+        assertEquals(10, anyphone.getMinimumMinutes());
+        assertEquals(0.009, anyphone.getCoinValueUsd(), 1e-12);
+        assertEquals(0.5, anyphone.getFeeMargin(), 1e-12);
+        assertEquals("com.oeaio.anyphone", anyphone.getPushTopic());
+        assertEquals(List.of("gpu", "cpu"), List.copyOf(anyphone.getTiers().keySet()));
+        assertEquals("g4dn.metal", anyphone.tier("gpu").getInstanceType());
+        assertFalse(anyphone.tier("gpu").isAvailable());
+        assertEquals(7.82, anyphone.tier("gpu").getUsdPerHour(), 1e-12);
+        assertEquals("c8i.2xlarge", anyphone.tier("cpu").getInstanceType());
+        assertTrue(anyphone.tier("cpu").isAvailable());
+        assertTrue(anyphone.tier("cpu").isNestedVirtualization());
+        assertFalse(anyphone.tier("cpu").isSpot());
+    }
+
+    @Test
+    void hostedPhoneSettingsTakeEnvOverrides() {
+        Map<String, String> env = new HashMap<>();
+        env.put("AICOIN_PROXY_ANYPHONE_ENABLED", "true");
+        env.put("AICOIN_PROXY_ANYPHONE_AMI_ID", "ami-1");
+        env.put("AICOIN_PROXY_ANYPHONE_SUBNET_ID", "subnet-1");
+        env.put("AICOIN_PROXY_ANYPHONE_SECURITY_GROUP_ID", "sg-1");
+        env.put("AICOIN_PROXY_ANYPHONE_GPU_AVAILABLE", "true");
+        env.put("AICOIN_PROXY_ANYPHONE_GPU_MARKET", "spot");
+        env.put("AICOIN_PROXY_ANYPHONE_GPU_USD_PER_HOUR", "4.5");
+        env.put("AICOIN_PROXY_COIN_VALUE_USD", "0.01");
+        AnyphoneConfig anyphone = ProxyConfig.load(env).getAnyphone();
+        assertTrue(anyphone.isEnabled());
+        assertEquals("ami-1", anyphone.getAmiId());
+        assertEquals("subnet-1", anyphone.getSubnetId());
+        assertEquals("sg-1", anyphone.getSecurityGroupId());
+        assertTrue(anyphone.tier("gpu").isAvailable());
+        assertTrue(anyphone.tier("gpu").isSpot());
+        assertEquals(4.5, anyphone.tier("gpu").getUsdPerHour(), 1e-12);
+        assertEquals("ami-1", anyphone.amiFor(anyphone.tier("gpu")));
+        assertEquals(0.01, anyphone.getCoinValueUsd(), 1e-12, "follows pricing.coinValueUsd unless set");
+    }
 }

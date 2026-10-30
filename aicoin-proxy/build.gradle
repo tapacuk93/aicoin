@@ -31,6 +31,15 @@ dependencies {
     // Gemini's speech comes back as raw PCM; this turns it into the MP3 every other audio
     // provider answers with. A pure-Java LAME port (LGPL), so the image needs no native encoder.
     implementation 'de.sciss:jump3r:1.0.5'
+    // Hosted Anyphone (HostedPhones): launches and terminates the EC2 instances a wallet's phone
+    // runs on. The URLConnection HTTP client instead of the default Apache one: a handful of EC2
+    // calls a minute does not need a connection pool, and it keeps the image smaller.
+    implementation platform('software.amazon.awssdk:bom:2.55.16')
+    implementation('software.amazon.awssdk:ec2') {
+        exclude group: 'software.amazon.awssdk', module: 'apache-client'
+        exclude group: 'software.amazon.awssdk', module: 'netty-nio-client'
+    }
+    implementation 'software.amazon.awssdk:url-connection-client'
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'

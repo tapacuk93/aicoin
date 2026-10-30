@@ -43,6 +43,18 @@ public final class ProxyMain {
         PushDevices.install(new PushDevices(new PushDevices.Redis(ledger.redis()),
                 (device, payload) -> apns.send(device.token(), device.sandbox(), device.topic(), payload), accessLog));
         AdminAlerts.install(alerts);
+        // Hosted Anyphone — off unless anyphone.enabled. The meter keeps running instances billed
+        // and reaps any no record owns, so it starts with the process, not with the first request.
+        HostedPhones phones = null;
+        if (config.getAnyphone().isEnabled()) {
+            AnyphoneConfig anyphone = config.getAnyphone();
+            phones = new HostedPhones(anyphone, new PhoneStore.Redis(ledger.redis()), Ec2PhoneCloud.create(anyphone),
+                    HostedPhones.pushNotifier(anyphone.getPushTopic()), System::currentTimeMillis,
+                    () -> PhoneUserData.template(anyphone));
+            HostedPhones.install(phones);
+            phones.startMeter();
+            LOG.info("hosted Anyphone enabled in " + anyphone.getRegion());
+        }
         alerts.startMonitor();
         alerts.proxyStarted();
 
@@ -69,6 +81,9 @@ public final class ProxyMain {
             Runtime.getRuntime().addShutdownHook(new Thread(calls::stop, "consortium-calls-release"));
             channel.closeFuture().sync();
         } finally {
+            if (phones != null) {
+                phones.stop();
+            }
             liveness.stop();
             alerts.stop();
             bossGroup.shutdownGracefully();

@@ -401,6 +401,65 @@ accessLog:
   # Env: AICOIN_PROXY_ACCESS_LOG_MAX_BYTES / AICOIN_PROXY_ACCESS_LOG_COUNT.
   maxBytes: 10485760
   count: 5
+anyphone:
+  # Hosted Anyphone: an Android phone on an EC2 instance in the operator's AWS account, paid by
+  # the minute in aicoin (GET /phone/price, POST /phone/start, GET /phone/status,
+  # POST /phone/suspend; see CONTRACT.md "Hosted Anyphone"). Off by default: while false the
+  # endpoints answer 404, no AWS client is built and no meter runs. Env: AICOIN_PROXY_ANYPHONE_ENABLED.
+  # Turning it off while phones run leaves their instances running unmetered: suspend them first.
+  enabled: false
+  # Where phones are launched, and from what. The AMI is the prebaked Anyphone image (emulator,
+  # system image and bootstrap installed); the subnet must route to the internet and the security
+  # group must allow 443/tcp in. Env: AICOIN_PROXY_ANYPHONE_REGION / _AMI_ID / _SUBNET_ID /
+  # _SECURITY_GROUP_ID / _INSTANCE_PROFILE (name or ARN; empty = none, a hosted phone needs no
+  # AWS access of its own).
+  region: us-east-1
+  amiId: ""
+  subnetId: ""
+  securityGroupId: ""
+  instanceProfile: ""
+  # ANYPHONE_VERSION / ANYPHONE_REPO written to the instance's /etc/anyphone/stack.env.
+  version: main
+  repo: tapacuk93/anyphone
+  # The user data: empty uses the bundled src/main/resources/anyphone/user-data.sh; a path uses
+  # that file instead (change the script without a rebuild). Env: _USER_DATA_TEMPLATE.
+  userDataTemplate: ""
+  # The Anyphone app's bundle id: low-balance warnings are pushed to the wallet's devices that
+  # registered (POST /push/devices) under this topic.
+  pushTopic: com.oeaio.anyphone
+  # Price per minute = ceil(usdPerHour / 60 * (1 + feeMargin) / (1 - 0.30 Apple cut) / coinValueUsd).
+  # coinValueUsd defaults to pricing.coinValueUsd and feeMargin to the IAP repricer's 0.50.
+  # feeMargin: 0.5
+  # coinValueUsd: 0.009
+  # Starting needs a balance covering this many minutes.
+  minimumMinutes: 10
+  # Push "running low" when the balance covers fewer minutes than this.
+  warnMinutes: 5
+  # Once the balance cannot pay the next minute, the phone keeps running this long (charged, into
+  # debt) so the app can back it up or the user can top up; then it is terminated without a backup.
+  graceSeconds: 180
+  # How often the meter charges, follows instance state and reaps orphans.
+  meterIntervalSeconds: 15
+  # A phone whose launch was never recorded is dropped after this long.
+  startTimeoutSeconds: 300
+  tiers:
+    # usdPerHour is what an hour costs the operator — on-demand list price, or for market: spot the
+    # most it will pay (sent as the spot max price). Env per tier: AICOIN_PROXY_ANYPHONE_GPU_AVAILABLE,
+    # _GPU_INSTANCE_TYPE, _GPU_USD_PER_HOUR, _GPU_MARKET, _GPU_AMI_ID, _GPU_NESTED_VIRTUALIZATION.
+    gpu:
+      instanceType: g4dn.metal
+      usdPerHour: 7.82
+      market: on-demand
+      # False until the account's GPU vCPU quota allows a g4dn.metal.
+      available: false
+      nestedVirtualization: false
+    cpu:
+      instanceType: c8i.2xlarge
+      usdPerHour: 0.38
+      market: on-demand
+      available: true
+      # The emulator needs KVM inside the VM.
+      nestedVirtualization: true
 iap:
   # Whether POST /wallet/api/redeem-iap honours StoreKit *Sandbox* transactions. Production must
   # leave this false: Apple signs sandbox transactions with the same certificate chain as real
