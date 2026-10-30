@@ -5,6 +5,13 @@ The operator's controls for aicoin-proxy, on the phone.
 - **Overview** - the spend budget (ceiling, spent, remaining) and a one-tap
   raise (+$50, +$100, +$200 or any amount). The coin price, and every
   provider's health and latency.
+- **Transactions** - every paid AI call the proxy recorded, newest first,
+  loading more as you scroll: the app, the purpose the app gave (or
+  "unspecified"), an OK / Failed badge, its dollar equivalent, the provider and
+  model, and the time. Filter by app, purpose or failures only; the header
+  totals the whole filtered set (calls, dollars, failures). A proxy older than
+  `GET /admin/transactions` shows "Not available on this server yet". See
+  CONTRACT.md "Transactions".
 - **Sales** - the live offer (set one, or close sales in every app) and the
   catalog, per app and tier. Catalog edits are refused while the budget is
   exhausted: the catalog is served empty then, and saving it would erase it.

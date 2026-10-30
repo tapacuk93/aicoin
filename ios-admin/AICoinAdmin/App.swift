@@ -10,6 +10,7 @@ struct AICoinAdminApp: App {
         WindowGroup {
             TabView {
                 OverviewView().tabItem { Label("Overview", systemImage: "gauge.with.dots.needle.33percent") }
+                PaidCallsView().tabItem { Label("Transactions", systemImage: "list.bullet.rectangle") }
                 AppsView().tabItem { Label("Apps", systemImage: "square.grid.2x2") }
                 SalesView().tabItem { Label("Sales", systemImage: "cart") }
                 WalletsView().tabItem { Label("Wallets", systemImage: "wallet.pass") }

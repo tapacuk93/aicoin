@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		07D2CD044B6CB0E91E589210 /* SalesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC2FB69D489379F9D7A7E09C /* SalesView.swift */; };
 		084B104D26233C6BCE0B7419 /* Push.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496D8C70F619BD55516BF2A4 /* Push.swift */; };
+		0FE890D2A7E7EAB9CB94D328 /* PaidCallsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5512432848168C5E2D11EBD3 /* PaidCallsView.swift */; };
 		1669CC86E792482096E154B4 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F6566FCD566B410DFADFC35 /* Keychain.swift */; };
 		3AB2A067980FD5FEB8A781F1 /* AppsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2545FE5FB8CB2981D5B9F6E /* AppsView.swift */; };
 		53B0D38376A6705786EDB00B /* WalletsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F60364AC6311FE26E6DB4C1E /* WalletsView.swift */; };
@@ -23,6 +24,7 @@
 		496D8C70F619BD55516BF2A4 /* Push.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Push.swift; sourceTree = "<group>"; };
 		49C23C5826E8E5A552A01080 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		4F6566FCD566B410DFADFC35 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		5512432848168C5E2D11EBD3 /* PaidCallsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaidCallsView.swift; sourceTree = "<group>"; };
 		6A7C4DF6B4CD37C9A69F169A /* AICoinAdmin.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AICoinAdmin.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7E0437FECE8F4BE508264295 /* AdminClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminClient.swift; sourceTree = "<group>"; };
 		A4C3424E5FEDD067AAF5767A /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -60,6 +62,7 @@
 				49C23C5826E8E5A552A01080 /* Info.plist */,
 				4F6566FCD566B410DFADFC35 /* Keychain.swift */,
 				C91E72F1007F4D344B175A0A /* OverviewView.swift */,
+				5512432848168C5E2D11EBD3 /* PaidCallsView.swift */,
 				496D8C70F619BD55516BF2A4 /* Push.swift */,
 				DC2FB69D489379F9D7A7E09C /* SalesView.swift */,
 				A4C3424E5FEDD067AAF5767A /* SettingsView.swift */,
@@ -131,6 +134,7 @@
 				3AB2A067980FD5FEB8A781F1 /* AppsView.swift in Sources */,
 				1669CC86E792482096E154B4 /* Keychain.swift in Sources */,
 				DFF180C62B716077E7CE970D /* OverviewView.swift in Sources */,
+				0FE890D2A7E7EAB9CB94D328 /* PaidCallsView.swift in Sources */,
 				084B104D26233C6BCE0B7419 /* Push.swift in Sources */,
 				07D2CD044B6CB0E91E589210 /* SalesView.swift in Sources */,
 				801C43005DD83C0A8EFAD759 /* SettingsView.swift in Sources */,

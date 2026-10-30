@@ -24,6 +24,8 @@ final class AdminClient: ObservableObject {
 
     struct Failure: LocalizedError {
         let message: String
+        /// The HTTP status the proxy answered with, when it answered.
+        var status: Int? = nil
         var errorDescription: String? { message }
     }
 
@@ -50,7 +52,8 @@ final class AdminClient: ObservableObject {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
             let said = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
-            throw Failure(message: "\(status): \(said ?? String(decoding: data.prefix(200), as: UTF8.self))")
+            throw Failure(message: "\(status): \(said ?? String(decoding: data.prefix(200), as: UTF8.self))",
+                          status: status)
         }
         return data
     }
@@ -80,6 +83,20 @@ final class AdminClient: ObservableObject {
     }
     func activity() async throws -> [ActivityEntry] {
         (try await get("/admin/activity", admin: true) as Activity).activity
+    }
+
+    /// One page of paid calls, newest first (`GET /admin/transactions`). `before` is the previous
+    /// page's `next_before`. A proxy that predates the endpoint answers 404.
+    func paidCalls(before: String?, limit: Int = 50, app: String?, purpose: String?,
+                   failedOnly: Bool) async throws -> PaidCallPage {
+        var c = URLComponents()
+        var items = [URLQueryItem(name: "limit", value: String(limit))]
+        if let before { items.append(URLQueryItem(name: "before", value: before)) }
+        if let app { items.append(URLQueryItem(name: "app", value: app)) }
+        if let purpose { items.append(URLQueryItem(name: "purpose", value: purpose)) }
+        if failedOnly { items.append(URLQueryItem(name: "ok", value: "false")) }
+        c.queryItems = items
+        return try await get("/admin/transactions?" + (c.percentEncodedQuery ?? ""), admin: true)
     }
 
     // MARK: writes
@@ -266,6 +283,40 @@ struct AppCap: Decodable, Identifiable, Hashable {
     var topUp: Double { top_up_usd ?? 0 }
     var limitToday: Double? { limit_today_usd ?? usd_per_day }
     func coins(_ wallet: String) -> Double? { wallet_coins?[wallet] ?? nil }
+}
+
+/// `GET /admin/transactions` - the proxy's log of paid calls (see CONTRACT.md "Transactions").
+struct PaidCallPage: Decodable {
+    let transactions: [PaidCall]
+    let next_before: String?
+    let totals: PaidCallTotals
+    let apps: [String]?
+    let purposes: [String]?
+    let retention_days: Int?
+}
+struct PaidCallTotals: Decodable, Hashable {
+    let count: Int
+    let failures: Int
+    let coins: Double?
+    let usd: Double
+    let cost_usd: Double?
+}
+struct PaidCall: Decodable, Identifiable, Hashable {
+    let id: String
+    let at: String
+    let wallet: String?
+    let app: String
+    let purpose: String
+    let provider: String?
+    let model: String?
+    let endpoint: String?
+    let ok: Bool
+    let status: Int
+    let error: String?
+    let coins: Double
+    let usd: Double
+    let cost_usd: Double?
+    var date: Date? { ISO8601DateFormatter.withFraction.date(from: at) ?? ISO8601DateFormatter().date(from: at) }
 }
 
 struct AlertsInfo: Decodable {
