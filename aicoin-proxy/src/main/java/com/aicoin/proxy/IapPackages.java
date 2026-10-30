@@ -29,7 +29,9 @@ final class IapPackages {
             // All AI Learn (formerly Learn Its); the bundle id predates the rename.
             "com.tarasmaslov.learn-it",
             // Infinite AI Book, the first app built on AICoinKit's shared app runtime.
-            "com.oeaio.infiniteaibook");
+            "com.oeaio.infiniteaibook",
+            // Anyphone: rented cloud phones paid by the minute.
+            "com.oeaio.anyphone");
 
     private IapPackages() {
     }

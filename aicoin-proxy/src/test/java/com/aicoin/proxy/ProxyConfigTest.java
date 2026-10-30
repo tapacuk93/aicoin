@@ -71,7 +71,7 @@ class ProxyConfigTest {
         assertEquals(50, config.getHealthWindowSize());
         assertEquals(60, config.getUpstreamReadTimeoutSeconds());
 
-        assertEquals(16, config.getIapPackages().size());
+        assertEquals(20, config.getIapPackages().size());
         IapPackageConfig first = config.getIapPackages().get(0);
         assertEquals("com.tarasmaslov.infiniteairadio.aicoin.small", first.getProductId());
         assertEquals(50, first.getCoins());

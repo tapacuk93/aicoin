@@ -442,11 +442,13 @@ anyphone:
   # coinValueUsd: 0.009
   # Starting needs a balance covering this many minutes.
   minimumMinutes: 10
-  # Push "running low" when the balance covers fewer minutes than this.
-  warnMinutes: 5
+  # Push "running low" when the balance covers fewer minutes than this. Early enough to save the
+  # phone: the app downloads its whole state (several GB) before suspending.
+  warnMinutes: 15
   # Once the balance cannot pay the next minute, the phone keeps running this long (charged, into
   # debt) so the app can back it up or the user can top up; then it is terminated without a backup.
-  graceSeconds: 180
+  # Long enough for that download on a slow connection.
+  graceSeconds: 600
   # How often the meter charges, follows instance state and reaps orphans.
   meterIntervalSeconds: 15
   # A phone whose launch was never recorded is dropped after this long.
@@ -498,3 +500,8 @@ iap:
     - { productId: com.oeaio.infiniteaibook.aicoin.medium,             coins: 200,  usdPriceHint: 1.99 }
     - { productId: com.oeaio.infiniteaibook.aicoin.large,              coins: 1000, usdPriceHint: 9.99 }
     - { productId: com.oeaio.infiniteaibook.aicoin.xl,                 coins: 5000, usdPriceHint: 24.99 }
+    # Anyphone (rented phones by the minute). Its four products are not in App Store Connect yet.
+    - { productId: com.oeaio.anyphone.aicoin.small,                    coins: 50,   usdPriceHint: 0.99 }
+    - { productId: com.oeaio.anyphone.aicoin.medium,                   coins: 200,  usdPriceHint: 1.99 }
+    - { productId: com.oeaio.anyphone.aicoin.large,                    coins: 1000, usdPriceHint: 9.99 }
+    - { productId: com.oeaio.anyphone.aicoin.xl,                       coins: 5000, usdPriceHint: 24.99 }

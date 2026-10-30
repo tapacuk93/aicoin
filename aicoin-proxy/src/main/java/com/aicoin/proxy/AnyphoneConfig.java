@@ -130,7 +130,7 @@ final class AnyphoneConfig {
     /** The bundled defaults, disabled — what a config built without the block gets. */
     static AnyphoneConfig disabled(double coinValueUsd) {
         return new AnyphoneConfig(false, "us-east-1", "", true, "", "", 40, "", "", "",
-                "com.oeaio.anyphone", coinValueUsd, AppStorePriceRounding.FEE_MARGIN, 10, 5, 180, 15, 300,
+                "com.oeaio.anyphone", coinValueUsd, AppStorePriceRounding.FEE_MARGIN, 10, 15, 600, 15, 300,
                 defaultTiers());
     }
 

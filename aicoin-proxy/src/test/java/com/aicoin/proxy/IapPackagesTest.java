@@ -109,6 +109,7 @@ class IapPackagesTest {
         assertTrue(IapPackages.isKnownBundleId("com.tarasmaslov.alllanguageslearner"));
         assertTrue(IapPackages.isKnownBundleId("com.tarasmaslov.learn-it"));
         assertTrue(IapPackages.isKnownBundleId("com.oeaio.infiniteaibook"));
+        assertTrue(IapPackages.isKnownBundleId("com.oeaio.anyphone"));
     }
 
     @Test
