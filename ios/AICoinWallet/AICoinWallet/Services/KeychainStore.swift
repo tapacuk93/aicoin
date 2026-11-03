@@ -13,7 +13,14 @@ import Security
 /// the item simply stays on this device.
 enum KeychainStore {
     private static let service = "com.oeaio.aicoin.wallet"
-    private static let account = "wallet-seed"
+
+    /// UI tests reset the wallet on launch. Against the real item that reset would reach every
+    /// device on the iCloud account — on a Mac or a phone signed in to iCloud, a test run would
+    /// delete the owner's wallet everywhere — so a UI-test launch gets an item of its own, kept
+    /// on this device only.
+    static let isUITest = ProcessInfo.processInfo.arguments.contains("UITEST_RESET_WALLET")
+    private static let account = isUITest ? "wallet-seed-uitest" : "wallet-seed"
+    private static let syncs = !isUITest
 
     private static func query(synchronizable: Any) -> [String: Any] {
         [
@@ -29,9 +36,10 @@ enum KeychainStore {
     static func save(seed: Data) {
         // Drops any copy, synced or the device-only one earlier builds wrote.
         SecItemDelete(query(synchronizable: kSecAttrSynchronizableAny) as CFDictionary)
-        var attributes = query(synchronizable: kCFBooleanTrue!)
+        var attributes = query(synchronizable: syncs ? kCFBooleanTrue! : kCFBooleanFalse!)
         attributes[kSecValueData as String] = seed
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        attributes[kSecAttrAccessible as String] = syncs
+            ? kSecAttrAccessibleAfterFirstUnlock : kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         SecItemAdd(attributes as CFDictionary, nil)
     }
 
@@ -46,7 +54,7 @@ enum KeychainStore {
               let seed = item[kSecValueData as String] as? Data
         else { return nil }
         // A wallet saved device-only by an earlier build moves into iCloud Keychain.
-        if (item[kSecAttrSynchronizable as String] as? Bool) != true {
+        if syncs, (item[kSecAttrSynchronizable as String] as? Bool) != true {
             save(seed: seed)
         }
         return seed

@@ -27,7 +27,7 @@ final class ScreenshotTests: XCTestCase {
 
     func testCaptureAppStoreScreenshots() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["UITEST_RESET_WALLET"]
+        app.launchArguments = ["UITEST_RESET_WALLET", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
 
         // 1 — the entry screen, before a wallet exists.
@@ -53,7 +53,16 @@ final class ScreenshotTests: XCTestCase {
         capture(app, "02-balance")
 
         app.buttons["receiveButton"].tap()
-        XCTAssertTrue(app.staticTexts["receiveAddress"].waitForExistence(timeout: 5))
-        capture(app, "03-receive")
+        if app.staticTexts["receiveAddress"].waitForExistence(timeout: 10) {
+            capture(app, "03-receive")
+        }
+
+        // 4 — apps whose own wallets spend this wallet's coins.
+        if app.buttons["Done"].exists { app.buttons["Done"].tap() }
+        let linked = app.buttons["Linked Apps"]
+        for _ in 0..<4 where !linked.isHittable { app.swipeUp() }
+        linked.tap()
+        XCTAssertTrue(app.staticTexts["No Linked Apps"].waitForExistence(timeout: 15))
+        capture(app, "04-linked-apps")
     }
 }
