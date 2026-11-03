@@ -139,61 +139,58 @@ enum ProxyAPI {
         try requireOK(response, data)
     }
 
-    // ---- authorising a service, and taking it back ----
+    // ---- linked wallets: another app's own wallet spending this one's coins ----
 
-    /// What a service is asking for, read from the request its code names.
-    ///
-    /// Fetched without the secret on purpose: the secret belongs to the
-    /// service that asked, and this side only needs to know who is asking and
-    /// why in order to show it to the person deciding.
-    struct Authorisation: Decodable {
-        let status: String
-        let service: String?
-        let note: String?
+    /// Another app's wallet that spends this wallet's coins — CONTRACT.md, "Linked wallets".
+    struct Link: Decodable, Identifiable, Hashable {
+        let address: String
+        let app: String
+        /// The most it may spend in total; nil for no limit.
+        let limit: Double?
+        let spent: Double
+        /// Epoch millis.
+        let linked: Double
+
+        var id: String { address }
+        var date: Date { Date(timeIntervalSince1970: linked / 1000) }
     }
 
-    static func fetchAuthorisation(id: String) async throws -> Authorisation {
-        let url = baseURL.appendingPathComponent("wallet/api/authorize/\(id)")
-        let (data, response) = try await URLSession.shared.data(from: url)
-        try requireOK(response, data)
-        return try JSONDecoder().decode(Authorisation.self, from: data)
+    private struct LinksResponse: Decodable {
+        let links: [Link]
     }
 
-    /// Say yes: mint a token naming this request and hand it over.
-    ///
-    /// The token is built here, with the private key, exactly as every other
-    /// token is - the proxy has never had an "issue token" endpoint and still
-    /// does not. What is new is the grant in its payload, which is what makes
-    /// this one service revocable later without touching any other.
-    static func approveAuthorisation(keys: WalletKeys, id: String, expiresInSeconds: Int) async throws {
-        let token = try WalletSigner.buildToken(keys: keys, expiresInSeconds: expiresInSeconds, grant: id)
-        let path = "/wallet/api/authorize/\(id)/approve"
-        let body = try JSONSerialization.data(withJSONObject: ["token": token])
-        let headers = try WalletSigner.signLiveRequest(keys: keys, method: "POST", path: path, body: body)
-        let (data, response) = try await send(method: "POST", path: path, body: body,
-                                              extraHeaders: headers.httpHeaders)
-        try requireOK(response, data)
-    }
-
-    /// One service's standing permission to spend from this wallet.
-    struct Grant: Decodable, Identifiable {
-        let id: String
-        let service: String
-        /// Epoch seconds; 0 when the record predates it.
-        let granted: Int64
-    }
-
-    private struct GrantsResponse: Decodable {
-        let grants: [Grant]
-    }
-
-    static func fetchGrants(keys: WalletKeys) async throws -> [Grant] {
-        let path = "/wallet/api/grants"
+    static func fetchLinks(keys: WalletKeys) async throws -> [Link] {
+        let path = "/wallet/api/links"
         let headers = try WalletSigner.signLiveRequest(keys: keys, method: "GET", path: path, body: Data())
         let (data, response) = try await send(method: "GET", path: path, body: Data(),
                                               extraHeaders: headers.httpHeaders)
         try requireOK(response, data)
-        return try JSONDecoder().decode(GrantsResponse.self, from: data).grants
+        return try JSONDecoder().decode(LinksResponse.self, from: data).links
+    }
+
+    /// Links `address` to this wallet, or changes an existing link's name and limit (what it has
+    /// spent is kept). `limit` nil is no limit.
+    @discardableResult
+    static func saveLink(keys: WalletKeys, address: String, app: String, limit: Double?) async throws -> Link {
+        let path = "/wallet/api/links"
+        let body = try JSONSerialization.data(withJSONObject: [
+            "address": address, "app": app, "limit": limit.map { $0 as Any } ?? NSNull()
+        ], options: [.sortedKeys])
+        let headers = try WalletSigner.signLiveRequest(keys: keys, method: "POST", path: path, body: body)
+        let (data, response) = try await send(method: "POST", path: path, body: body,
+                                              extraHeaders: headers.httpHeaders)
+        try requireOK(response, data)
+        return try JSONDecoder().decode(Link.self, from: data)
+    }
+
+    /// Unlinks it: its next call is paid from its own balance again.
+    static func removeLink(keys: WalletKeys, address: String) async throws {
+        let path = "/wallet/api/links/remove"
+        let body = try JSONSerialization.data(withJSONObject: ["address": address])
+        let headers = try WalletSigner.signLiveRequest(keys: keys, method: "POST", path: path, body: body)
+        let (data, response) = try await send(method: "POST", path: path, body: body,
+                                              extraHeaders: headers.httpHeaders)
+        try requireOK(response, data)
     }
 
     /// One entry of a wallet's own log — see CONTRACT.md, `GET /wallet/api/transactions`. Which
@@ -226,18 +223,6 @@ enum ProxyAPI {
                                               extraHeaders: headers.httpHeaders)
         try requireOK(response, data)
         return try JSONDecoder().decode(TransactionsResponse.self, from: data).transactions
-    }
-
-    /// Take one back. Every token that service holds stops working at once -
-    /// which is the point, since the tokens it holds are not something this
-    /// wallet has a list of.
-    static func revokeGrant(keys: WalletKeys, id: String) async throws {
-        let path = "/wallet/api/grants/revoke"
-        let body = try JSONSerialization.data(withJSONObject: ["id": id])
-        let headers = try WalletSigner.signLiveRequest(keys: keys, method: "POST", path: path, body: body)
-        let (data, response) = try await send(method: "POST", path: path, body: body,
-                                              extraHeaders: headers.httpHeaders)
-        try requireOK(response, data)
     }
 
     // ---- plumbing ----

@@ -36,14 +36,14 @@ are the client-side counterparts of
   `/price`, `/free-coins/available`, `/wallet/api/balance/{address}`,
   `/wallet/api/claim`, `/wallet/api/transfer`, `/wallet/api/revoke-tokens`,
   `/wallet/api/reputation/{address}`, `/wallet/api/transactions`, `/price/history`, and the
-  `/wallet/api/authorize`/`grants` routes.
+  `/wallet/api/links` routes (linked apps).
 - `AICoinWallet/Models/WalletModel.swift` — what the wallet screen shows
   (balance, price, faucet pool, standing), refreshed together.
 - `AICoinWallet/Views/` — native SwiftUI screens in system styles (light and
   dark): `OnboardingView` (create/import), `BackupView` (one-time key reveal),
   `WalletView` (balance, Send/Receive/Scan, faucet while the pool lasts),
   `SendView`, `ReceiveView`, `PriceView` (Swift Charts over `/price/history`),
-  `HistoryView` (the signed transaction log), `StandingView`, `AuthorisedServicesView` + `AuthorisationRequestView`,
+  `HistoryView` (the signed transaction log), `StandingView`, `LinkedWalletsView` + `LinkRequestView` (apps whose own wallets spend this one's coins, linked by scanning their Connect AICoin code, with a limit),
   `APITokensView`, `PrivateKeyView`, and `ScannerSheet` (camera QR).
 
 ## Building

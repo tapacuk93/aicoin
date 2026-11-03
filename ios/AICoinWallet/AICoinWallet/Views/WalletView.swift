@@ -14,14 +14,14 @@ struct WalletView: View {
         case send(to: String)
         case receive
         case scan
-        case authorise(id: String)
+        case link(LinkCode)
 
         var id: String {
             switch self {
             case .send: return "send"
             case .receive: return "receive"
             case .scan: return "scan"
-            case .authorise(let id): return "authorise-\(id)"
+            case .link(let code): return "link-\(code.address)"
             }
         }
     }
@@ -86,9 +86,9 @@ struct WalletView: View {
 
                 Section {
                     NavigationLink {
-                        AuthorisedServicesView(keys: keys)
+                        LinkedWalletsView(keys: keys)
                     } label: {
-                        Label("Authorised Services", systemImage: "checkmark.shield")
+                        Label("Linked Apps", systemImage: "link")
                     }
                     NavigationLink {
                         APITokensView(keys: keys)
@@ -98,7 +98,7 @@ struct WalletView: View {
                 } header: {
                     Text("Access")
                 } footer: {
-                    Text("Let apps and scripts make AI calls billed to this wallet, and take that back.")
+                    Text("Let apps and scripts make AI calls paid with this wallet's coins, and take that back.")
                 }
 
                 Section {
@@ -131,8 +131,8 @@ struct WalletView: View {
                     ScannerSheet(title: "Scan Code") { scanned in
                         route(scanned)
                     }
-                case .authorise(let id):
-                    AuthorisationRequestView(keys: keys, id: id)
+                case .link(let code):
+                    LinkRequestView(keys: keys, code: code)
                 }
             }
             .alert(item: $claimMessage) { message in
@@ -282,21 +282,19 @@ struct WalletView: View {
 
     // MARK: Scanning
 
-    /// A scanned code is either somebody's address (pay them) or a service asking to be
-    /// authorised. Anything else is said to be unrecognised rather than guessed at.
+    /// A scanned code is either somebody's address (pay them) or an app asking to be linked.
+    /// Anything else is said to be unrecognised rather than guessed at.
     private func route(_ scanned: String) {
         let text = scanned.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let next: Sheet
         if Coins.isAddress(text) {
             next = .send(to: text)
+        } else if let code = LinkCode(scanned) {
+            next = .link(code)
         } else {
-            let id = AuthorisedServicesView.identifier(in: scanned)
-            guard !id.isEmpty else {
-                sheet = nil
-                scanProblem = "That code is neither a wallet address nor a service asking for access."
-                return
-            }
-            next = .authorise(id: id)
+            sheet = nil
+            scanProblem = "That code is neither a wallet address nor an app's Connect AICoin code."
+            return
         }
         sheet = nil
         // Presented after the scanner has gone: replacing a sheet in the same update drops the

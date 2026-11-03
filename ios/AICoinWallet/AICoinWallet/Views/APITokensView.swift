@@ -69,7 +69,7 @@ struct APITokensView: View {
                     Label("Every token issued before now has stopped working.", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                 } else {
-                    Text("Stops every token this wallet has issued, including those held by authorised services. To cut off one service only, revoke it under Authorised Services.")
+                    Text("Stops every token this wallet has issued. Linked apps sign their own, so to cut one off, remove it under Linked Apps.")
                 }
             }
         }
