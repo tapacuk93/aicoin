@@ -153,6 +153,9 @@ public final class AICoinAppRuntime: @unchecked Sendable {
         self.configuration = configuration
         self.hooks = hooks
         self.reconciler = reconciler
+        // Every proxy request says which App Store storefront it comes from; the proxy withholds
+        // providers some storefronts may not use (OpenAI on the China mainland store).
+        AICoinStorefront.start()
 
         let initial: WalletIdentity
         if let identity {

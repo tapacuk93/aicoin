@@ -412,6 +412,7 @@ public struct AICoinCapabilityClient: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(token, forHTTPHeaderField: "X-Api-Key")
         AICoinCallTags.tag(&request, purpose: purpose)
+        AICoinStorefront.apply(to: &request)
         // Slashes unescaped: the proxy reads bodies with a YAML parser, which has no `\/`, and a
         // prompt with a "/" in it came back 400 "body must be JSON".
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])

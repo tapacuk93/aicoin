@@ -105,6 +105,8 @@ public struct AICoinModelCatalog: Decodable, Sendable, Equatable {
                              transport: any HTTPTransport = URLSession.shared) async throws -> AICoinModelCatalog {
         var request = URLRequest(url: baseURL.appendingPathComponent("skills"))
         request.httpMethod = "GET"
+        // The proxy describes the routing this storefront would get, without withheld providers.
+        AICoinStorefront.apply(to: &request)
         let (data, response) = try await transport.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {

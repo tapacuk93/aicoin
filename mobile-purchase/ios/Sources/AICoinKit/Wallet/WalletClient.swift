@@ -20,7 +20,7 @@ public struct WalletClient: Sendable {
     /// per CONTRACT.md, "like a blockchain explorer."
     public func balance(address: String) async throws -> Double {
         let request = URLRequest(url: Self.endpointURL(baseURL, "/wallet/api/balance/\(address)"))
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
         try Self.requireOK(response, data)
         return try JSONDecoder().decode(BalanceResponseBody.self, from: data).balance
     }
@@ -30,7 +30,7 @@ public struct WalletClient: Sendable {
     /// the calling app's own packages.
     public func iapPackages() async throws -> [AICoinPackage] {
         let request = URLRequest(url: Self.endpointURL(baseURL, "/iap/packages"))
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
         try Self.requireOK(response, data)
         return try JSONDecoder().decode(AICoinPackagesResponse.self, from: data).packages
     }
@@ -40,7 +40,7 @@ public struct WalletClient: Sendable {
     /// re-check that must happen immediately before charging.
     public func currentOffer() async throws -> AICoinOffer? {
         let request = URLRequest(url: Self.endpointURL(baseURL, "/iap/offer"))
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
         try Self.requireOK(response, data)
         return try JSONDecoder().decode(AICoinOfferResponse.self, from: data).offer
     }
@@ -54,7 +54,7 @@ public struct WalletClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data("{}".utf8)
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
         try Self.requireOK(response, data)
         let decoded = try JSONDecoder().decode(AICoinOfferCheckResponse.self, from: data)
         guard let offer = decoded.offer, let offerID = decoded.offerID else { return nil }
@@ -65,7 +65,7 @@ public struct WalletClient: Sendable {
     /// 1-aicoin-per-call spend rate.
     public func price() async throws -> PriceResult {
         let request = URLRequest(url: Self.endpointURL(baseURL, "/price"))
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
         try Self.requireOK(response, data)
         return try JSONDecoder().decode(PriceResult.self, from: data)
     }
@@ -73,7 +73,7 @@ public struct WalletClient: Sendable {
     /// `GET /free-coins/available` — the live remaining count in the shared faucet pool.
     public func freeCoinsAvailable() async throws -> Int {
         let request = URLRequest(url: Self.endpointURL(baseURL, "/free-coins/available"))
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
         try Self.requireOK(response, data)
         return try JSONDecoder().decode(FreeCoinsAvailableBody.self, from: data).available
     }
@@ -85,7 +85,7 @@ public struct WalletClient: Sendable {
     /// not-yet-eligible case, since that's an expected, common outcome, not an error condition.
     public func claimFreeCoins(identity: WalletIdentity) async throws -> ClaimResult {
         let request = try Self.signedRequest(method: "POST", path: "/wallet/api/claim", body: Data(), baseURL: baseURL, identity: identity)
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
 
         switch status {
@@ -106,7 +106,7 @@ public struct WalletClient: Sendable {
     public func transfer(to address: String, amount: Double, identity: WalletIdentity) async throws -> TransferResult {
         let body = try JSONEncoder().encode(TransferRequestBody(toUserId: address, amount: amount))
         let request = try Self.signedRequest(method: "POST", path: "/wallet/api/transfer", body: body, baseURL: baseURL, identity: identity)
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw try Self.error(for: status, data: data) }
         let decoded = try? JSONDecoder().decode(TransferSuccessBody.self, from: data)
@@ -118,7 +118,7 @@ public struct WalletClient: Sendable {
     /// cache so a stale token isn't reused for the next AI-provider call.
     public func revokeTokens(identity: WalletIdentity) async throws {
         let request = try Self.signedRequest(method: "POST", path: "/wallet/api/revoke-tokens", body: Data(), baseURL: baseURL, identity: identity)
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw try Self.error(for: status, data: data) }
     }
@@ -139,7 +139,7 @@ public struct WalletClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw try Self.error(for: status, data: data) }
         return try JSONDecoder().decode(RedeemResult.self, from: data)

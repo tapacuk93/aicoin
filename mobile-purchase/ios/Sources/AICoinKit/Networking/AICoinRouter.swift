@@ -91,7 +91,7 @@ public struct AICoinRouter: HTTPTransport {
 
     public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         guard let host = request.url?.host, let provider = Self.knownHosts[host] else {
-            return try await underlying.data(for: request)
+            return try await underlying.data(for: proxyBound(request))
         }
         guard let token = tokenProvider(), !token.isEmpty else {
             throw AICoinError.missingToken
@@ -135,7 +135,16 @@ public struct AICoinRouter: HTTPTransport {
         newRequest.setValue(token, forHTTPHeaderField: "X-Api-Key")
         // Which app and what for: labels for the proxy's transaction log, never needed by it.
         AICoinCallTags.tag(&newRequest)
+        // Which App Store storefront: the proxy withholds providers some storefronts may not use.
+        AICoinStorefront.apply(to: &newRequest)
         return newRequest
+    }
+
+    /// A request to the proxy itself (not a provider host) with the storefront header added, in
+    /// case whoever built it did not; anything else exactly as it came.
+    func proxyBound(_ request: URLRequest) -> URLRequest {
+        guard let host = request.url?.host, host == baseURL.host else { return request }
+        return AICoinStorefront.applied(to: request)
     }
 
     /// CONTRACT.md's documented 402 body is exactly `{"error":"insufficient aicoin
@@ -155,7 +164,7 @@ extension AICoinRouter: HTTPLineStreamingTransport {
     public func lines(for request: URLRequest) async throws -> (AsyncThrowingStream<String, Error>, URLResponse) {
         let isProviderCall = request.url?.host.flatMap { Self.knownHosts[$0] } != nil
         if !isProviderCall, let streaming = underlying as? any HTTPLineStreamingTransport {
-            return try await streaming.lines(for: request)
+            return try await streaming.lines(for: proxyBound(request))
         }
         let (data, response) = try await data(for: request)
         return (wholeBodyLines(data), response)
