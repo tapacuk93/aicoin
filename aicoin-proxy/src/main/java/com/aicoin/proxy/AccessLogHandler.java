@@ -45,6 +45,8 @@ final class AccessLogHandler extends ChannelDuplexHandler {
     private String path = "";
     private String provider = "";
     private String wallet = "";
+    /** The request's storefront when it restricts any provider, else empty. See {@link Storefront}. */
+    private String storefront = "";
     private int requestBytes;
     private long startNanos;
     private UpstreamTimer upstreamTimer = UpstreamTimer.NONE;
@@ -58,8 +60,16 @@ final class AccessLogHandler extends ChannelDuplexHandler {
     private int streamStatus = -1;
     private int streamBytes;
 
+    /** Storefront codes that restrict any provider; null logs every storefront header sent. */
+    private final java.util.Set<String> restricting;
+
     AccessLogHandler(AccessLog accessLog) {
+        this(accessLog, null);
+    }
+
+    AccessLogHandler(AccessLog accessLog, java.util.Set<String> restricting) {
         this.accessLog = accessLog;
+        this.restricting = restricting;
     }
 
     @Override
@@ -79,6 +89,11 @@ final class AccessLogHandler extends ChannelDuplexHandler {
             wallet = WalletValidation.extractWalletId(request.headers().get(X_API_KEY_HEADER))
                     .flatMap(WalletSignature::peekTokenAddress)
                     .orElse("");
+            // Logged only when that storefront restricts something: that is when it decides where a
+            // call may go, and those are the requests that have to be findable.
+            String storefrontHeader = Storefront.normalize(request.headers().get(Storefront.HEADER));
+            storefront = storefrontHeader != null && (restricting == null || restricting.contains(storefrontHeader))
+                    ? storefrontHeader : "";
             requestBytes = request.content().readableBytes();
             startNanos = System.nanoTime();
             upstreamTimer = UpstreamTimer.startRequest(ctx.channel());
@@ -136,6 +151,6 @@ final class AccessLogHandler extends ChannelDuplexHandler {
             return;
         }
         accessLog.record(method, path, provider, wallet, status, requestBytes, responseBytes,
-                timing[0], timing[1], timing[2], coins, outcome);
+                timing[0], timing[1], timing[2], coins, outcome, storefront);
     }
 }

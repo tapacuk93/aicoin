@@ -46,6 +46,12 @@ public final class ProxyConfig {
      * constructor is unchanged; a config built any other way gets the bundled lists.
      */
     private Map<String, List<String>> allowedPaths = AllowedTargets.DEFAULTS;
+    /**
+     * {@code storefronts.restricted}: per App Store storefront (ISO alpha-3), the providers never
+     * routed to for a request carrying {@code X-AICoin-Storefront} with that code — see {@link
+     * Storefront}. Set by {@link #load} like {@link #allowedPaths}.
+     */
+    private Map<String, java.util.Set<String>> storefrontRestrictions = Storefront.DEFAULT_RESTRICTIONS;
     /** The {@code anyphone} block — set by {@link #load} like {@link #allowedPaths}; null means disabled. */
     private AnyphoneConfig anyphone;
     private final ModelPricing modelPricing;
@@ -191,6 +197,15 @@ public final class ProxyConfig {
 
     /** @return the full config entry for the given (already-lowercased, known) provider, or null if unknown. */
     /** @return the endpoint patterns the generic route forwards for {@code provider}; empty forwards nothing. */
+    /**
+     * @return {@code storefronts.restricted} (env {@code AICOIN_PROXY_STOREFRONT_<CODE>_RESTRICTED},
+     * comma-separated, {@code none} for nothing): which providers each storefront may not use.
+     * Defaults to {@code CHN: openai}.
+     */
+    Map<String, java.util.Set<String>> getStorefrontRestrictions() {
+        return storefrontRestrictions;
+    }
+
     public List<String> getAllowedPaths(String provider) {
         return allowedPaths.getOrDefault(provider, List.of());
     }
@@ -464,8 +479,31 @@ public final class ProxyConfig {
                 accessLogPath, accessLogMaxBytes, accessLogCount, upstreamReadTimeoutSeconds, consortium,
                 healthProbe, capabilities);
         loaded.allowedPaths = Map.copyOf(allowedPaths);
+        loaded.storefrontRestrictions = parseStorefronts(yaml, env);
         loaded.anyphone = parseAnyphone(yaml, env, coinValueUsd);
         return loaded;
+    }
+
+    /**
+     * {@code storefronts.restricted}, defaulting to {@link Storefront#DEFAULT_RESTRICTIONS} when
+     * the YAML has no such block, then {@code AICOIN_PROXY_STOREFRONT_<CODE>_RESTRICTED} for any
+     * three-letter code — overriding the YAML's list for it, or adding one.
+     */
+    static Map<String, java.util.Set<String>> parseStorefronts(Map<String, Object> yaml, Map<String, String> env) {
+        Object node = getNested(yaml, "storefronts.restricted");
+        Map<String, java.util.Set<String>> out = node == null
+                ? new LinkedHashMap<>(Storefront.DEFAULT_RESTRICTIONS)
+                : Storefront.parseYaml(node);
+        java.util.regex.Pattern name = java.util.regex.Pattern.compile("AICOIN_PROXY_STOREFRONT_([A-Za-z]{3})_RESTRICTED");
+        for (Map.Entry<String, String> e : env.entrySet()) {
+            java.util.regex.Matcher m = name.matcher(e.getKey());
+            if (m.matches() && e.getValue() != null && !e.getValue().isEmpty()) {
+                out.put(m.group(1).toUpperCase(java.util.Locale.ROOT), Storefront.parseList(e.getValue()));
+            }
+        }
+        Map<String, java.util.Set<String>> frozen = new LinkedHashMap<>();
+        out.forEach((code, providers) -> frozen.put(code, java.util.Set.copyOf(providers)));
+        return Map.copyOf(frozen);
     }
 
     /**

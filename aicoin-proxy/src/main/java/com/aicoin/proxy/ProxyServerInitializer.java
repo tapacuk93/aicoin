@@ -40,7 +40,7 @@ public class ProxyServerInitializer extends ChannelInitializer<SocketChannel> {
         ch.pipeline().addLast(new HttpObjectAggregator(MAX_CONTENT_LENGTH));
         // Before the routing handler so it sees every request, and — being a duplex handler —
         // every response on its way back out, whichever code path produced it.
-        ch.pipeline().addLast(new AccessLogHandler(accessLog));
+        ch.pipeline().addLast(new AccessLogHandler(accessLog, Storefront.restrictingCodes(config)));
         ch.pipeline().addLast(new ProxyFrontendHandler(config, clientGroup, healthTracker, speed, liveness, ledger));
     }
 }

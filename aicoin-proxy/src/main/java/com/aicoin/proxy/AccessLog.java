@@ -134,6 +134,19 @@ final class AccessLog implements AutoCloseable {
     void record(String method, String path, String provider, String wallet, int status,
                  int requestBytes, int responseBytes, long durationMillis, long upstreamMillis,
                  long overheadMillis, String coins, String outcome) {
+        record(method, path, provider, wallet, status, requestBytes, responseBytes, durationMillis,
+                upstreamMillis, overheadMillis, coins, outcome, null);
+    }
+
+    /**
+     * As above, with the App Store storefront of a request whose providers that storefront
+     * restricts (see {@link Storefront}) — {@code "storefront":"CHN"} — so every restricted
+     * request can be found in the log. Null or empty leaves the field out, and the line is exactly
+     * what it was before storefronts existed.
+     */
+    void record(String method, String path, String provider, String wallet, int status,
+                 int requestBytes, int responseBytes, long durationMillis, long upstreamMillis,
+                 long overheadMillis, String coins, String outcome, String storefront) {
         String line = "{\"at\":\"" + Instant.now() + "\""
                 + ",\"method\":" + json(method)
                 + ",\"path\":" + json(path)
@@ -147,6 +160,7 @@ final class AccessLog implements AutoCloseable {
                 + ",\"overhead_ms\":" + overheadMillis
                 + ",\"coins\":" + json(coins)
                 + ",\"outcome\":" + json(outcome)
+                + (storefront == null || storefront.isEmpty() ? "" : ",\"storefront\":" + json(storefront))
                 + "}";
         try {
             writer.execute(() -> fileLogger.log(Level.INFO, line));

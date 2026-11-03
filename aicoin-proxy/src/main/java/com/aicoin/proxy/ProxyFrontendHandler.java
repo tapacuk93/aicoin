@@ -104,6 +104,11 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         // a request without them is served exactly the same. See Transactions.
         Transactions.Tag.set(ctx.channel(), Transactions.Tag.fromHeaders(
                 request.headers().get(AppCaps.APP_HEADER), request.headers().get(Transactions.PURPOSE_HEADER)));
+        // The App Store storefront the request comes from: decides which providers it may be routed
+        // to (none withheld without the header). Set on every request, since a kept-alive channel
+        // carries the previous request's otherwise. See Storefront.
+        Storefront storefront = Storefront.fromHeader(request.headers().get(Storefront.HEADER), config);
+        Storefront.set(ctx.channel(), storefront);
 
         if (request.method() == HttpMethod.GET && "/price".equals(path)) {
             sendPrice(ctx);
@@ -398,6 +403,14 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             return;
         }
 
+        // A provider this storefront may not use, named outright: refused before anything else is
+        // looked at, so nothing is held, charged or sent upstream.
+        Optional<String> pinnedProvider = ProviderRouting.resolve(request.headers().get(X_AI_HEADER));
+        if (pinnedProvider.isPresent() && !storefront.allows(pinnedProvider.get())) {
+            storefront.refuse(ctx, pinnedProvider.get(), request.method().name() + " " + path);
+            return;
+        }
+
         Optional<String> apiKeyOpt = WalletValidation.extractWalletId(request.headers().get(X_API_KEY_HEADER));
         if (!apiKeyOpt.isPresent()) {
             sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, "missing X-Api-Key (API token)");
@@ -446,6 +459,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                     || name.equalsIgnoreCase(X_API_KEY_HEADER)
                     || name.equalsIgnoreCase(AppCaps.APP_HEADER)
                     || name.equalsIgnoreCase(Transactions.PURPOSE_HEADER)
+                    || name.equalsIgnoreCase(Storefront.HEADER)
                     || name.equalsIgnoreCase(HttpHeaderNames.HOST.toString())
                     || name.equalsIgnoreCase(HttpHeaderNames.CONTENT_LENGTH.toString())
                     || name.equalsIgnoreCase(HttpHeaderNames.AUTHORIZATION.toString())

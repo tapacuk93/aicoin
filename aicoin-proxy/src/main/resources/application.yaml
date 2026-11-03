@@ -401,6 +401,17 @@ accessLog:
   # Env: AICOIN_PROXY_ACCESS_LOG_MAX_BYTES / AICOIN_PROXY_ACCESS_LOG_COUNT.
   maxBytes: 10485760
   count: 5
+storefronts:
+  # Providers never routed to for a request whose X-AICoin-Storefront header (the App Store
+  # storefront's ISO 3166 alpha-3 code, from StoreKit) names that storefront: not by automatic
+  # routing, not on a consortium panel or as its editor, not by escalation or failover, not for
+  # images or speech. A request that names one explicitly gets 451 provider_unavailable_in_region.
+  # Apple requires this for the China mainland store, where OpenAI's services hold no permit.
+  # A request with no header is unrestricted. A provider name covers everything the proxy sends
+  # to that provider (text, images, speech, embeddings, ...).
+  # Env: AICOIN_PROXY_STOREFRONT_<CODE>_RESTRICTED (comma-separated; "none" for nothing).
+  restricted:
+    CHN: openai
 anyphone:
   # Hosted Anyphone: an Android phone on an EC2 instance in the operator's AWS account, paid by
   # the minute in aicoin (GET /phone/price, POST /phone/start, GET /phone/status,

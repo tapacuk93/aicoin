@@ -31,7 +31,9 @@ final class SkillsHandler {
 
     static void respond(ChannelHandlerContext ctx, ProxyConfig config, ProviderLiveness liveness,
                          ProviderSpeed speed) {
-        byte[] bytes = buildJson(config, liveness, speed).getBytes(CharsetUtil.UTF_8);
+        // Described as the caller's storefront would be routed: a provider it withholds is not
+        // listed anywhere below, so an app reading this never offers what it would be refused.
+        byte[] bytes = buildJson(config, liveness, speed, Storefront.of(ctx.channel())).getBytes(CharsetUtil.UTF_8);
         FullHttpResponse response = new DefaultFullHttpResponse(
                 HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.wrappedBuffer(bytes));
         response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
@@ -47,6 +49,11 @@ final class SkillsHandler {
     }
 
     static String buildJson(ProxyConfig config, ProviderLiveness liveness, ProviderSpeed speed) {
+        return buildJson(config, liveness, speed, Storefront.NONE);
+    }
+
+    static String buildJson(ProxyConfig config, ProviderLiveness liveness, ProviderSpeed speed,
+                            Storefront storefront) {
         ProviderSkills skills = config.getCapabilities().getSkills();
         StringBuilder json = new StringBuilder();
         json.append("{\"subjects\":[");
@@ -59,7 +66,7 @@ final class SkillsHandler {
         for (String provider : ProxyConfig.PROVIDER_NAMES) {
             Map<String, Integer> capabilityRatings = skills.capabilities().getOrDefault(provider, Map.of());
             Map<String, Integer> subjectRatings = skills.subjects().getOrDefault(provider, Map.of());
-            if (capabilityRatings.isEmpty() && subjectRatings.isEmpty()) {
+            if ((capabilityRatings.isEmpty() && subjectRatings.isEmpty()) || !storefront.allows(provider)) {
                 continue;
             }
             json.append(firstProvider ? "" : ",");
@@ -76,7 +83,8 @@ final class SkillsHandler {
             json.append(Json.string(capability.path())).append(":{");
             boolean firstSubject = true;
             for (String subject : subjects) {
-                List<String> ranked = CapabilityHandler.rank(config, liveness, speed, capability, subject);
+                List<String> ranked = CapabilityHandler.candidates(config, liveness, speed, capability, subject,
+                        false, storefront);
                 json.append(firstSubject ? "" : ",");
                 firstSubject = false;
                 json.append(Json.string(subject)).append(":[");
@@ -109,7 +117,7 @@ final class SkillsHandler {
             json.append("}");
         }
         json.append("},\"escalation\":").append(config.getCapabilities().isEscalationEnabled());
-        appendModels(json, config, liveness);
+        appendModels(json, config, liveness, storefront);
         json.append("}");
         return json.toString();
     }
@@ -137,7 +145,8 @@ final class SkillsHandler {
      * with nothing more specific about it is tagged as. An empty panel and a null editor when the
      * endpoint is disabled, since then nobody sits on it.
      */
-    private static void appendModels(StringBuilder json, ProxyConfig config, ProviderLiveness liveness) {
+    private static void appendModels(StringBuilder json, ProxyConfig config, ProviderLiveness liveness,
+                                     Storefront storefront) {
         json.append(",\"models\":{");
         boolean firstCapability = true;
         for (Capability capability : Capability.values()) {
@@ -146,6 +155,9 @@ final class SkillsHandler {
             json.append(Json.string(capability.path())).append(":{");
             boolean firstProvider = true;
             for (Map.Entry<String, String> entry : CapabilityHandler.models(config, liveness, capability).entrySet()) {
+                if (!storefront.allows(entry.getKey())) {
+                    continue;
+                }
                 json.append(firstProvider ? "" : ",")
                         .append(Json.string(entry.getKey())).append(":").append(Json.string(entry.getValue()));
                 firstProvider = false;
@@ -153,14 +165,15 @@ final class SkillsHandler {
             json.append("}");
         }
         ConsortiumConfig consortium = config.getConsortium();
-        List<String> panel = consortium.isEnabled() ? ConsortiumHandler.panel(config, null) : List.of();
+        List<String> panel = consortium.isEnabled()
+                ? storefront.filter(ConsortiumHandler.panel(config, null)) : List.of();
         json.append(",\"consortium\":{\"panel\":[");
         for (int i = 0; i < panel.size(); i++) {
             json.append(i == 0 ? "" : ",")
                     .append(Json.string(panel.get(i) + ":" + consortium.modelFor(panel.get(i)).trim()));
         }
         String editor = panel.isEmpty() ? null : ConsortiumHandler.editor(config,
-                ConsortiumHandler.panel(config, null, SubjectTagger.GENERAL, null), null);
+                storefront.filter(ConsortiumHandler.panel(config, null, SubjectTagger.GENERAL, null)), null);
         json.append("],\"editor\":").append(editor == null ? "null" : Json.string(editor)).append("}}");
     }
 

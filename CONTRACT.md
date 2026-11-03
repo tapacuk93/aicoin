@@ -462,6 +462,48 @@ It also carries `models` — which model stands behind each provider right now (
 
 Each capability lists exactly the providers its `routing` would consider (rated above 0, keyed, with a model, not `down`), in ranking order for an untagged request, with the model a call would send: `consortium.models` for text, `capabilities.<image|audio>.models` for media. `consortium.panel` is the panel a `POST /consortium` naming nobody would seat — keyed, with a model, in chat-provider order; like that call it does not consult liveness — as `provider:model`, and empty (with `editor: null`) when the endpoint is disabled. `editor` is `consortium.editor` if it is on the panel; otherwise a call's editor is the panelist ranked first for *that call's* subject, and the one published is the choice for `general`. The point is for a client that keeps what a model wrote to notice when it has been overtaken: the provider name is the same across every model a provider ships, and the model ids are config, so they change with a restart and no release.
 
+### Storefront restrictions — `X-AICoin-Storefront`
+
+Apple does not allow AI services without a Chinese permit (OpenAI's, all of them) in apps on the
+China mainland App Store (Guideline 5). The proxy picks the provider for most calls itself, so the
+exclusion is applied here, not only in apps.
+
+**The header.** `X-AICoin-Storefront: <ISO 3166 alpha-3>`, the App Store storefront's country code
+(StoreKit `Storefront.countryCode`, e.g. `CHN`, `USA`), sent by apps on every proxy request.
+Optional: a request without it, or with anything other than three letters, is unrestricted and
+served exactly as before. Read case-insensitively. The proxy strips it before forwarding upstream.
+
+**What a storefront withholds** is config: `storefronts.restricted.<CODE>` in YAML, a list or a
+comma-separated string of provider names, or `AICOIN_PROXY_STOREFRONT_<CODE>_RESTRICTED`
+(comma-separated; `none` for nothing), which overrides or adds one code. Default: `CHN: openai`. A
+provider name covers everything the proxy sends to that provider (chat, images/gpt-image, speech,
+embeddings, model listing, …).
+
+**A withheld provider is never routed to** for that storefront:
+- `/text`, `/image`, `/audio`: dropped from the ranked candidates (including `fastest`), so the
+  next best eligible provider answers. Failover and the panel an escalation goes to come from that
+  same list, so it is never tried there either. `considered` in the response does not list it.
+- `POST /consortium`: never seated, so it never drafts, reviews, edits, or takes over as editor. A
+  configured editor that is withheld falls to the next panelist, as an editor with no key does.
+  A `providers` list that also names allowed providers just loses the withheld ones.
+- `GET /skills`: describes routing as the caller's storefront would see it, so a withheld provider
+  is absent from `providers`, `routing`, `models` and the consortium panel and editor.
+
+**Naming one explicitly is refused** with `451`, before any coin is held, nothing charged and no
+upstream call made:
+
+```json
+{"error":"provider_unavailable_in_region","message":"openai is not available on the CHN App Store storefront","provider":"openai","storefront":"CHN"}
+```
+
+That is: `X-AI: openai` on the forwarded route (any path), `"provider":"openai"` on `/text`, `/image`
+or `/audio`, and on `/consortium` an `"editor":"openai"` or a `providers` list made up only of
+withheld providers.
+
+**Logged.** The access-log line of a request whose storefront withholds anything carries
+`"storefront":"CHN"`; lines for other requests are unchanged. A `451` is also logged on the
+proxy's console log.
+
 ### Ledger (Redis)
 
 Backed by a single Redis instance — ElastiCache for Redis (with snapshotting

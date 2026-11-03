@@ -124,12 +124,16 @@ final class CapabilityHandler {
         // request is a judgement with a right answer rather than a piece of writing - and who are
         // holding somebody up while they wait for it. See ProviderSkills.fastest.
         boolean quickest = Boolean.TRUE.equals(body.get("fastest"));
-        List<String> ranked = quickest
-                ? config.getCapabilities().getSkills().fastest(capability, subject, speed,
-                        provider -> isAvailable(config, liveness, capability, provider))
-                : rank(config, liveness, speed, capability, subject);
         String pinned = body.get("provider") instanceof String
                 ? ((String) body.get("provider")).trim().toLowerCase(Locale.ROOT) : null;
+        // A provider the caller's storefront may not use is never a candidate — not first choice,
+        // not a failover, not on the panel an escalation goes to — and naming it is a 451.
+        Storefront storefront = Storefront.of(ctx.channel());
+        if (pinned != null && !storefront.allows(pinned)) {
+            storefront.refuse(ctx, pinned, capability.path());
+            return;
+        }
+        List<String> ranked = candidates(config, liveness, speed, capability, subject, quickest, storefront);
         if (pinned != null) {
             if (!ranked.contains(pinned)) {
                 sendError(ctx, HttpResponseStatus.BAD_REQUEST, "provider " + pinned
@@ -156,6 +160,23 @@ final class CapabilityHandler {
 
         new Attempt(ctx, config, group, healthTracker, speed, ledger, wallet, capability, prompt,
                 background, subject, ranked, escalate, voice, size, language).next();
+    }
+
+    /**
+     * Who this request may be routed to, best (or, with {@code quickest}, soonest) first: {@link
+     * #rank}'s list, less whatever the caller's storefront withholds. Everything downstream — the
+     * attempt order, failover, the panel an escalation is put to — reads only this list.
+     */
+    static List<String> candidates(ProxyConfig config, ProviderLiveness liveness, ProviderSpeed speed,
+                                   Capability capability, String subject, boolean quickest,
+                                   Storefront storefront) {
+        List<String> ranked = quickest
+                ? config.getCapabilities().getSkills().fastest(capability, subject, speed,
+                        provider -> storefront.allows(provider) && isAvailable(config, liveness, capability, provider))
+                : config.getCapabilities().getSkills().rank(capability, subject, speed,
+                        provider -> storefront.allows(provider) && isAvailable(config, liveness, capability, provider));
+        // Filtered again in case a ranking ever lists a provider without consulting the predicate.
+        return storefront.filter(ranked);
     }
 
     /**

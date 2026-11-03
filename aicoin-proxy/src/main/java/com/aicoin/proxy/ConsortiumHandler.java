@@ -174,6 +174,35 @@ final class ConsortiumHandler {
      * editor if it is, else the first panelist. Never a provider that isn't on the panel — the
      * editor writes the answer, so it has to be one of the models that can be called.
      */
+    /**
+     * The restricted provider a consortium request names explicitly, or null: an {@code editor}
+     * the storefront withholds, or a {@code providers} list made up only of withheld ones. A list
+     * that also names allowed providers is a narrowing, not a pin — the withheld ones are dropped
+     * the way a provider without a key is.
+     */
+    static String restrictedPin(Storefront storefront, Set<String> requested, Object editorField) {
+        if (!storefront.isRestricted()) {
+            return null;
+        }
+        if (editorField instanceof String) {
+            String editor = ((String) editorField).trim().toLowerCase(Locale.ROOT);
+            if (!editor.isEmpty() && !storefront.allows(editor)) {
+                return editor;
+            }
+        }
+        if (requested != null && !requested.isEmpty()) {
+            String first = null;
+            for (String provider : requested) {
+                if (storefront.allows(provider)) {
+                    return null;
+                }
+                first = first == null ? provider : first;
+            }
+            return first;
+        }
+        return null;
+    }
+
     static String editor(ProxyConfig config, List<String> panel, String requested) {
         if (requested != null && panel.contains(requested)) {
             return requested;
@@ -291,7 +320,17 @@ final class ConsortiumHandler {
         // seat. It is what a reader's setting wants ("not Kimi, it takes ten minutes a turn"), and
         // unlike `providers` it keeps seating a provider added to the panel later.
         Set<String> skip = skipped(body.get("skip"));
-        List<String> seated = panel(config, requested, subject, null, best);
+        // The caller's storefront withholds some providers outright (see Storefront): they are
+        // never seated, so never draft, review, edit or take over as editor — all of which draw
+        // only on the panel. A request that names one as its editor, or narrows the panel to
+        // nothing but such providers, asked for exactly that provider: 451, before any coin.
+        Storefront storefront = Storefront.of(ctx.channel());
+        String refusedPin = restrictedPin(storefront, requested, body.get("editor"));
+        if (refusedPin != null) {
+            storefront.refuse(ctx, refusedPin, "/consortium");
+            return;
+        }
+        List<String> seated = storefront.filter(panel(config, requested, subject, null, best));
         List<String> panel = withoutSkipped(seated, skip);
         if (!seated.isEmpty() && panel.isEmpty()) {
             sendError(ctx, HttpResponseStatus.BAD_REQUEST,
@@ -385,7 +424,7 @@ final class ConsortiumHandler {
         List<String> skipped = new ArrayList<>();
         for (String provider : ChatAdapter.CHAT_PROVIDERS) {
             ProviderCredit.Failure credit = ProviderCredit.get().failureFor(provider);
-            if (credit != null && (requested == null || requested.contains(provider))
+            if (credit != null && storefront.allows(provider) && (requested == null || requested.contains(provider))
                     && config.getConsortium().modelFor(provider, best) != null
                     && config.getProvider(provider) != null && config.getProvider(provider).getApiKey() != null
                     && !config.getProvider(provider).getApiKey().isEmpty()) {
