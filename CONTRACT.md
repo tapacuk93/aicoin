@@ -176,6 +176,24 @@ That is the whole mechanism, and it is what makes per-service revocation possibl
 
 **Revocation (all tokens)**: `POST /wallet/api/revoke-tokens` (live-signed, see above) sets `aicoin:token-revoked-before:{address}` to the current time in Redis. Verifying a token additionally checks `iat > revokedBefore` (missing key = never revoked). A token authenticates AI-proxy calls only — it **cannot** claim free coins or transfer coins, since those require the raw private key. A leaked token can run up AI-proxy usage against the wallet's balance until revoked/expired; it cannot drain coins via transfer.
 
+### Linked wallets — another app's own wallet spending this wallet's coins
+An app with a wallet of its own (AI UI on a Mac) can be given this wallet's coins without either key leaving its device: the app shows its **address** as a code, the owner scans it in the AICoin wallet app, and signs a link. From then on the app keeps signing its own tokens with its own key, exactly as before, and its paid calls are paid out of the owner's balance. Two wallets, the same coins. Only an address is in the code — public, like a balance — so photographing the screen gives nobody anything; what makes the link is the owner's signature.
+
+**The code.** `aicoin:link?address=<64 hex>&app=<display name, percent-encoded>`. The wallet app shows the app name and the first and last six characters of the address before the owner confirms, so the owner can compare them with what the app shows.
+
+**Who pays.** While linked, every paid call of the linked wallet — forwarded, `/text`, `/image`, `/audio`, consortium turns, settlements and refunds — debits and credits the **owner's** balance, and the linked wallet's own balance is left alone (it is still its own: it can transfer it, and it is spendable again once unlinked). The owner's log records each such entry with `"linked":"<linked address>"`; the linked wallet's log records nothing for them.
+
+**Limit.** A link may carry `limit`, the most coins it may spend in total; `null` is no limit — all of the owner's coins. `spent` counts what it has spent since the link was made (refunds take it back down). A call that would take `spent` past `limit` is `402` like an empty wallet, with `"reason":"link_limit"`; a settlement after a call may still carry it a little past, as a settlement can carry a balance below zero. Lowering the limit to at or below `spent` stops the link spending at once; it is how the owner gives an app "less".
+
+**Shape.** A wallet is linked to at most one owner, an owner cannot itself be linked, and a wallet cannot link itself — no chains, so whose coins a call spends is always one lookup. Redis: `aicoin:{aicoin}:link:<linked>` = hash `{owner, app, limit, spent, linked}`; `aicoin:{aicoin}:links:<owner>` = set of linked addresses. Link and limit checks happen inside the debit script, atomically with the debit.
+
+- `POST /wallet/api/links` (live-signed by the owner), body `{"address":"<linked>","app":"AI UI","limit":500}` (`limit` optional, `null`/absent = no limit) → `200 {"address","app","limit","spent","linked"}`. Re-sent for a wallet already linked to this owner, it updates `app` and `limit` and keeps `spent`. `400` for a malformed address or the owner's own; `409 {"error":"already_linked"}` if that wallet is linked to another owner, `409 {"error":"is_owner"}` if it has links of its own, or the signer is itself linked.
+- `GET /wallet/api/links` (live-signed by the owner) → `{"links":[{"address","app","limit","spent","linked"}]}`, newest first; `linked` is epoch millis.
+- `POST /wallet/api/links/remove` (live-signed by **either** side: the owner, or the linked wallet leaving), body `{"address":"<linked>"}` → `{"removed":true,"address":"..."}`. Its very next call is paid from its own balance again.
+- `GET /wallet/api/balance/{address}` additionally carries, for a linked wallet, `"linked_to":"<owner>"` and `"spendable":N` — what its next calls can spend, `min(owner balance, limit − spent)`; for any other wallet `spendable` equals `balance`. `balance` is unchanged: always the wallet's own.
+
+This replaces, for the wallet app, the authorise-by-code flow above: an authorised service held a token for the owner's address, so it could be revoked but never limited, and the token had to be handed over. The authorise routes stay for services already using them.
+
 ### Paid targets vs free targets (applies before the balance gate)
 Not every endpoint a provider exposes is one it bills the proxy for: model listings, ElevenLabs voice listings, token counting (Anthropic `/v1/messages/count_tokens`, Google `:countTokens`), and account/balance lookups cost the proxy nothing upstream. Each provider's `providers.<name>.freePaths` lists those **free targets**; every other endpoint is a **paid target** and goes through the balance gate below.
 
