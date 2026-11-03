@@ -1,10 +1,13 @@
-# AICoin Wallet (iOS)
+# AICoin Wallet (iOS and macOS)
 
 A native SwiftUI mirror of `aicoin-proxy/src/main/resources/wallet.html`:
 generate or import an Ed25519 wallet, view balance/price, claim free coins,
 send coins to another address, and issue/revoke AI-proxy API tokens — talking
 to the same production proxy at `https://proxy.aicoin.oeaio.com`. Bundle ID
 `com.oeaio.aicoin.wallet`.
+
+The Mac app is the same target built for Mac Catalyst with the same bundle
+ID (one universal purchase, one keychain access group).
 
 See the repo-root `CONTRACT.md` for the exact wire protocol this app
 implements (canonical live-signature message, token format, response
@@ -22,8 +25,11 @@ are the client-side counterparts of
   state (connect/backup/wallet), the SwiftUI equivalent of wallet.html's
   top-level `wallet` variable.
 - `AICoinWallet/Services/KeychainStore.swift` — persists the 32-byte seed in
-  the iOS Keychain (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`); the
-  native equivalent of the browser wallet's `localStorage`.
+  the Keychain as a synchronizable item (`kSecAttrSynchronizable`,
+  `AfterFirstUnlock`), so iCloud Keychain carries the wallet to the user's
+  other iPhones, iPads and Macs; a device-only seed from an earlier build is
+  migrated on first load. The native equivalent of the browser wallet's
+  `localStorage`.
 - `AICoinWallet/Services/WalletSigner.swift` — canonical live-signature
   message construction + signing, and client-side API token issuance.
 - `AICoinWallet/Services/ProxyAPI.swift` — the networking layer against

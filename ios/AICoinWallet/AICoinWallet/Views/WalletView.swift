@@ -110,7 +110,7 @@ struct WalletView: View {
                     Button(role: .destructive) {
                         confirmingRemoval = true
                     } label: {
-                        Label("Remove Wallet from iPhone", systemImage: "trash")
+                        Label("Remove Wallet", systemImage: "trash")
                     }
                     .foregroundStyle(.red)
                 }
@@ -145,11 +145,11 @@ struct WalletView: View {
             } message: {
                 Text(scanProblem ?? "")
             }
-            .confirmationDialog("Remove this wallet from this iPhone?", isPresented: $confirmingRemoval,
+            .confirmationDialog("Remove this wallet from your devices?", isPresented: $confirmingRemoval,
                                 titleVisibility: .visible) {
                 Button("Remove Wallet", role: .destructive) { store.useADifferentWallet() }
             } message: {
-                Text("The coins stay with the wallet, but you'll need its private key to open it again. Make sure you've backed it up.")
+                Text("It is removed from every device that shares your iCloud Keychain. The coins stay with the wallet, but you'll need its private key to open it again. Make sure you've backed it up.")
             }
         }
     }

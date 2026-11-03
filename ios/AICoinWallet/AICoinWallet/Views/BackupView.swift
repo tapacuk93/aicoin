@@ -14,7 +14,7 @@ struct BackupView: View {
             Form {
                 Section {
                     Label {
-                        Text("This is the only copy of your private key. Anyone who has it can spend your coins, and if you lose it there is no way to recover this wallet.")
+                        Text("Your private key is kept in your iCloud Keychain, so your other devices open this wallet too. Write it down as well: anyone who has it can spend your coins, and if you lose it there is no way to recover this wallet.")
                     } icon: {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }

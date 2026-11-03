@@ -17,7 +17,7 @@ struct OnboardingView: View {
             Text("AICoin Wallet")
                 .font(.largeTitle.bold())
                 .padding(.top, 20)
-            Text("Pay for AI with coins you hold yourself. Your private key never leaves this iPhone.")
+            Text("Pay for AI with coins you hold yourself. Your private key stays in your iCloud Keychain, end-to-end encrypted, on your own devices.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

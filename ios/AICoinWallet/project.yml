@@ -27,6 +27,11 @@ targets:
       path: AICoinWallet/Info.plist
       properties:
         CFBundleDisplayName: AICoin Wallet
+        # From the build settings, so an upload can set its own build number.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # Required on the Mac App Store.
+        LSApplicationCategoryType: public.app-category.finance
         UILaunchScreen:
           UIColorName: LaunchBackground
           UIImageName: LaunchLogo
@@ -45,9 +50,26 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         # Without it, iOS terminates the app the moment the QR scanner opens the camera.
         NSCameraUsageDescription: "Scan a wallet address to pay it, or a service's code to let it make AI calls billed to this wallet."
+    entitlements:
+      path: AICoinWallet/AICoinWallet.entitlements
+      properties:
+        # The seed lives in this group, synchronizable, so iCloud Keychain
+        # carries it to the user's other devices (see KeychainStore).
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.oeaio.aicoin.wallet
+        # Mac App Store: sandboxed, talks to the proxy, scans QR codes.
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.device.camera: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oeaio.aicoin.wallet
+        # The Mac app is this target under Mac Catalyst, keeping the iOS
+        # bundle ID: one universal purchase, and the same keychain access
+        # group, so the wallet synced through iCloud Keychain opens on both.
+        SUPPORTS_MACCATALYST: YES
+        DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
 
