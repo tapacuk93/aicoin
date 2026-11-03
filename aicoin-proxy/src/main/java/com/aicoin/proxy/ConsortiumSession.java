@@ -1594,11 +1594,9 @@ final class ConsortiumSession {
     // ---- Ending ------------------------------------------------------------------------------------
 
     private void sendInsufficient() {
-        ledger.getBalance(wallet, balance -> {
-            String json = "{\"error\":\"insufficient aicoin balance\",\"balance\":"
-                    + (balance.isPresent() ? balance.get() : 0) + "}";
-            complete(HttpResponseStatus.PAYMENT_REQUIRED, json);
-        });
+        ledger.getSpending(wallet, spending -> complete(HttpResponseStatus.PAYMENT_REQUIRED,
+                spending.map(s -> s.insufficientJson(CALL_COST_AICOIN))
+                        .orElse(AicoinLedger.insufficientJson(0, false, false, 0))));
     }
 
     private void finish(HttpResponseStatus status, String error) {

@@ -515,9 +515,9 @@ final class CapabilityHandler {
         }
 
         private void sendInsufficient() {
-            ledger.getBalance(wallet, balance -> send(HttpResponseStatus.PAYMENT_REQUIRED,
-                    "{\"error\":\"insufficient aicoin balance\",\"balance\":"
-                            + (balance.isPresent() ? balance.get() : 0) + "}"));
+            ledger.getSpending(wallet, spending -> send(HttpResponseStatus.PAYMENT_REQUIRED,
+                    spending.map(s -> s.insufficientJson(BilledCall.CALL_COST_AICOIN))
+                            .orElse(AicoinLedger.insufficientJson(0, false, false, 0))));
         }
 
         private void send(HttpResponseStatus status, String json) {

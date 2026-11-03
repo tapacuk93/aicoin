@@ -72,6 +72,11 @@ class ConsortiumPauseTest {
         void getBalance(String userId, Consumer<Optional<Double>> onResult) {
             onResult.accept(Optional.of(100.0));
         }
+
+        @Override
+        void getSpending(String address, Consumer<Optional<Spending>> onResult) {
+            onResult.accept(Optional.of(Spending.unlinked(100.0)));
+        }
     }
 
     /**

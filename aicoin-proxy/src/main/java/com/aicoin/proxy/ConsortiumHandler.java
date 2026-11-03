@@ -437,9 +437,11 @@ final class ConsortiumHandler {
         // would arrive as an event inside a 200 instead of the 402 every client already handles.
         // The first turn's own debit still decides in the end; this only keeps the ordinary case
         // ordinary. A balance that cannot be read is left to that debit to report.
-        ledger.getBalance(walletAddress, balance -> {
-            if (balance.isPresent() && balance.get() < CALL_COST_AICOIN) {
-                byte[] bytes = ("{\"error\":\"insufficient aicoin balance\",\"balance\":" + balance.get() + "}")
+        // What the wallet can spend, not its own balance: a linked wallet pays from its owner.
+        ledger.getSpending(walletAddress, spending -> {
+            if (spending.isPresent() && (spending.get().spendable() < CALL_COST_AICOIN
+                    || spending.get().limitRefuses(CALL_COST_AICOIN))) {
+                byte[] bytes = spending.get().insufficientJson(CALL_COST_AICOIN)
                         .getBytes(CharsetUtil.UTF_8);
                 FullHttpResponse response = new DefaultFullHttpResponse(
                         HttpVersion.HTTP_1_1, HttpResponseStatus.PAYMENT_REQUIRED, Unpooled.wrappedBuffer(bytes));

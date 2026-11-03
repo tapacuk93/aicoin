@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -201,12 +202,15 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         }
         if (request.method() == HttpMethod.GET && path.startsWith("/wallet/api/balance/")) {
             String walletId = path.substring("/wallet/api/balance/".length());
-            ledger.getBalance(walletId, balance -> {
-                if (!balance.isPresent()) {
+            // balance is always the wallet's own; a linked wallet also says whose coins it spends
+            // and how many it can (CONTRACT.md's "Linked wallets").
+            ledger.getSpending(walletId, spending -> {
+                if (!spending.isPresent()) {
                     sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
                     return;
                 }
-                byte[] bytes = ("{\"user_id\":" + jsonString(walletId) + ",\"balance\":" + formatNumber(balance.get()) + "}")
+                byte[] bytes = ("{\"user_id\":" + jsonString(walletId) + ",\"balance\":" + formatNumber(spending.get().balance())
+                        + spending.get().balanceFieldsJson() + "}")
                         .getBytes(CharsetUtil.UTF_8);
                 sendJson(ctx, HttpResponseStatus.OK, bytes);
             });
@@ -248,6 +252,25 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
             byte[] body = ByteBufUtil.getBytes(request.content());
             requireLiveSignature(ctx, request, body,
                     address -> handleAuthorizeApprove(ctx, address, id, body));
+            return;
+        }
+        /*
+         * Linked wallets: another app's own wallet spending this wallet's coins (CONTRACT.md's
+         * "Linked wallets"). The owner makes and lists links; either side may end one.
+         */
+        if (request.method() == HttpMethod.POST && "/wallet/api/links".equals(path)) {
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> handleLink(ctx, address, body));
+            return;
+        }
+        if (request.method() == HttpMethod.GET && "/wallet/api/links".equals(path)) {
+            requireLiveSignature(ctx, request, ByteBufUtil.getBytes(request.content()),
+                    address -> handleLinksList(ctx, address));
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/wallet/api/links/remove".equals(path)) {
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> handleUnlink(ctx, address, body));
             return;
         }
         if (request.method() == HttpMethod.GET && "/wallet/api/grants".equals(path)) {
@@ -509,7 +532,7 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 Transactions.recordCall(Transactions.Call.of(walletAddress, Transactions.Tag.of(ctx.channel()), provider)
                         .endpoint(Transactions.endpointOf(forwardUri))
                         .failed(402, "insufficient balance"));
-                sendInsufficientBalance(ctx, debit.getBalance());
+                sendInsufficientBalance(ctx, debit);
             } else {
                 UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, forwardUri,
                         finalHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
@@ -669,13 +692,16 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 sendJsonError(ctx, HttpResponseStatus.UNAUTHORIZED, authResult.getFailureReason());
                 return;
             }
-            // A call that spends coins is held to the app's daily cap before it runs.
-            String address = authResult.getAddress();
-            if (!spends) {
-                onVerified.accept(address);
-                return;
-            }
-            withinAppCap(ctx, address, appHeader, () -> onVerified.accept(address));
+            // A token naming a grant works only while the grant does, here as on the X-AI path.
+            withLiveGrant(ctx, authResult, () -> {
+                // A call that spends coins is held to the app's daily cap before it runs.
+                String address = authResult.getAddress();
+                if (!spends) {
+                    onVerified.accept(address);
+                    return;
+                }
+                withinAppCap(ctx, address, appHeader, () -> onVerified.accept(address));
+            });
         });
     }
 
@@ -1121,6 +1147,89 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         });
     }
 
+    /**
+     * {@code POST /wallet/api/links}: the signer becomes {@code address}'s owner, or — already its
+     * owner — changes the link's app and limit, keeping what it has spent.
+     */
+    private void handleLink(ChannelHandlerContext ctx, String owner, byte[] body) {
+        Map<?, ?> in = parseObject(body);
+        if (in == null) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "a JSON body is required");
+            return;
+        }
+        String linked = in.get("address") instanceof String ? ((String) in.get("address")).trim() : "";
+        if (!linked.matches("[0-9a-fA-F]{64}")) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "address must be 64 hex characters");
+            return;
+        }
+        linked = linked.toLowerCase(Locale.ROOT);
+        if (linked.equalsIgnoreCase(owner)) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "a wallet cannot link itself");
+            return;
+        }
+        Object appValue = in.get("app");
+        String app = appValue instanceof String ? ((String) appValue).trim() : "";
+        if (appValue != null && !(appValue instanceof String) || app.length() > 100) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "app must be a name of at most 100 characters");
+            return;
+        }
+        Object limitValue = in.get("limit");
+        Double limit = null;
+        if (limitValue != null) {
+            if (!(limitValue instanceof Number) || ((Number) limitValue).doubleValue() < 0
+                    || !Double.isFinite(((Number) limitValue).doubleValue())) {
+                sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "limit must be a number of coins, at least 0, or null");
+                return;
+            }
+            limit = ((Number) limitValue).doubleValue();
+        }
+        ledger.link(owner, linked, app, limit, result -> {
+            if (!result.reachable()) {
+                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not record the link");
+            } else if (result.error() != null) {
+                sendJsonError(ctx, HttpResponseStatus.CONFLICT, result.error());
+            } else {
+                sendJsonText(ctx, HttpResponseStatus.OK, result.link().toJson());
+            }
+        });
+    }
+
+    /** {@code GET /wallet/api/links}: the wallets linked to the signer, newest first. */
+    private void handleLinksList(ChannelHandlerContext ctx, String owner) {
+        ledger.listLinks(owner, links -> {
+            if (links.isEmpty()) {
+                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not read links");
+                return;
+            }
+            StringBuilder out = new StringBuilder("{\"links\":[");
+            for (int i = 0; i < links.get().size(); i++) {
+                out.append(i == 0 ? "" : ",").append(links.get().get(i).toJson());
+            }
+            sendJsonText(ctx, HttpResponseStatus.OK, out.append("]}").toString());
+        });
+    }
+
+    /** {@code POST /wallet/api/links/remove}: signed by the owner, or by the linked wallet leaving. */
+    private void handleUnlink(ChannelHandlerContext ctx, String signer, byte[] body) {
+        Map<?, ?> in = parseObject(body);
+        String linked = in != null && in.get("address") instanceof String ? ((String) in.get("address")).trim() : "";
+        if (!linked.matches("[0-9a-fA-F]{64}")) {
+            sendJsonError(ctx, HttpResponseStatus.BAD_REQUEST, "address must be 64 hex characters");
+            return;
+        }
+        String address = linked.toLowerCase(Locale.ROOT);
+        ledger.unlink(signer, address, result -> {
+            if (result.isEmpty()) {
+                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not remove the link");
+            } else if (result.get() < 0) {
+                sendJsonError(ctx, HttpResponseStatus.FORBIDDEN, "only the owner or the linked wallet can remove a link");
+            } else {
+                sendJsonText(ctx, HttpResponseStatus.OK,
+                        "{\"removed\":" + (result.get() == 1) + ",\"address\":" + Json.string(address) + "}");
+            }
+        });
+    }
+
     /** The signer's own transaction log, most recent first — the same entries the admin sees. */
     private void handleOwnTransactions(ChannelHandlerContext ctx, String address) {
         ledger.getTransactions(address, transactions -> {
@@ -1257,11 +1366,12 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
      * CONTRACT.md's "Balance gate" section: sent when {@link
      * AicoinLedger#debitForCall} finds less than {@link #CALL_COST_AICOIN}
      * available. No upstream call is made and no debit is applied, same as
-     * the 401/503 short-circuit cases above.
+     * the 401/503 short-circuit cases above. A linked wallet's also carries
+     * {@code spendable}, and {@code "reason":"link_limit"} when its link's
+     * limit refused it — see {@link AicoinLedger#insufficientJson}.
      */
-    private static void sendInsufficientBalance(ChannelHandlerContext ctx, double balance) {
-        byte[] bytes = ("{\"error\":\"insufficient aicoin balance\",\"balance\":" + formatNumber(balance) + "}")
-                .getBytes(CharsetUtil.UTF_8);
+    private static void sendInsufficientBalance(ChannelHandlerContext ctx, AicoinLedger.DebitResult debit) {
+        byte[] bytes = debit.insufficientJson().getBytes(CharsetUtil.UTF_8);
         FullHttpResponse response = new DefaultFullHttpResponse(
                 HttpVersion.HTTP_1_1, HttpResponseStatus.PAYMENT_REQUIRED, Unpooled.wrappedBuffer(bytes));
         response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");

@@ -57,6 +57,8 @@ class AicoinLedger implements AutoCloseable {
      * bigger node.
      */
     static final String TAG = "{aicoin}";
+    /** What every key below starts with — passed to the scripts that build an owner's keys themselves. */
+    static final String KEY_PREFIX = "aicoin:" + TAG + ":";
     private static final String EVENTS_KEY = "aicoin:" + TAG + ":events";
     private static final String FREE_COINS_REMAINING_KEY = "aicoin:" + TAG + ":free-coins-remaining";
     static final String KNOWN_WALLETS_KEY = "aicoin:" + TAG + ":known-wallets";
@@ -137,17 +139,61 @@ class AicoinLedger implements AutoCloseable {
 
 
 
+    /**
+     * The balance gate. KEYS: the wallet's balance, the known-wallets set, the wallet's tx log, and
+     * its link hash ({@link #linkKey}). ARGV: amount, address, provider, now, {@link #KEY_PREFIX}.
+     *
+     * <p>A linked wallet (CONTRACT.md's "Linked wallets") pays from its owner: the link is read and
+     * the owner's balance and log are used in its place, with the link's limit checked and its
+     * {@code spent} raised, all in this one script. The owner's keys are built from the prefix
+     * rather than passed in, because which owner is only known once the link has been read; they
+     * carry the same {@code {aicoin}} hash tag, so they are in the same cluster slot as the keys
+     * declared.
+     *
+     * <p>Returns {@code {ok, ownBalance, reason, spendable, owner}}: {@code ok} 1 or 0, the
+     * wallet's own balance, {@code "link_limit"} when the link's limit refused it (else empty),
+     * what its next calls could spend, and the owner it paid from (empty when not linked).
+     */
     private static final String DEBIT_SCRIPT =
             "local amount = tonumber(ARGV[1]) "
-            + "local balance = tonumber(redis.call('GET', KEYS[1]) or '0') "
-            + "if balance < amount then "
-            + "  return {0, tostring(balance)} "
+            + "local balKey = KEYS[1] "
+            + "local txKey = KEYS[3] "
+            + "local owner = redis.call('HGET', KEYS[4], 'owner') "
+            + "local left = nil "
+            + "if owner then "
+            + "  balKey = ARGV[5] .. 'balance:' .. owner "
+            + "  txKey = ARGV[5] .. 'tx:' .. owner "
+            + "  local limit = redis.call('HGET', KEYS[4], 'limit') "
+            + "  if limit and limit ~= '' then "
+            + "    left = tonumber(limit) - tonumber(redis.call('HGET', KEYS[4], 'spent') or '0') "
+            + "    if left < 0 then left = 0 end "
+            + "  end "
+            + "else owner = '' end "
+            + "local balance = tonumber(redis.call('GET', balKey) or '0') "
+            + "local own = balance "
+            + "if owner ~= '' then own = tonumber(redis.call('GET', KEYS[1]) or '0') end "
+            + "local spendable = balance "
+            + "if left and left < spendable then spendable = left end "
+            + "if left and left < amount then "
+            + "  return {0, tostring(own), 'link_limit', tostring(spendable), owner} "
             + "end "
-            + "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], '-' .. ARGV[1]) "
+            + "if balance < amount then "
+            + "  return {0, tostring(own), '', tostring(spendable), owner} "
+            + "end "
+            + "local newBalance = tonumber(redis.call('INCRBYFLOAT', balKey, '-' .. ARGV[1])) "
+            + "local entry = {type='debit', amount=amount, provider=ARGV[3], balance_after=newBalance, at=tonumber(ARGV[4])} "
+            + "if owner ~= '' then "
+            + "  redis.call('HINCRBYFLOAT', KEYS[4], 'spent', ARGV[1]) "
+            + "  entry.linked = ARGV[2] "
+            + "  spendable = spendable - amount "
+            + "else "
+            + "  own = newBalance "
+            + "  spendable = newBalance "
+            + "end "
             + "redis.call('SADD', KEYS[2], ARGV[2]) "
-            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='debit', amount=amount, provider=ARGV[3], balance_after=tonumber(newBalance), at=tonumber(ARGV[4])})) "
-            + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
-            + "return {1, tostring(newBalance)}";
+            + "redis.call('RPUSH', txKey, cjson.encode(entry)) "
+            + "redis.call('LTRIM', txKey, -" + TX_LOG_CAP + ", -1) "
+            + "return {1, tostring(own), '', tostring(spendable), owner}";
 
     /**
      * {@code SETNX} the idempotency marker and the balance credit happen in the same script, so a
@@ -216,23 +262,120 @@ class AicoinLedger implements AutoCloseable {
      */
     private static final String SETTLE_SCRIPT =
             "local requested = tonumber(ARGV[1]) "
-            + "local balance = tonumber(redis.call('GET', KEYS[1]) or '0') "
+            + "local balKey = KEYS[1] "
+            + "local txKey = KEYS[3] "
+            + "local owner = redis.call('HGET', KEYS[4], 'owner') "
+            + "if owner then "
+            + "  balKey = ARGV[5] .. 'balance:' .. owner "
+            + "  txKey = ARGV[5] .. 'tx:' .. owner "
+            + "end "
+            + "local balance = tonumber(redis.call('GET', balKey) or '0') "
             + "local newBalance = balance "
-            + "if requested > 0 then newBalance = tonumber(redis.call('INCRBYFLOAT', KEYS[1], '-' .. requested)) end "
+            + "if requested > 0 then newBalance = tonumber(redis.call('INCRBYFLOAT', balKey, '-' .. requested)) end "
             + "local owed = 0 "
             + "if newBalance < 0 then owed = -newBalance end "
+            + "local entry = {type='debit_settlement', amount=requested, "
+            + "owed=owed, provider=ARGV[3], balance_after=newBalance, at=tonumber(ARGV[4])} "
+            + "if owner then "
+            + "  if requested > 0 then redis.call('HINCRBYFLOAT', KEYS[4], 'spent', ARGV[1]) end "
+            + "  entry.linked = ARGV[2] "
+            + "end "
             + "redis.call('SADD', KEYS[2], ARGV[2]) "
-            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='debit_settlement', amount=requested, "
-            + "owed=owed, provider=ARGV[3], balance_after=newBalance, at=tonumber(ARGV[4])})) "
-            + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
+            + "redis.call('RPUSH', txKey, cjson.encode(entry)) "
+            + "redis.call('LTRIM', txKey, -" + TX_LOG_CAP + ", -1) "
             + "return tostring(requested)";
 
+    /**
+     * Gives a held coin back — to the owner when the wallet is linked, taking the link's
+     * {@code spent} down with it (never below zero: a link made again since starts from nothing).
+     */
     private static final String REFUND_SCRIPT =
-            "local newBalance = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1]) "
+            "local balKey = KEYS[1] "
+            + "local txKey = KEYS[3] "
+            + "local owner = redis.call('HGET', KEYS[4], 'owner') "
+            + "if owner then "
+            + "  balKey = ARGV[5] .. 'balance:' .. owner "
+            + "  txKey = ARGV[5] .. 'tx:' .. owner "
+            + "end "
+            + "local newBalance = redis.call('INCRBYFLOAT', balKey, ARGV[1]) "
+            + "local entry = {type='refund', amount=tonumber(ARGV[1]), provider=ARGV[3], balance_after=tonumber(newBalance), at=tonumber(ARGV[4])} "
+            + "if owner then "
+            + "  local spent = tonumber(redis.call('HINCRBYFLOAT', KEYS[4], 'spent', '-' .. ARGV[1])) "
+            + "  if spent < 0 then redis.call('HSET', KEYS[4], 'spent', '0') end "
+            + "  entry.linked = ARGV[2] "
+            + "end "
             + "redis.call('SADD', KEYS[2], ARGV[2]) "
-            + "redis.call('RPUSH', KEYS[3], cjson.encode({type='refund', amount=tonumber(ARGV[1]), provider=ARGV[3], balance_after=tonumber(newBalance), at=tonumber(ARGV[4])})) "
-            + "redis.call('LTRIM', KEYS[3], -" + TX_LOG_CAP + ", -1) "
+            + "redis.call('RPUSH', txKey, cjson.encode(entry)) "
+            + "redis.call('LTRIM', txKey, -" + TX_LOG_CAP + ", -1) "
             + "return 'OK'";
+
+    /*
+     * Linked wallets — CONTRACT.md's "Linked wallets". A link is one hash per linked wallet,
+     * naming its owner, and a set per owner of the wallets linked to it. Every script below reads
+     * the link hash it is given and builds the owner's keys from the prefix; all of them share the
+     * {aicoin} hash tag, so they are in one cluster slot.
+     */
+
+    /**
+     * What a wallet's next calls can spend. KEYS: its balance, its link hash. ARGV: the prefix.
+     * Returns {@code {ownBalance, owner, limit, spent, ownerBalance}}, empty strings when unlinked.
+     */
+    private static final String SPENDING_SCRIPT =
+            "local own = redis.call('GET', KEYS[1]) or '0' "
+            + "local owner = redis.call('HGET', KEYS[2], 'owner') "
+            + "if not owner then return {own, '', '', '0', ''} end "
+            + "local limit = redis.call('HGET', KEYS[2], 'limit') or '' "
+            + "local spent = redis.call('HGET', KEYS[2], 'spent') or '0' "
+            + "local ownerBalance = redis.call('GET', ARGV[1] .. 'balance:' .. owner) or '0' "
+            + "return {own, owner, limit, spent, ownerBalance}";
+
+    /**
+     * Make or update a link. KEYS: the linked wallet's link hash, the owner's links set, the linked
+     * wallet's own links set, the owner's link hash. ARGV: owner, linked, app, limit (empty for
+     * none), now. Returns {@code {status, app, limit, spent, linked}}; status is {@code ok},
+     * {@code already_linked} or {@code is_owner}.
+     */
+    private static final String LINK_SCRIPT =
+            "if redis.call('EXISTS', KEYS[4]) == 1 then return {'is_owner'} end "
+            + "if redis.call('SCARD', KEYS[3]) > 0 then return {'is_owner'} end "
+            + "local current = redis.call('HGET', KEYS[1], 'owner') "
+            + "if current and current ~= ARGV[1] then return {'already_linked'} end "
+            + "if current then "
+            + "  redis.call('HSET', KEYS[1], 'app', ARGV[3], 'limit', ARGV[4]) "
+            + "else "
+            + "  redis.call('HSET', KEYS[1], 'owner', ARGV[1], 'app', ARGV[3], 'limit', ARGV[4], 'spent', '0', 'linked', ARGV[5]) "
+            + "  redis.call('SADD', KEYS[2], ARGV[2]) "
+            + "end "
+            + "local h = redis.call('HMGET', KEYS[1], 'app', 'limit', 'spent', 'linked') "
+            + "return {'ok', h[1] or '', h[2] or '', h[3] or '0', h[4] or '0'}";
+
+    /**
+     * End a link. KEYS: the linked wallet's link hash. ARGV: the signer, the linked address, the
+     * prefix. Returns 1 removed, 0 not linked, -1 the signer is neither side.
+     */
+    private static final String UNLINK_SCRIPT =
+            "local owner = redis.call('HGET', KEYS[1], 'owner') "
+            + "if not owner then return 0 end "
+            + "if ARGV[1] ~= owner and ARGV[1] ~= ARGV[2] then return -1 end "
+            + "redis.call('DEL', KEYS[1]) "
+            + "redis.call('SREM', ARGV[3] .. 'links:' .. owner, ARGV[2]) "
+            + "return 1";
+
+    /**
+     * An owner's links. KEYS: its links set. ARGV: the prefix, the owner. Returns
+     * {@code address, app, limit, spent, linked} five at a time; a set member whose hash no longer
+     * names this owner is dropped from the set.
+     */
+    private static final String LIST_LINKS_SCRIPT =
+            "local out = {} "
+            + "for _, m in ipairs(redis.call('SMEMBERS', KEYS[1])) do "
+            + "  local h = redis.call('HMGET', ARGV[1] .. 'link:' .. m, 'owner', 'app', 'limit', 'spent', 'linked') "
+            + "  if h[1] == ARGV[2] then "
+            + "    table.insert(out, m) table.insert(out, h[2] or '') table.insert(out, h[3] or '') "
+            + "    table.insert(out, h[4] or '0') table.insert(out, h[5] or '0') "
+            + "  else redis.call('SREM', KEYS[1], m) end "
+            + "end "
+            + "return out";
 
     private final RedisClient client;
     private final StatefulRedisConnection<String, String> connection;
@@ -252,6 +395,14 @@ class AicoinLedger implements AutoCloseable {
      */
     AicoinLedger(String host, int port, String username, String password, boolean ssl) {
         this.client = RedisClient.create(buildRedisUri(host, port, username, password, ssl));
+        this.connection = client.connect();
+        this.commands = connection.async();
+        this.appCaps = new AppCaps(new AppCaps.RedisStore(commands));
+    }
+
+    /** A ledger on the Redis {@code uri} names, database included — for tests against a real Redis. */
+    AicoinLedger(RedisURI uri) {
+        this.client = RedisClient.create(uri);
         this.connection = client.connect();
         this.commands = connection.async();
         this.appCaps = new AppCaps(new AppCaps.RedisStore(commands));
@@ -560,8 +711,8 @@ class AicoinLedger implements AutoCloseable {
     void debitForCall(String address, double amount, String provider, Consumer<DebitResult> onResult) {
         long nowMillis = Instant.now().toEpochMilli();
         RedisFuture<List<Object>> future = commands.eval(DEBIT_SCRIPT, ScriptOutputType.MULTI,
-                new String[] {balanceKey(address), KNOWN_WALLETS_KEY, txKey(address)},
-                String.valueOf(amount), address, provider, String.valueOf(nowMillis));
+                new String[] {balanceKey(address), KNOWN_WALLETS_KEY, txKey(address), linkKey(address)},
+                String.valueOf(amount), address, provider, String.valueOf(nowMillis), KEY_PREFIX);
         future.whenComplete((raw, err) -> {
             if (err != null) {
                 LOG.log(Level.WARNING, "ledger debit failed for " + address, err);
@@ -570,7 +721,10 @@ class AicoinLedger implements AutoCloseable {
             }
             boolean success = ((Number) raw.get(0)).longValue() == 1L;
             double balance = Double.parseDouble(String.valueOf(raw.get(1)));
-            onResult.accept(success ? DebitResult.success(balance) : DebitResult.insufficient(balance));
+            boolean linkLimit = "link_limit".equals(String.valueOf(raw.get(2)));
+            double spendable = Double.parseDouble(String.valueOf(raw.get(3)));
+            boolean linked = !String.valueOf(raw.get(4)).isEmpty();
+            onResult.accept(new DebitResult(true, success, balance, linked, linkLimit, spendable));
         });
     }
 
@@ -585,8 +739,8 @@ class AicoinLedger implements AutoCloseable {
         }
         long nowMillis = Instant.now().toEpochMilli();
         commands.eval(SETTLE_SCRIPT, ScriptOutputType.VALUE,
-                new String[] {balanceKey(address), KNOWN_WALLETS_KEY, txKey(address)},
-                String.valueOf(extraCoins), address, provider, String.valueOf(nowMillis))
+                new String[] {balanceKey(address), KNOWN_WALLETS_KEY, txKey(address), linkKey(address)},
+                String.valueOf(extraCoins), address, provider, String.valueOf(nowMillis), KEY_PREFIX)
                 .exceptionally(err -> {
                     LOG.log(Level.WARNING, "ledger settlement failed for " + address, err);
                     return null;
@@ -597,12 +751,198 @@ class AicoinLedger implements AutoCloseable {
     void refund(String address, double amount, String provider) {
         long nowMillis = Instant.now().toEpochMilli();
         commands.eval(REFUND_SCRIPT, ScriptOutputType.STATUS,
-                new String[] {balanceKey(address), KNOWN_WALLETS_KEY, txKey(address)},
-                String.valueOf(amount), address, provider, String.valueOf(nowMillis))
+                new String[] {balanceKey(address), KNOWN_WALLETS_KEY, txKey(address), linkKey(address)},
+                String.valueOf(amount), address, provider, String.valueOf(nowMillis), KEY_PREFIX)
                 .exceptionally(err -> {
                     LOG.log(Level.WARNING, "ledger refund failed for " + address, err);
                     return null;
                 });
+    }
+
+    // ---- Linked wallets (CONTRACT.md's "Linked wallets") ----------------------------------------
+
+    /**
+     * A wallet's own balance and, when it is linked, whose coins it spends and how many it can.
+     * {@link Optional#empty()} means the ledger could not be reached. Every spending decision made
+     * outside the debit script (a pre-check, a 402 body) reads this rather than {@link #getBalance},
+     * so a linked wallet with no coins of its own is not refused while its owner can pay.
+     */
+    void getSpending(String address, Consumer<Optional<Spending>> onResult) {
+        commands.<List<Object>>eval(SPENDING_SCRIPT, ScriptOutputType.MULTI,
+                new String[] {balanceKey(address), linkKey(address)}, KEY_PREFIX)
+                .whenComplete((raw, err) -> {
+                    if (err != null) {
+                        LOG.log(Level.WARNING, "ledger spending lookup failed for " + address, err);
+                        onResult.accept(Optional.empty());
+                        return;
+                    }
+                    List<Object> r = raw;
+                    double own = Double.parseDouble(String.valueOf(r.get(0)));
+                    String owner = String.valueOf(r.get(1));
+                    if (owner.isEmpty()) {
+                        onResult.accept(Optional.of(Spending.unlinked(own)));
+                        return;
+                    }
+                    String limit = String.valueOf(r.get(2));
+                    onResult.accept(Optional.of(Spending.linked(own, owner,
+                            limit.isEmpty() ? null : Double.parseDouble(limit),
+                            Double.parseDouble(String.valueOf(r.get(3))),
+                            Double.parseDouble(String.valueOf(r.get(4))))));
+                });
+    }
+
+    /**
+     * Link {@code linked} to {@code owner}, or — already linked to it — update its app and limit
+     * and keep what it has spent. {@code limit} null is no limit.
+     */
+    void link(String owner, String linked, String app, Double limit, Consumer<LinkResult> onResult) {
+        commands.<List<Object>>eval(LINK_SCRIPT, ScriptOutputType.MULTI,
+                new String[] {linkKey(linked), linksKey(owner), linksKey(linked), linkKey(owner)},
+                owner, linked, app, limit == null ? "" : plain(limit),
+                String.valueOf(Instant.now().toEpochMilli()))
+                .whenComplete((raw, err) -> {
+                    if (err != null) {
+                        LOG.log(Level.WARNING, "ledger link failed for " + owner, err);
+                        onResult.accept(new LinkResult(false, null, null));
+                        return;
+                    }
+                    List<Object> r = raw;
+                    String status = String.valueOf(r.get(0));
+                    if (!"ok".equals(status)) {
+                        onResult.accept(new LinkResult(true, status, null));
+                        return;
+                    }
+                    onResult.accept(new LinkResult(true, null, Link.of(linked, String.valueOf(r.get(1)),
+                            String.valueOf(r.get(2)), String.valueOf(r.get(3)), String.valueOf(r.get(4)))));
+                });
+    }
+
+    /** The wallets linked to {@code owner}, newest first; empty when the ledger could not be asked. */
+    void listLinks(String owner, Consumer<Optional<List<Link>>> onResult) {
+        commands.<List<Object>>eval(LIST_LINKS_SCRIPT, ScriptOutputType.MULTI,
+                new String[] {linksKey(owner)}, KEY_PREFIX, owner)
+                .whenComplete((raw, err) -> {
+                    if (err != null) {
+                        LOG.log(Level.WARNING, "ledger links listing failed for " + owner, err);
+                        onResult.accept(Optional.empty());
+                        return;
+                    }
+                    List<Link> links = new ArrayList<>();
+                    for (int i = 0; i + 4 < raw.size(); i += 5) {
+                        links.add(Link.of(String.valueOf(raw.get(i)), String.valueOf(raw.get(i + 1)),
+                                String.valueOf(raw.get(i + 2)), String.valueOf(raw.get(i + 3)),
+                                String.valueOf(raw.get(i + 4))));
+                    }
+                    links.sort(Comparator.comparingLong(Link::linked).reversed()
+                            .thenComparing(Link::address));
+                    onResult.accept(Optional.of(links));
+                });
+    }
+
+    /**
+     * End {@code linked}'s link, at the request of {@code signer} — its owner, or the linked wallet
+     * itself. Answers 1 removed, 0 not linked, -1 the signer is neither side; empty when the ledger
+     * could not be asked.
+     */
+    void unlink(String signer, String linked, Consumer<Optional<Integer>> onResult) {
+        commands.<Long>eval(UNLINK_SCRIPT, ScriptOutputType.INTEGER,
+                new String[] {linkKey(linked)}, signer, linked, KEY_PREFIX)
+                .whenComplete((raw, err) -> {
+                    if (err != null) {
+                        LOG.log(Level.WARNING, "ledger unlink failed for " + linked, err);
+                        onResult.accept(Optional.empty());
+                        return;
+                    }
+                    onResult.accept(Optional.of(((Number) raw).intValue()));
+                });
+    }
+
+    /**
+     * The 402 a refused call answers: {@code {"error":"insufficient aicoin balance","balance":B}},
+     * for a linked wallet with {@code "spendable"}, and with {@code "reason":"link_limit"} when it
+     * was the link's limit that refused it rather than the owner's empty balance. {@code balance}
+     * is always the wallet's own, as on the balance endpoint.
+     */
+    static String insufficientJson(double balance, boolean linked, boolean linkLimit, double spendable) {
+        StringBuilder json = new StringBuilder("{\"error\":\"insufficient aicoin balance\",\"balance\":")
+                .append(plain(balance));
+        if (linkLimit) {
+            json.append(",\"reason\":\"link_limit\"");
+        }
+        if (linked) {
+            json.append(",\"spendable\":").append(plain(spendable));
+        }
+        return json.append('}').toString();
+    }
+
+    /** A number as JSON, without a trailing {@code .0} on a whole one. */
+    static String plain(double d) {
+        if (!Double.isInfinite(d) && !Double.isNaN(d) && d == Math.rint(d) && Math.abs(d) < 1e15) {
+            return String.valueOf((long) d);
+        }
+        return String.valueOf(d);
+    }
+
+    /** What {@link #getSpending} reads: a wallet's own balance and, if linked, its link. */
+    record Spending(double balance, String linkedTo, Double limit, double spent, double spendable) {
+
+        static Spending unlinked(double balance) {
+            return new Spending(balance, null, null, 0, balance);
+        }
+
+        /** {@code spendable} is {@code min(owner balance, limit - spent)}, the latter floored at zero. */
+        static Spending linked(double balance, String owner, Double limit, double spent, double ownerBalance) {
+            double spendable = ownerBalance;
+            if (limit != null) {
+                spendable = Math.min(spendable, Math.max(0, limit - spent));
+            }
+            return new Spending(balance, owner, limit, spent, spendable);
+        }
+
+        boolean isLinked() {
+            return linkedTo != null;
+        }
+
+        /** Would a call of {@code cost} be refused by the link's limit (rather than by the balance)? */
+        boolean limitRefuses(double cost) {
+            return limit != null && limit - spent < cost;
+        }
+
+        /** The 402 for a call of {@code cost} this wallet cannot make. */
+        String insufficientJson(double cost) {
+            return AicoinLedger.insufficientJson(balance, isLinked(), isLinked() && limitRefuses(cost), spendable);
+        }
+
+        /** The fields the balance endpoint adds: {@code spendable} always, the link's for a linked wallet. */
+        String balanceFieldsJson() {
+            StringBuilder json = new StringBuilder();
+            if (isLinked()) {
+                json.append(",\"linked_to\":").append(Json.string(linkedTo))
+                        .append(",\"limit\":").append(limit == null ? "null" : plain(limit))
+                        .append(",\"spent\":").append(plain(spent));
+            }
+            return json.append(",\"spendable\":").append(plain(spendable)).toString();
+        }
+    }
+
+    /** One link, as {@code GET /wallet/api/links} lists it. */
+    record Link(String address, String app, Double limit, double spent, long linked) {
+
+        static Link of(String address, String app, String limit, String spent, String linked) {
+            return new Link(address, app, limit == null || limit.isEmpty() ? null : Double.parseDouble(limit),
+                    spent == null || spent.isEmpty() ? 0 : Double.parseDouble(spent),
+                    linked == null || linked.isEmpty() ? 0 : (long) Double.parseDouble(linked));
+        }
+
+        String toJson() {
+            return "{\"address\":" + Json.string(address) + ",\"app\":" + Json.string(app)
+                    + ",\"limit\":" + (limit == null ? "null" : plain(limit))
+                    + ",\"spent\":" + plain(spent) + ",\"linked\":" + linked + "}";
+        }
+    }
+
+    /** Outcome of {@link #link}: unreachable, refused ({@code already_linked}/{@code is_owner}), or the link. */
+    record LinkResult(boolean reachable, String error, Link link) {
     }
 
     /**
@@ -1411,6 +1751,14 @@ class AicoinLedger implements AutoCloseable {
         return "aicoin:" + TAG + ":authorize:" + id;
     }
 
+    static String linkKey(String linked) {
+        return KEY_PREFIX + "link:" + linked;
+    }
+
+    static String linksKey(String owner) {
+        return KEY_PREFIX + "links:" + owner;
+    }
+
     static String txKey(String address) {
         return "aicoin:" + TAG + ":tx:" + address;
     }
@@ -1506,23 +1854,50 @@ class AicoinLedger implements AutoCloseable {
         private final boolean reachable;
         private final boolean success;
         private final double balance;
+        private final boolean linked;
+        private final boolean linkLimit;
+        private final double spendable;
 
-        private DebitResult(boolean reachable, boolean success, double balance) {
+        private DebitResult(boolean reachable, boolean success, double balance, boolean linked,
+                            boolean linkLimit, double spendable) {
             this.reachable = reachable;
             this.success = success;
             this.balance = balance;
+            this.linked = linked;
+            this.linkLimit = linkLimit;
+            this.spendable = spendable;
         }
 
         static DebitResult unreachable() {
-            return new DebitResult(false, false, 0);
+            return new DebitResult(false, false, 0, false, false, 0);
         }
 
         static DebitResult success(double balance) {
-            return new DebitResult(true, true, balance);
+            return new DebitResult(true, true, balance, false, false, balance);
         }
 
         static DebitResult insufficient(double balance) {
-            return new DebitResult(true, false, balance);
+            return new DebitResult(true, false, balance, false, false, balance);
+        }
+
+        /** True when the wallet is linked and the call was paid (or refused) from its owner. */
+        boolean isLinked() {
+            return linked;
+        }
+
+        /** True when the refusal was the link's limit, not an empty owner balance. */
+        boolean isLinkLimit() {
+            return linkLimit;
+        }
+
+        /** What the wallet's next calls can spend — its own balance, or for a linked one its owner's under the limit. */
+        double getSpendable() {
+            return spendable;
+        }
+
+        /** The 402 body for this refusal — see {@link AicoinLedger#insufficientJson}. */
+        String insufficientJson() {
+            return AicoinLedger.insufficientJson(balance, linked, linkLimit, spendable);
         }
 
         boolean isReachable() {

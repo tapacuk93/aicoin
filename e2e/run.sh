@@ -1082,6 +1082,112 @@ code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_P
   -H "X-Api-Key: $PIA_TOKEN" -H "X-AI: elevenlabs" -H "Content-Type: application/json" -d '{"text":"hi"}')
 [ "$code" = "200" ] && pass "speech with a stock voice still forwards" || fail "expected 200 for TTS, got $code"
 
+log "--- test 43: linked wallets — another app's own wallet spending this wallet's coins ---"
+KEY_LIAM="$WORKDIR/liam.pem"; gen_wallet "$KEY_LIAM"; ADDR_LIAM=$(wallet_address "$KEY_LIAM")
+KEY_LUNA="$WORKDIR/luna.pem"; gen_wallet "$KEY_LUNA"; ADDR_LUNA=$(wallet_address "$KEY_LUNA")
+KEY_NOAH="$WORKDIR/noah.pem"; gen_wallet "$KEY_NOAH"; ADDR_NOAH=$(wallet_address "$KEY_NOAH")
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PROXY_PORT/admin/credit" -H "X-Admin-Token: $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"address\":\"$ADDR_LIAM\",\"amount\":100,\"reason\":\"e2e link owner\",\"reference\":\"e2e-link-1\"}"
+NOW=$(epoch_seconds)
+LUNA_TOKEN=$(build_token "$KEY_LUNA" "$ADDR_LUNA" "$NOW" "$((NOW + 3600))")
+jget() { python3 -c "import json,sys; d=json.load(open('$1')); print($2)"; }
+
+code=$(live_signed_request "$KEY_LIAM" "$ADDR_LIAM" "POST" "/wallet/api/links" "{\"address\":\"$ADDR_LIAM\"}" "$WORKDIR/t43a.json")
+[ "$code" = "400" ] && pass "a wallet cannot link itself (400)" || fail "expected 400 for a self-link, got $code: $(cat "$WORKDIR/t43a.json")"
+code=$(live_signed_request "$KEY_LIAM" "$ADDR_LIAM" "POST" "/wallet/api/links" '{"address":"xyz"}' "$WORKDIR/t43b.json")
+[ "$code" = "400" ] && pass "a malformed address is 400" || fail "expected 400 for a malformed address, got $code"
+
+code=$(live_signed_request "$KEY_LIAM" "$ADDR_LIAM" "POST" "/wallet/api/links" "{\"address\":\"$ADDR_LUNA\",\"app\":\"AI UI\",\"limit\":20}" "$WORKDIR/t43c.json")
+got=$(jget "$WORKDIR/t43c.json" "d['address']==\"$ADDR_LUNA\" and d['app']=='AI UI' and d['limit']==20 and d['spent']==0 and d['linked']>0")
+[ "$code" = "200" ] && [ "$got" = "True" ] && pass "liam links luna with a limit of 20" || fail "link failed: $code $(cat "$WORKDIR/t43c.json")"
+
+curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/balance/$ADDR_LUNA" > "$WORKDIR/t43d.json"
+got=$(jget "$WORKDIR/t43d.json" "(d['balance'], d['linked_to']==\"$ADDR_LIAM\", d['limit'], d['spent'], d['spendable'])")
+[ "$got" = "(0, True, 20, 0, 20)" ] && pass "luna's balance names its owner, limit, spent and spendable: $got" || fail "unexpected linked balance: $(cat "$WORKDIR/t43d.json")"
+got=$(curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/balance/$ADDR_LIAM" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['spendable']==d['balance'] and 'linked_to' not in d)")
+[ "$got" = "True" ] && pass "an owner's spendable is its balance" || fail "owner balance fields wrong"
+
+code=$(curl -s -o "$WORKDIR/t43e.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
+  -H "X-Api-Key: $LUNA_TOKEN" -H "X-AI: openai" -d '{"model":"gpt-4"}')
+[ "$code" = "200" ] && [ "$(balance_of "$ADDR_LIAM")" = "99" ] && [ "$(balance_of "$ADDR_LUNA")" = "0" ] \
+  && pass "luna (0 coins of her own) makes a forwarded call, paid by liam (100 -> 99)" \
+  || fail "forwarded linked call: code=$code liam=$(balance_of "$ADDR_LIAM") luna=$(balance_of "$ADDR_LUNA")"
+code=$(curl -s -o "$WORKDIR/t43f.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/text" \
+  -H "X-Api-Key: $LUNA_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"Why does this Java function throw a null pointer exception?"}')
+[ "$code" = "200" ] && [ "$(balance_of "$ADDR_LIAM")" = "98" ] && pass "and a /text call, paid by liam (-> 98)" \
+  || fail "/text linked call: code=$code liam=$(balance_of "$ADDR_LIAM"): $(cat "$WORKDIR/t43f.json")"
+code=$(curl -s -o "$WORKDIR/t43g.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $LUNA_TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"In one sentence, what is an aicoin?","providers":["openai","anthropic"]}')
+[ "$code" = "200" ] && [ "$(balance_of "$ADDR_LIAM")" = "93" ] && [ "$(balance_of "$ADDR_LUNA")" = "0" ] \
+  && pass "and a consortium, paid by liam (-> 93)" \
+  || fail "consortium linked call: code=$code liam=$(balance_of "$ADDR_LIAM"): $(cat "$WORKDIR/t43g.json")"
+code=$(curl -s -o "$WORKDIR/t43g2.txt" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $LUNA_TOKEN" -H "Content-Type: application/json" -H "Accept: text/event-stream" \
+  -d '{"prompt":"In one sentence, what is an aicoin?","providers":["openai","anthropic"],"stream":true}')
+[ "$code" = "200" ] && [ "$(balance_of "$ADDR_LIAM")" = "88" ] && pass "and a streamed consortium past the balance pre-check (-> 88)" \
+  || fail "streamed consortium linked call: code=$code liam=$(balance_of "$ADDR_LIAM"): $(head -c 300 "$WORKDIR/t43g2.txt")"
+
+code=$(live_signed_request "$KEY_LIAM" "$ADDR_LIAM" "GET" "/wallet/api/transactions" "" "$WORKDIR/t43h.json")
+got=$(jget "$WORKDIR/t43h.json" "sum(1 for t in d['transactions'] if t.get('linked')==\"$ADDR_LUNA\" and t['type']=='debit')")
+[ "$code" = "200" ] && [ "$got" = "12" ] && pass "liam's log carries luna's 12 debits, each marked linked" || fail "expected 12 linked debits in liam's log, got $got"
+code=$(live_signed_request "$KEY_LUNA" "$ADDR_LUNA" "GET" "/wallet/api/transactions" "" "$WORKDIR/t43i.json")
+got=$(jget "$WORKDIR/t43i.json" "len(d['transactions'])")
+[ "$got" = "0" ] && pass "luna's own log records nothing for them" || fail "expected luna's log empty, got $got entries"
+
+# Lower the limit to what has been spent: the link stops spending at once.
+spent=$(curl -s "http://127.0.0.1:$PROXY_PORT/wallet/api/balance/$ADDR_LUNA" | python3 -c "import json,sys; print(json.load(sys.stdin)['spent'])")
+code=$(live_signed_request "$KEY_LIAM" "$ADDR_LIAM" "POST" "/wallet/api/links" "{\"address\":\"$ADDR_LUNA\",\"app\":\"AI UI\",\"limit\":$spent}" "$WORKDIR/t43j.json")
+got=$(jget "$WORKDIR/t43j.json" "(d['limit'], d['spent'])")
+[ "$code" = "200" ] && [ "$got" = "($spent, $spent)" ] && pass "re-sending the link updates the limit and keeps spent ($got)" || fail "update failed: $code $(cat "$WORKDIR/t43j.json")"
+code=$(curl -s -o "$WORKDIR/t43k.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
+  -H "X-Api-Key: $LUNA_TOKEN" -H "X-AI: openai" -d '{"model":"gpt-4"}')
+got=$(jget "$WORKDIR/t43k.json" "(d.get('reason'), d.get('spendable'))")
+[ "$code" = "402" ] && [ "$got" = "('link_limit', 0)" ] && pass "past the limit: 402 reason=link_limit spendable=0" || fail "expected 402 link_limit, got $code $(cat "$WORKDIR/t43k.json")"
+code=$(curl -s -o "$WORKDIR/t43l.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/text" \
+  -H "X-Api-Key: $LUNA_TOKEN" -H "Content-Type: application/json" -d '{"prompt":"hello"}')
+got=$(jget "$WORKDIR/t43l.json" "d.get('reason')")
+[ "$code" = "402" ] && [ "$got" = "link_limit" ] && pass "/text says link_limit too" || fail "expected /text 402 link_limit, got $code $(cat "$WORKDIR/t43l.json")"
+code=$(curl -s -o "$WORKDIR/t43m.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/consortium" \
+  -H "X-Api-Key: $LUNA_TOKEN" -H "Content-Type: application/json" -H "Accept: text/event-stream" \
+  -d '{"prompt":"hi","providers":["openai","anthropic"],"stream":true}')
+got=$(jget "$WORKDIR/t43m.json" "d.get('reason')" 2>/dev/null)
+[ "$code" = "402" ] && [ "$got" = "link_limit" ] && pass "a streamed consortium is refused before it starts, link_limit" || fail "expected streamed consortium 402 link_limit, got $code $(head -c 300 "$WORKDIR/t43m.json")"
+
+code=$(live_signed_request "$KEY_NOAH" "$ADDR_NOAH" "POST" "/wallet/api/links" "{\"address\":\"$ADDR_LUNA\",\"app\":\"x\"}" "$WORKDIR/t43n.json")
+[ "$code" = "409" ] && [ "$(jget "$WORKDIR/t43n.json" "d['error']")" = "already_linked" ] && pass "409 already_linked for a wallet linked elsewhere" || fail "expected 409 already_linked, got $code $(cat "$WORKDIR/t43n.json")"
+code=$(live_signed_request "$KEY_NOAH" "$ADDR_NOAH" "POST" "/wallet/api/links" "{\"address\":\"$ADDR_LIAM\",\"app\":\"x\"}" "$WORKDIR/t43o.json")
+[ "$code" = "409" ] && [ "$(jget "$WORKDIR/t43o.json" "d['error']")" = "is_owner" ] && pass "409 is_owner for a wallet with links of its own" || fail "expected 409 is_owner, got $code $(cat "$WORKDIR/t43o.json")"
+code=$(live_signed_request "$KEY_LUNA" "$ADDR_LUNA" "POST" "/wallet/api/links" "{\"address\":\"$ADDR_NOAH\",\"app\":\"x\"}" "$WORKDIR/t43p.json")
+[ "$code" = "409" ] && [ "$(jget "$WORKDIR/t43p.json" "d['error']")" = "is_owner" ] && pass "409 is_owner when the signer is itself linked" || fail "expected 409 is_owner, got $code $(cat "$WORKDIR/t43p.json")"
+
+code=$(live_signed_request "$KEY_LIAM" "$ADDR_LIAM" "GET" "/wallet/api/links" "" "$WORKDIR/t43q.json")
+got=$(jget "$WORKDIR/t43q.json" "[l['address'] for l in d['links']]==[\"$ADDR_LUNA\"]")
+[ "$code" = "200" ] && [ "$got" = "True" ] && pass "liam lists his one link" || fail "links list wrong: $code $(cat "$WORKDIR/t43q.json")"
+code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PROXY_PORT/wallet/api/links")
+[ "$code" = "401" ] && pass "listing links needs a live signature" || fail "expected 401, got $code"
+
+code=$(live_signed_request "$KEY_NOAH" "$ADDR_NOAH" "POST" "/wallet/api/links/remove" "{\"address\":\"$ADDR_LUNA\"}" "$WORKDIR/t43r.json")
+[ "$code" = "403" ] && pass "a stranger cannot remove the link (403)" || fail "expected 403, got $code $(cat "$WORKDIR/t43r.json")"
+code=$(live_signed_request "$KEY_LUNA" "$ADDR_LUNA" "POST" "/wallet/api/links/remove" "{\"address\":\"$ADDR_LUNA\"}" "$WORKDIR/t43s.json")
+[ "$code" = "200" ] && [ "$(jget "$WORKDIR/t43s.json" "d['removed']")" = "True" ] && pass "luna leaves the link herself" || fail "expected removed, got $code $(cat "$WORKDIR/t43s.json")"
+code=$(curl -s -o "$WORKDIR/t43t.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
+  -H "X-Api-Key: $LUNA_TOKEN" -H "X-AI: openai" -d '{"model":"gpt-4"}')
+got=$(jget "$WORKDIR/t43t.json" "('reason' in d, 'spendable' in d)")
+[ "$code" = "402" ] && [ "$got" = "(False, False)" ] && pass "unlinked, her next call is paid from her own (empty) balance: a plain 402" || fail "expected plain 402, got $code $(cat "$WORKDIR/t43t.json")"
+
+log "--- test 44: a revoked grant stops a token on the consolidated endpoints too ---"
+NOW=$(epoch_seconds)
+payload_b64=$(str_to_b64url "{\"addr\":\"$ADDR_LIAM\",\"iat\":$NOW,\"exp\":$((NOW + 3600)),\"grant\":\"deadbeef-0000-0000-0000-000000000000\"}")
+printf '%s' "$payload_b64" > "$WORKDIR/grantmsg"
+sig_b64=$(hex_to_b64url "$(openssl pkeyutl -sign -rawin -inkey "$KEY_LIAM" -in "$WORKDIR/grantmsg" | xxd -p -c 256 | tr -d '\n')")
+GRANT_TOKEN="${payload_b64}.${sig_b64}"
+code=$(curl -s -o "$WORKDIR/t44.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PROXY_PORT/text" \
+  -H "X-Api-Key: $GRANT_TOKEN" -H "Content-Type: application/json" -d '{"prompt":"hello"}')
+[ "$code" = "401" ] && grep -q "revoked" "$WORKDIR/t44.json" && pass "/text refuses a token whose grant is gone (401)" || fail "expected 401 revoked on /text, got $code $(cat "$WORKDIR/t44.json")"
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "=== ALL E2E CHECKS PASSED ==="
