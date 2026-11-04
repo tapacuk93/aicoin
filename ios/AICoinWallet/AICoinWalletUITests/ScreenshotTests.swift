@@ -18,6 +18,15 @@ final class ScreenshotTests: XCTestCase {
         continueAfterFailure = false
     }
 
+    /// A tap, or under Mac Catalyst a click, which is what reaches a Mac window reliably.
+    private func press(_ element: XCUIElement) {
+        #if targetEnvironment(macCatalyst)
+        element.click()
+        #else
+        element.tap()
+        #endif
+    }
+
     private func capture(_ app: XCUIApplication, _ name: String) {
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = name
@@ -35,15 +44,22 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertTrue(create.waitForExistence(timeout: 10))
         capture(app, "01-connect")
 
-        create.tap()
-        let saved = app.switches["savedToggle"]
+        app.activate()
+        press(create)
+        // A switch on iOS; under Mac Catalyst it may surface as another control type.
+        let saved = app.descendants(matching: .any)["savedToggle"].firstMatch
         XCTAssertTrue(saved.waitForExistence(timeout: 10))
         let continueButton = app.buttons["continueButton"]
         for _ in 0..<3 where !continueButton.isEnabled {
-            saved.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+            let spot = saved.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5))
+            #if targetEnvironment(macCatalyst)
+            spot.click()
+            #else
+            spot.tap()
+            #endif
             _ = continueButton.wait(for: \.isEnabled, toEqual: true, timeout: 2)
         }
-        continueButton.tap()
+        press(continueButton)
 
         let balance = app.staticTexts["balanceValue"]
         XCTAssertTrue(balance.waitForExistence(timeout: 15))
@@ -52,16 +68,16 @@ final class ScreenshotTests: XCTestCase {
 
         capture(app, "02-balance")
 
-        app.buttons["receiveButton"].tap()
+        press(app.buttons["receiveButton"])
         if app.staticTexts["receiveAddress"].waitForExistence(timeout: 10) {
             capture(app, "03-receive")
         }
 
         // 4 — apps whose own wallets spend this wallet's coins.
-        if app.buttons["Done"].exists { app.buttons["Done"].tap() }
+        if app.buttons["Done"].exists { press(app.buttons["Done"]) }
         let linked = app.buttons["Linked Apps"]
         for _ in 0..<4 where !linked.isHittable { app.swipeUp() }
-        linked.tap()
+        press(linked)
         XCTAssertTrue(app.staticTexts["No Linked Apps"].waitForExistence(timeout: 15))
         capture(app, "04-linked-apps")
     }
