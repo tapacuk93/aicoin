@@ -127,6 +127,34 @@ do {
 }
 ```
 
+### Streaming speech (play from the first audio, not the last)
+
+`HTTPDataStreamingTransport.dataStream(for:)` hands a body over in pieces as they arrive.
+`URLSession`, `AICoinRouter`, `AICoinUITestTransport` and `DirectProviderKeyTransport` conform;
+`transport.streamingData(for:)` works on any `HTTPTransport` (a non-streaming one delivers the body
+as one piece). Through the router a streamed provider call gets exactly what `data(for:)` gets —
+proxy rewrite, token, call tags, storefront header, `402` → `AICoinError.insufficientBalance`
+(thrown before any body, published on the bus), `.paidCallSucceeded` for a 2xx.
+
+```swift
+// ElevenLabs through the proxy, relayed chunk by chunk (CONTRACT.md "Streaming speech pass-through").
+var request = URLRequest(url: URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voice)/stream/with-timestamps")!)
+request.httpMethod = "POST"
+request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text, "model_id": "eleven_v3"])
+let (pieces, response) = try await runtime.transport.streamingData(for: request)
+// Pieces split anywhere: buffer to "\n", parse each non-empty line as
+// {"audio_base64", "alignment"|null, ...}; alignment times are seconds from the recording's start.
+
+// The proxy's own /audio: raw 16-bit LE PCM, 24 kHz mono, whole samples per piece.
+let speech = try await capabilityClient.audioStream(prompt: text, language: "he")
+// speech.format == .pcm16(sampleRate: 24_000, channels: 1) — or .encoded("audio/mpeg") from an old proxy
+for try await samples in speech.audio { player.schedule(samples) }
+```
+
+A stream that breaks after it started throws from the iteration (the proxy resets the connection
+rather than ending the body cleanly, because URLSession treats a clean close at a chunk boundary as
+the end).
+
 ### Saying what a call is for (`AICoinCallTags`)
 
 Every proxied call carries `X-AICoin-App` (the bundle id) on its own. Say what each call is
@@ -233,7 +261,11 @@ has no offer set. Both credit via the catalog's `coins` for the purchased produc
   balance across all three (see "Design decisions" below).
 - `WalletSigner` — `canonicalMessage(...)`, `signLiveRequest(...)`, `applyLiveSignature(to:identity:)`,
   `issueAPIToken(identity:validFor:)`, `decodeTokenPayload(_:)`, `verifyTokenSignature(_:)`.
-- `HTTPTransport` — the protocol seam (`URLSession` already conforms).
+- `HTTPTransport` — the protocol seam (`URLSession` already conforms). `HTTPLineStreamingTransport`
+  (`lines(for:)`) and `HTTPDataStreamingTransport` (`dataStream(for:)`; `streamingData(for:)` on any
+  transport) for bodies read as they arrive.
+- `AICoinCapabilityClient` — `text`, `consortium`, `image`, `audio`, and `audioStream` (`SpeechStream`:
+  `audio`, `format`, `provider`, `model`, `pieces`).
 - `AICoinRouter` — `init(underlying:baseURL:eventBus:tokenProvider:)`, conforms to `HTTPTransport`.
 - `AICoinTokenCache` — `currentToken()`, `invalidate()`.
 - `AICoinError` / `AICoinPurchaseError` — typed errors.

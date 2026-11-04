@@ -113,3 +113,26 @@ public struct AICoinUITestTransport: HTTPTransport {
         return (Data(body.utf8), response)
     }
 }
+
+/// Streamed calls under the UI-test hooks: the same canned answers and refusals as `data(for:)`,
+/// handed over in pieces of `streamChunkSize` bytes, so an app's incremental playback path runs in
+/// a UI test the way it does against the proxy — first piece first, the rest after — rather than
+/// as one body.
+extension AICoinUITestTransport: HTTPDataStreamingTransport {
+    /// How many bytes each piece of a streamed canned reply holds.
+    public static let streamChunkSize = 4096
+
+    public func dataStream(for request: URLRequest) async throws -> (AsyncThrowingStream<Data, Error>, URLResponse) {
+        let (data, response) = try await data(for: request)
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            var offset = 0
+            while offset < data.count {
+                let end = min(offset + Self.streamChunkSize, data.count)
+                continuation.yield(data.subdata(in: offset..<end))
+                offset = end
+            }
+            continuation.finish()
+        }
+        return (stream, response)
+    }
+}

@@ -376,6 +376,107 @@ public struct AICoinCapabilityClient: Sendable {
         return try Self.media(from: data)
     }
 
+    /// What `audioStream` hands over: the speech as it is produced, and how to play it.
+    public struct SpeechStream: Sendable {
+        public enum Format: Sendable, Equatable {
+            /// Raw signed 16-bit little-endian samples, interleaved when `channels > 1` — what the
+            /// proxy streams (24 kHz mono today; read the figures, don't assume them).
+            case pcm16(sampleRate: Double, channels: Int)
+            /// Encoded audio of this media type, delivered whole: a proxy too old to stream
+            /// answered with the buffered call's MP3, which arrives here as one piece.
+            case encoded(mediaType: String)
+        }
+
+        /// The audio, in order. For `.pcm16` every piece holds whole frames (never half a sample,
+        /// whatever the network split); concatenated, the pieces are the whole recording. Ends
+        /// when the recording does; throws if it is cut short — then what arrived is real speech,
+        /// just not all of it (the proxy has charged for it).
+        public let audio: AsyncThrowingStream<Data, Error>
+        public let format: Format
+        public let provider: String?
+        public let model: String?
+        /// How many provider calls the passage is spoken in (long passages are split), if said.
+        public let pieces: Int?
+
+        public init(audio: AsyncThrowingStream<Data, Error>, format: Format, provider: String?, model: String?,
+                    pieces: Int?) {
+            self.audio = audio
+            self.format = format
+            self.provider = provider
+            self.model = model
+            self.pieces = pieces
+        }
+    }
+
+    /// `POST /audio` with `stream: true`: the speech as raw PCM while it is still being produced,
+    /// so playback can start on the first piece (~1 s) instead of after the whole passage. Same
+    /// arguments, routing and billing as `audio(...)`; see CONTRACT.md "Streamed speech".
+    ///
+    /// Throws, before handing anything over, exactly what `audio(...)` would (`missingToken`,
+    /// `insufficientBalance` — published on the bus — or `server`). `timeout` is the request's
+    /// `timeoutInterval`, which URLSession applies as the longest wait for the *next* bytes, not
+    /// for the whole stream. Cancelling the iterating task, or dropping `audio`, ends the call.
+    public func audioStream(
+        prompt: String, provider: String? = nil, voice: String? = nil, language: String? = nil,
+        timeout: TimeInterval = 60, purpose: String? = nil
+    ) async throws -> SpeechStream {
+        var body: [String: Any] = ["prompt": prompt, "stream": true]
+        if let provider { body["provider"] = provider }
+        if let voice { body["voice"] = voice }
+        if let language { body["language"] = language }
+        let request = try makeRequest("audio", body: body, timeout: timeout, purpose: purpose)
+        let (chunks, response) = try await transport.streamingData(for: request)
+        let http = response as? HTTPURLResponse
+        let status = http?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            let data = try await collect(chunks)
+            try check(status: status, data: data)
+            throw AICoinError.server(status: status, message: Self.errorMessage(from: data))
+        }
+        eventBus.events.send(.paidCallSucceeded)
+        let header = { (name: String) in http?.value(forHTTPHeaderField: name) }
+        let contentType = header("Content-Type") ?? ""
+        if contentType.hasPrefix("application/json") {
+            // A proxy from before streaming: the buffered answer, which is still speech.
+            let media = try Self.media(from: try await collect(chunks, limit: .max))
+            return SpeechStream(audio: wholeBodyChunks(media.data), format: .encoded(mediaType: media.mediaType),
+                                provider: media.provider, model: nil, pieces: nil)
+        }
+        let rate = header("X-Audio-Sample-Rate").flatMap(Double.init) ?? 24_000
+        let channels = header("X-Audio-Channels").flatMap(Int.init) ?? 1
+        return SpeechStream(
+            audio: Self.wholeFrames(chunks, bytesPerFrame: 2 * max(channels, 1)),
+            format: .pcm16(sampleRate: rate, channels: channels),
+            provider: header("X-Aicoin-Provider"),
+            model: header("X-Aicoin-Model"),
+            pieces: header("X-Aicoin-Pieces").flatMap(Int.init)
+        )
+    }
+
+    /// `chunks` re-cut so every piece holds whole frames: a byte that ends one network read
+    /// mid-sample is held for the next. A trailing partial frame at the end is dropped.
+    static func wholeFrames(_ chunks: AsyncThrowingStream<Data, Error>, bytesPerFrame: Int) -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                var carry = Data()
+                do {
+                    for try await chunk in chunks {
+                        carry.append(chunk)
+                        let whole = carry.count - carry.count % bytesPerFrame
+                        if whole > 0 {
+                            continuation.yield(Data(carry.prefix(whole)))
+                            carry = carry.count > whole ? Data(carry.suffix(from: carry.startIndex + whole)) : Data()
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     // MARK: - Plumbing
 
     private func post(_ path: String, body: [String: Any], timeout: TimeInterval,

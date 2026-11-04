@@ -73,6 +73,11 @@ public struct DirectProviderKeyTransport: HTTPTransport {
     }
 
     public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await underlying.data(for: keyed(request))
+    }
+
+    /// `request` with the provider's own key on it, for the hosts this transport holds a key for.
+    func keyed(_ request: URLRequest) throws -> URLRequest {
         var request = request
         switch request.url?.host {
         case "api.anthropic.com":
@@ -96,6 +101,13 @@ public struct DirectProviderKeyTransport: HTTPTransport {
             // honest answer: there is no provider key that stands in for it.
             break
         }
-        return try await underlying.data(for: request)
+        return request
+    }
+}
+
+/// A soak run streams speech the way the apps do through the proxy, straight from the provider.
+extension DirectProviderKeyTransport: HTTPDataStreamingTransport {
+    public func dataStream(for request: URLRequest) async throws -> (AsyncThrowingStream<Data, Error>, URLResponse) {
+        try await underlying.streamingData(for: keyed(request))
     }
 }

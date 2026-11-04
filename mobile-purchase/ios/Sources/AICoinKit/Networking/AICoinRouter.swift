@@ -170,3 +170,38 @@ extension AICoinRouter: HTTPLineStreamingTransport {
         return (wholeBodyLines(data), response)
     }
 }
+
+/// Streamed provider calls — ElevenLabs `/v1/text-to-speech/{voice}/stream` and
+/// `/stream/with-timestamps`, which the proxy relays chunk by chunk — go through exactly what
+/// `data(for:)` does: the same rewrite onto the proxy, the same token, call tags and storefront
+/// header, `402` → `AICoinError.insufficientBalance` (published on the bus, thrown before any body
+/// is handed over), and `.paidCallSucceeded` for a 2xx, announced once the head is in. Any other
+/// non-2xx is returned with its body as the stream, as `data(for:)` returns it. Hosts that are not
+/// providers pass through to `underlying` untouched. An `underlying` that cannot stream delivers
+/// the body as one piece.
+extension AICoinRouter: HTTPDataStreamingTransport {
+    public func dataStream(for request: URLRequest) async throws -> (AsyncThrowingStream<Data, Error>, URLResponse) {
+        guard let host = request.url?.host, let provider = Self.knownHosts[host] else {
+            return try await underlying.streamingData(for: proxyBound(request))
+        }
+        guard let token = tokenProvider(), !token.isEmpty else {
+            throw AICoinError.missingToken
+        }
+        guard let proxied = Self.rewritten(request, provider: provider, baseURL: baseURL, token: token) else {
+            return try await underlying.streamingData(for: request)
+        }
+
+        let (chunks, response) = try await underlying.streamingData(for: proxied)
+        guard let http = response as? HTTPURLResponse else { return (chunks, response) }
+
+        if http.statusCode == 402 {
+            let balance = Self.parseBalance(from: (try? await collect(chunks)) ?? Data())
+            eventBus.events.send(.insufficientBalance(balance: balance))
+            throw AICoinError.insufficientBalance(balance: balance)
+        }
+        if (200..<300).contains(http.statusCode) {
+            eventBus.events.send(.paidCallSucceeded)
+        }
+        return (chunks, response)
+    }
+}
