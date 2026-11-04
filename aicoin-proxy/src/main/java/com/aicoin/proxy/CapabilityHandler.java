@@ -158,6 +158,13 @@ final class CapabilityHandler {
         String size = body.get("size") instanceof String ? (String) body.get("size") : "1024x1024";
         String language = body.get("language") instanceof String ? (String) body.get("language") : null;
 
+        if (capability == Capability.AUDIO && Boolean.TRUE.equals(body.get("stream"))) {
+            // Samples as they are spoken rather than one MP3 at the end — see AudioStream.
+            AudioStream.serve(ctx, config, group, healthTracker, speed, ledger, wallet,
+                    new AudioStream.Plan(prompt, subject, ranked, voice, language));
+            return;
+        }
+
         new Attempt(ctx, config, group, healthTracker, speed, ledger, wallet, capability, prompt,
                 background, subject, ranked, escalate, voice, size, language).next();
     }
