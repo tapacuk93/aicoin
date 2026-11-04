@@ -27,6 +27,17 @@ final class ScreenshotTests: XCTestCase {
         #endif
     }
 
+    /// Swipes don't scroll a Mac window; a scroll-wheel delta over the list does.
+    private func scrollDown(_ app: XCUIApplication) {
+        #if targetEnvironment(macCatalyst)
+        let list = app.collectionViews.firstMatch.exists ? app.collectionViews.firstMatch
+                                                          : app.tables.firstMatch
+        list.scroll(byDeltaX: 0, deltaY: -300)
+        #else
+        app.swipeUp()
+        #endif
+    }
+
     private func capture(_ app: XCUIApplication, _ name: String) {
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = name
@@ -76,7 +87,7 @@ final class ScreenshotTests: XCTestCase {
         // 4 — apps whose own wallets spend this wallet's coins.
         if app.buttons["Done"].exists { press(app.buttons["Done"]) }
         let linked = app.buttons["Linked Apps"]
-        for _ in 0..<4 where !linked.isHittable { app.swipeUp() }
+        for _ in 0..<6 where !linked.isHittable { scrollDown(app) }
         press(linked)
         XCTAssertTrue(app.staticTexts["No Linked Apps"].waitForExistence(timeout: 15))
         capture(app, "04-linked-apps")
