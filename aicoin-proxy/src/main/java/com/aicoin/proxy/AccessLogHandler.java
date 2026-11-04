@@ -59,6 +59,8 @@ final class AccessLogHandler extends ChannelDuplexHandler {
      */
     private int streamStatus = -1;
     private int streamBytes;
+    /** A streamed response whose cost was known up front says so in its head instead of a trailer. */
+    private String streamCoins = "";
 
     /** Storefront codes that restrict any provider; null logs every storefront header sent. */
     private final java.util.Set<String> restricting;
@@ -114,11 +116,12 @@ final class AccessLogHandler extends ChannelDuplexHandler {
         } else if (pending && msg instanceof HttpResponse) {
             streamStatus = ((HttpResponse) msg).status().code();
             streamBytes = 0;
+            streamCoins = Optional.ofNullable(((HttpResponse) msg).headers().get(X_CHARGED_HEADER)).orElse("");
         } else if (pending && streamStatus >= 0 && msg instanceof HttpContent) {
             streamBytes += ((HttpContent) msg).content().readableBytes();
             if (msg instanceof LastHttpContent) {
                 String coins = Optional.ofNullable(((LastHttpContent) msg).trailingHeaders().get(X_CHARGED_HEADER))
-                        .orElse("");
+                        .orElse(streamCoins);
                 int status = streamStatus;
                 streamStatus = -1;
                 log(status, streamBytes, coins, "ok", timing());

@@ -559,12 +559,23 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                         .endpoint(Transactions.endpointOf(forwardUri))
                         .failed(402, "insufficient balance"));
                 sendInsufficientBalance(ctx, debit);
+            } else if (hook == null && StreamingForwarder.streams(provider, method.name(), pathOf(forwardUri))) {
+                // A streaming speech endpoint: relayed chunk by chunk, billed the same way.
+                StreamingForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, forwardUri,
+                        finalHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
+                        walletAddress, CALL_COST_AICOIN);
             } else {
                 UpstreamForwarder.forward(clientGroup, config, healthTracker, ledger, ctx, method, forwardUri,
                         finalHeaders, bodyBytes, providerConfig.getBaseUrl(), provider,
                         walletAddress, CALL_COST_AICOIN, hook);
             }
         }));
+    }
+
+    /** A request URI without its query string. */
+    static String pathOf(String uri) {
+        int q = uri.indexOf('?');
+        return q >= 0 ? uri.substring(0, q) : uri;
     }
 
     /**

@@ -321,7 +321,7 @@ final class UpstreamForwarder {
         }
     }
 
-    private static void refundIfBilled(AicoinLedger ledger, String walletAddress, double callCostAicoin, String provider) {
+    static void refundIfBilled(AicoinLedger ledger, String walletAddress, double callCostAicoin, String provider) {
         if (callCostAicoin > 0) {
             ledger.refund(walletAddress, callCostAicoin, provider);
         }
@@ -341,7 +341,7 @@ final class UpstreamForwarder {
         return upstream.code() == 402 ? HttpResponseStatus.SERVICE_UNAVAILABLE : upstream;
     }
 
-    private static void sendSynthetic(ChannelHandlerContext clientCtx, HttpResponseStatus status, String message) {
+    static void sendSynthetic(ChannelHandlerContext clientCtx, HttpResponseStatus status, String message) {
         String json = "{\"error\":\"" + message + "\"}";
         byte[] bytes = json.getBytes(CharsetUtil.UTF_8);
         FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status, Unpooled.wrappedBuffer(bytes));
@@ -355,7 +355,7 @@ final class UpstreamForwarder {
      * price-formula event, otherwise refunds it. Both are skipped when {@code callCostAicoin} is 0
      * (a free target — nothing was debited and the provider bills nothing).
      */
-    private static final class UpstreamResponseHandler extends SimpleChannelInboundHandler<FullHttpResponse> {
+    static final class UpstreamResponseHandler extends SimpleChannelInboundHandler<FullHttpResponse> {
         private final ProxyConfig config;
         private final ProviderHealthTracker healthTracker;
         private final AicoinLedger ledger;
@@ -531,7 +531,7 @@ final class UpstreamForwarder {
          * Dropping them costs nothing: no client of this proxy has any use for the upstream's
          * cookies, and the auth header is one the client was never allowed to send either.
          */
-        private static void copyHeaders(HttpHeaders from, HttpHeaders to, ProviderConfig providerConfig) {
+        static void copyHeaders(HttpHeaders from, HttpHeaders to, ProviderConfig providerConfig) {
             String authHeader = providerConfig == null ? null : providerConfig.getAuthHeader();
             for (Map.Entry<String, String> h : from) {
                 String name = h.getKey();
