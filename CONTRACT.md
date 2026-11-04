@@ -661,6 +661,28 @@ global, not per-wallet; the cooldown check always runs first, so a
 still-on-cooldown wallet gets `reason:"cooldown"` even if the pool also
 happens to be empty.
 
+### Welcome
+`POST /wallet/api/welcome` — live-signed like the claim, no body. What an app calls on its first
+launch: **100 aicoin once per wallet, ever**. A wallet that has never claimed (no
+`lastclaim:{address}`) is granted 100 — `200 {"granted":true,"amount":100}` — and `lastclaim` is
+set, so it is never granted by this endpoint again. Every later call, and any call from a wallet
+that has used `POST /wallet/api/claim` before, is `429 {"granted":false,"reason":"already_claimed"}`
+and changes nothing. That is the difference from the claim: the claim's first grant is the same
+welcome, but after the hour's cooldown it hands out another 100 from the pool, so an app that
+claimed on every fresh install (a reinstall, a second device sharing the wallet through iCloud
+Keychain) would grant the same wallet again whenever the pool held coins.
+
+The grant does not draw on the pool while fewer than `AICOIN_PROXY_WELCOMES_PER_DAY` (default 200)
+wallets have been welcomed that UTC day — the same counter as the claim's welcome, so the two
+together welcome at most that many wallets a day without the pool. Past the cap the grant is taken
+from the pool if it holds 100; otherwise `429 {"granted":false,"reason":"welcome_limit"}` and
+nothing changes, so the wallet is still new and is welcomed when the app asks again on a later day.
+The cap is what bounds a script minting wallets: 200 x 100 coins a day.
+
+Clients settle on `granted` or `already_claimed` and ask again later on anything else
+(`welcome_limit`, `5xx`, offline). An older proxy without this endpoint answers `401`, which is
+also "ask again", never a grant.
+
 ### Peer transfer (buy/sell)
 `POST /wallet/api/transfer` — live-signed, body `{"to_user_id":"<address>","amount":N}` (`from` is always the verified signer). Runs the transfer script above. Validates `amount > 0` and current balance of the signer `>= amount`; if not, `400 {"error":"insufficient balance"}`. This is the *entire* buy/sell mechanism — no real money, no external payment rail: "buying" is just receiving a transfer, "selling" is sending one.
 

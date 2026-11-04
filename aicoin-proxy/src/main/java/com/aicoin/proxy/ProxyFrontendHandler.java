@@ -35,7 +35,7 @@ import java.util.logging.Logger;
  * {@code GET /health}.
  *
  * <p>Two independent auth schemes gate mutating requests, per CONTRACT.md's
- * auth sections: wallet-management actions (claim/transfer/revoke-tokens)
+ * auth sections: wallet-management actions (claim/welcome/transfer/revoke-tokens)
  * require a live {@link WalletSignature#verifyLive} signature over each
  * request; the generic {@code X-AI}-routed proxy path requires a {@link
  * WalletSignature#verifyToken} API token instead, since routine AI-proxy
@@ -78,6 +78,13 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
      * bounds the total, and it is the number to change if this turns out to be too generous.
      */
     private static final double FREE_CLAIM_AMOUNT_AICOIN = 100.0;
+
+    /**
+     * What {@code POST /wallet/api/welcome} gives a wallet, once: the same hundred as the faucet,
+     * but its own number, since this is the promise every app makes its new users ("100 AICoin to
+     * start") while the faucet's amount is a rate limit.
+     */
+    static final double WELCOME_AMOUNT_AICOIN = 100.0;
 
     private final ProxyConfig config;
     private final EventLoopGroup clientGroup;
@@ -224,6 +231,11 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
         if (request.method() == HttpMethod.POST && "/wallet/api/claim".equals(path)) {
             byte[] body = ByteBufUtil.getBytes(request.content());
             requireLiveSignature(ctx, request, body, address -> handleClaim(ctx, address));
+            return;
+        }
+        if (request.method() == HttpMethod.POST && "/wallet/api/welcome".equals(path)) {
+            byte[] body = ByteBufUtil.getBytes(request.content());
+            requireLiveSignature(ctx, request, body, address -> handleWelcome(ctx, address));
             return;
         }
         if (request.method() == HttpMethod.POST && "/wallet/api/transfer".equals(path)) {
@@ -765,6 +777,27 @@ public class ProxyFrontendHandler extends SimpleChannelInboundHandler<FullHttpRe
                 byte[] bytes = ("{\"granted\":false,\"reason\":\"cooldown\",\"next_eligible_at\":" + jsonString(nextEligibleAt) + "}")
                         .getBytes(CharsetUtil.UTF_8);
                 sendJson(ctx, HttpResponseStatus.TOO_MANY_REQUESTS, bytes);
+            }
+        });
+    }
+
+    /**
+     * {@code POST /wallet/api/welcome} — the hundred coins an app's new user starts with, once per
+     * wallet. See {@link AicoinLedger#claimWelcome} and CONTRACT.md's "Welcome".
+     */
+    private void handleWelcome(ChannelHandlerContext ctx, String address) {
+        ledger.claimWelcome(address, config.getFreeCoinsPoolSize(), WELCOME_AMOUNT_AICOIN, result -> {
+            if (!result.isPresent()) {
+                sendJsonError(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "could not validate wallet");
+                return;
+            }
+            String outcome = result.get();
+            if ("welcome".equals(outcome) || "pool".equals(outcome)) {
+                sendJson(ctx, HttpResponseStatus.OK,
+                        ("{\"granted\":true,\"amount\":" + formatNumber(WELCOME_AMOUNT_AICOIN) + "}").getBytes(CharsetUtil.UTF_8));
+            } else {
+                sendJson(ctx, HttpResponseStatus.TOO_MANY_REQUESTS,
+                        ("{\"granted\":false,\"reason\":" + jsonString(outcome) + "}").getBytes(CharsetUtil.UTF_8));
             }
         });
     }

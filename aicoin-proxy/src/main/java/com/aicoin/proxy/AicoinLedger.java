@@ -117,6 +117,44 @@ class AicoinLedger implements AutoCloseable {
             + "redis.call('LTRIM', KEYS[5], -" + TX_LOG_CAP + ", -1) "
             + "return {1, tostring(now + cooldown), 'granted'}";
 
+    /**
+     * The welcome on its own, for apps: once per wallet, ever. Unlike {@link #CLAIM_SCRIPT} it never
+     * falls back to the hourly faucet for a wallet that has claimed before, so an app that asks on
+     * every fresh install — a reinstall, a second device sharing the wallet through iCloud Keychain
+     * — gets {@code already_claimed} instead of another hundred coins from the pool. Past the daily
+     * welcome cap it takes the grant from the shared pool if the pool holds one, and otherwise
+     * answers {@code welcome_limit} without touching anything, so the same wallet is welcomed on a
+     * later day. KEYS and ARGV as {@link #CLAIM_SCRIPT}'s, less the cooldown.
+     */
+    private static final String WELCOME_SCRIPT =
+            "local now = tonumber(ARGV[1]) "
+            + "local poolSize = tonumber(ARGV[2]) "
+            + "local amount = tonumber(ARGV[3]) "
+            + "if redis.call('EXISTS', KEYS[1]) == 1 then "
+            + "  return {0, 'already_claimed'} "
+            + "end "
+            + "local reason = 'welcome' "
+            + "local welcomed = tonumber(redis.call('GET', KEYS[6]) or '0') "
+            + "if welcomed < tonumber(ARGV[5]) then "
+            + "  redis.call('INCR', KEYS[6]) "
+            + "  redis.call('EXPIRE', KEYS[6], 172800) "
+            + "else "
+            + "  local remainingRaw = redis.call('GET', KEYS[3]) "
+            + "  local remaining "
+            + "  if remainingRaw == false then remaining = poolSize else remaining = tonumber(remainingRaw) end "
+            + "  if remaining < amount then "
+            + "    return {0, 'welcome_limit'} "
+            + "  end "
+            + "  redis.call('SET', KEYS[3], remaining - amount) "
+            + "  reason = 'pool' "
+            + "end "
+            + "redis.call('SET', KEYS[1], ARGV[1]) "
+            + "local balance = redis.call('INCRBYFLOAT', KEYS[2], ARGV[3]) "
+            + "redis.call('SADD', KEYS[4], ARGV[4]) "
+            + "redis.call('RPUSH', KEYS[5], cjson.encode({type='claim', amount=amount, balance_after=tonumber(balance), at=now})) "
+            + "redis.call('LTRIM', KEYS[5], -" + TX_LOG_CAP + ", -1) "
+            + "return {1, reason}";
+
     private static final String TRANSFER_SCRIPT =
             "local amount = tonumber(ARGV[1]) "
             + "local from = tonumber(redis.call('GET', KEYS[1]) or '0') "
@@ -488,6 +526,34 @@ class AicoinLedger implements AutoCloseable {
             boolean granted = ((Number) raw.get(0)).longValue() == 1L;
             long nextEligibleAtMillis = Long.parseLong(String.valueOf(raw.get(1)));
             onResult.accept(ClaimResult.decided(granted, Instant.ofEpochMilli(nextEligibleAtMillis)));
+        });
+    }
+
+    /**
+     * {@link #WELCOME_SCRIPT}: a wallet's one welcome. Answers {@code Optional.empty()} when the
+     * ledger could not be reached, otherwise {@code "welcome"} or {@code "pool"} for a grant of
+     * {@code amount}, {@code "already_claimed"} for a wallet that has claimed before, or {@code
+     * "welcome_limit"} when today's welcomes are used up and the pool is empty.
+     */
+    void claimWelcome(String userId, int poolSize, double amount, Consumer<Optional<String>> onResult) {
+        claimWelcome(userId, poolSize, amount, WELCOMES_PER_DAY, onResult);
+    }
+
+    /** {@link #claimWelcome(String, int, double, Consumer)} under a given daily cap — the seam tests use. */
+    void claimWelcome(String userId, int poolSize, double amount, int welcomesPerDay, Consumer<Optional<String>> onResult) {
+        Instant now = Instant.now();
+        RedisFuture<List<Object>> future = commands.eval(WELCOME_SCRIPT, ScriptOutputType.MULTI,
+                new String[] {lastClaimKey(userId), balanceKey(userId), FREE_COINS_REMAINING_KEY, KNOWN_WALLETS_KEY, txKey(userId),
+                        welcomeCountKey(now)},
+                String.valueOf(now.toEpochMilli()), String.valueOf(poolSize), String.valueOf(amount), userId,
+                String.valueOf(welcomesPerDay));
+        future.whenComplete((raw, err) -> {
+            if (err != null) {
+                LOG.log(Level.WARNING, "ledger welcome failed for " + userId, err);
+                onResult.accept(Optional.empty());
+                return;
+            }
+            onResult.accept(Optional.of(String.valueOf(raw.get(1))));
         });
     }
 
