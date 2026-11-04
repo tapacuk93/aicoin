@@ -52,8 +52,9 @@ import java.util.logging.Logger;
  * possible only until the first sample has gone to the client, because the status and the
  * provider's name go out with it. A piece is refunded if it fails before any of its samples
  * reached the client; once some have, it is charged, as the provider charged for it. A failure
- * after the stream started closes the connection without the terminating chunk, so the client sees
- * an incomplete body, not a recording that quietly stops.
+ * after the stream started resets the connection without the terminating chunk ({@link
+ * UpstreamStream#abortClient}), so the client sees a broken body, not a recording that quietly
+ * stops.
  *
  * <p>Pieces are requested all at once, as the buffered call does, and their samples written in
  * order: the first piece live, each later one from what it has buffered meanwhile, then live.
@@ -529,7 +530,7 @@ final class AudioStream {
             over = true;
             LOG.log(Level.INFO, attempt.provider + " speech stream broke after it started: " + error);
             ctx.channel().closeFuture().removeListener(clientGone);
-            ctx.close();
+            UpstreamStream.abortClient(ctx);
         }
 
         private void finishWithError(HttpResponseStatus status, String json) {

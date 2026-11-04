@@ -335,6 +335,32 @@ class StreamingForwarderTest {
         assertEquals(List.of(), ledger.refunds);
     }
 
+    /** A clean close after a whole chunk reads as a complete body to URLSession; a reset does not. */
+    @Test
+    void aBrokenStreamIsResetNotClosedCleanly() throws Exception {
+        script = ex -> {
+            ex.sendResponseHeaders(200, 0);
+            chunk(ex, "audio\n");
+            Thread.sleep(3_000);
+        };
+        startProxy(1);
+        int port = ((InetSocketAddress) proxy.localAddress()).getPort();
+        try (java.net.Socket socket = new java.net.Socket("127.0.0.1", port)) {
+            socket.setSoTimeout(10_000);
+            String body = "{}";
+            socket.getOutputStream().write(("POST " + PATH + " HTTP/1.1\r\nHost: x\r\nContent-Length: "
+                    + body.length() + "\r\n\r\n" + body).getBytes(StandardCharsets.UTF_8));
+            InputStream in = socket.getInputStream();
+            byte[] buf = new byte[4096];
+            java.net.SocketException reset = assertThrows(java.net.SocketException.class, () -> {
+                while (in.read(buf) >= 0) {
+                    // read until the connection ends; a clean end would leave the loop normally
+                }
+            });
+            assertTrue(reset.getMessage().toLowerCase(java.util.Locale.ROOT).contains("reset"), reset.getMessage());
+        }
+    }
+
     @Test
     void aClientThatLeavesBeforeAnyAudioIsRefunded() throws Exception {
         CountDownLatch released = new CountDownLatch(1);

@@ -52,9 +52,9 @@ import java.util.logging.Logger;
  *   <li><b>Errors</b> before the first byte are answered as {@link UpstreamForwarder} answers them:
  *       the provider's own status and body (402 relayed as 503 with {@code X-Upstream-Status}), or a
  *       synthetic 502/504. A failure after the first byte cannot change a status that has already
- *       gone out, so the client connection is closed without the terminating chunk: the client
- *       sees a truncated body (URLSession: {@code NSURLErrorNetworkConnectionLost}), never a
- *       stream that silently looks complete.</li>
+ *       gone out, so the client connection is reset without the terminating chunk ({@link
+ *       UpstreamStream#abortClient}): the client sees a broken body (URLSession: {@code
+ *       NSURLErrorNetworkConnectionLost}), never a stream that silently looks complete.</li>
  *   <li><b>Timeout</b>: {@code upstream.readTimeoutSeconds} is an idle timeout between chunks, not a
  *       bound on the whole stream (see {@link UpstreamStream}).</li>
  * </ul>
@@ -317,11 +317,11 @@ final class StreamingForwarder {
         public void onFailure(String error, boolean timedOut) {
             finish();
             if (streaming) {
-                // The status went out with the first chunk and cannot be taken back. Ending the
-                // connection without the terminating chunk is how a client learns the body is
+                // The status went out with the first chunk and cannot be taken back. Resetting the
+                // connection, without the terminating chunk, is how a client learns the body is
                 // incomplete; writing the terminator would pass half a recording off as all of it.
                 LOG.log(Level.INFO, provider + " stream broke after it started: " + error);
-                clientCtx.close();
+                UpstreamStream.abortClient(clientCtx);
                 return;
             }
             if (settled.compareAndSet(false, true)) {

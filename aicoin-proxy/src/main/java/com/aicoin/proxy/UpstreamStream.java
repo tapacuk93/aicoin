@@ -289,4 +289,21 @@ final class UpstreamStream {
                 || name.equalsIgnoreCase(HttpHeaderNames.TRAILER.toString())
                 || name.equalsIgnoreCase(HttpHeaderNames.UPGRADE.toString());
     }
+
+    /**
+     * Ends a client response that cannot be finished — a stream whose status and first bytes have
+     * gone out and whose source then broke — so the client knows it is incomplete: a TCP reset
+     * ({@code SO_LINGER 0}), not a clean close. A clean close is not enough: URLSession reads a
+     * chunked body that stops at a chunk boundary and then sees FIN as complete, which would pass
+     * half a recording off as the whole one. A reset is reported as an error (and Caddy, in front
+     * in production, resets the client's HTTP/2 stream when its upstream does this).
+     */
+    static void abortClient(ChannelHandlerContext clientCtx) {
+        try {
+            clientCtx.channel().config().setOption(ChannelOption.SO_LINGER, 0);
+        } catch (RuntimeException e) {
+            // Not a socket channel (a test's embedded one): a plain close is all there is.
+        }
+        clientCtx.close();
+    }
 }
