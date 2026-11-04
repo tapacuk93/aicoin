@@ -69,6 +69,14 @@ public final class AICoinAppRuntime: @unchecked Sendable {
             faucetDefaultsKey ?? "\(defaultsKeyPrefix)_aicoin_faucet_claim_attempted_v1"
         }
 
+        /// The `UserDefaults` key `AICoinFaucet` records its welcome under: the faucet key with
+        /// `_welcome_v1` after it. A key of its own, not the faucet's, so an install whose old
+        /// flag was set by an empty pool — and so never got anything — asks once more; the server
+        /// answers `already_claimed` to every wallet that did get its coins.
+        public var welcomeKey: String {
+            "\(faucetKey)_welcome_v1"
+        }
+
         /// What this app's product ids start with — the bundle ID with anything Apple forbids in a
         /// product id (a hyphen, say) taken out.
         public var productIDPrefix: String {

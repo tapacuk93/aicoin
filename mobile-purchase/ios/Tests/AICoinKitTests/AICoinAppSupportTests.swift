@@ -86,8 +86,15 @@ final class AICoinAppSupportTests: XCTestCase {
 
     // MARK: - AICoinFaucet
 
-    func testFaucetClaimsOnceAndThenNeverAgain() async {
-        let transport = RecordingTransport { reply(#"{"granted":true,"amount":5,"next_eligible_at":"2026-10-18T12:00:00Z"}"#, for: $0) }
+    func testWelcomeKeyIsTheFaucetKeysOwnSoAnOldEmptyPoolFlagDoesNotSettleIt() {
+        XCTAssertEqual(configuration().welcomeKey, "infiniteaibook_aicoin_faucet_claim_attempted_v1_welcome_v1")
+        var legacy = configuration()
+        legacy.faucetDefaultsKey = "settings.aicoinFaucetClaimAttempted"
+        XCTAssertEqual(legacy.welcomeKey, "settings.aicoinFaucetClaimAttempted_welcome_v1")
+    }
+
+    func testFaucetClaimsTheWelcomeOnceAndThenNeverAgain() async {
+        let transport = RecordingTransport { reply(#"{"granted":true,"amount":100}"#, for: $0) }
         let client = WalletClient(transport: transport)
         let identity = WalletIdentity.generate()
 
@@ -95,29 +102,48 @@ final class AICoinAppSupportTests: XCTestCase {
         let second = await AICoinFaucet.claimIfNeeded(walletClient: client, identity: identity, defaults: defaults, key: "k")
 
         XCTAssertEqual(first?.granted, true)
+        XCTAssertEqual(first?.amount, 100)
         XCTAssertNil(second)
         XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(transport.requests.first?.url?.path, "/wallet/api/welcome")
+        XCTAssertEqual(transport.requests.first?.httpMethod, "POST")
         XCTAssertTrue(defaults.bool(forKey: "k"))
     }
 
-    func testADenialIsAVerdictTooAndIsNotAskedAgain() async {
-        let transport = RecordingTransport { reply(#"{"granted":false,"reason":"cooldown"}"#, status: 429, for: $0) }
+    func testAnAlreadyWelcomedWalletIsAVerdictTooAndIsNotAskedAgain() async {
+        // A reinstall, or a second device on the shared wallet: no grant, and settled.
+        let transport = RecordingTransport { reply(#"{"granted":false,"reason":"already_claimed"}"#, status: 429, for: $0) }
         let client = WalletClient(transport: transport)
 
         let first = await AICoinFaucet.claimIfNeeded(walletClient: client, identity: .generate(), defaults: defaults, key: "k")
         _ = await AICoinFaucet.claimIfNeeded(walletClient: client, identity: .generate(), defaults: defaults, key: "k")
 
         XCTAssertEqual(first?.granted, false)
+        XCTAssertEqual(first?.reason, "already_claimed")
         XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertTrue(defaults.bool(forKey: "k"))
     }
 
-    func testAnEmptyPoolIsAskedAgainNextLaunch() async {
-        let transport = RecordingTransport { reply(#"{"granted":false,"reason":"pool_exhausted"}"#, status: 429, for: $0) }
+    func testTheDailyWelcomeLimitIsAskedAgainNextLaunch() async {
+        let transport = RecordingTransport { reply(#"{"granted":false,"reason":"welcome_limit"}"#, status: 429, for: $0) }
         let client = WalletClient(transport: transport)
 
         _ = await AICoinFaucet.claimIfNeeded(walletClient: client, identity: .generate(), defaults: defaults, key: "k")
         _ = await AICoinFaucet.claimIfNeeded(walletClient: client, identity: .generate(), defaults: defaults, key: "k")
 
+        XCTAssertEqual(transport.requests.count, 2)
+        XCTAssertFalse(defaults.bool(forKey: "k"))
+    }
+
+    func testAProxyWithoutTheWelcomeEndpointIsAskedAgainAndNeverSettles() async {
+        // What the deployed proxy answers before the welcome endpoint ships.
+        let transport = RecordingTransport { reply(#"{"error":"invalid API token"}"#, status: 401, for: $0) }
+        let client = WalletClient(transport: transport)
+
+        let first = await AICoinFaucet.claimIfNeeded(walletClient: client, identity: .generate(), defaults: defaults, key: "k")
+        _ = await AICoinFaucet.claimIfNeeded(walletClient: client, identity: .generate(), defaults: defaults, key: "k")
+
+        XCTAssertNil(first)
         XCTAssertEqual(transport.requests.count, 2)
         XCTAssertFalse(defaults.bool(forKey: "k"))
     }

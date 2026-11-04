@@ -68,6 +68,9 @@ public struct AICoinUITestTransport: HTTPTransport {
         if path == "/wallet/api/claim" {
             return Self.json(#"{"granted":false,"reason":"pool_exhausted"}"#, status: 429, url: url)
         }
+        if path == "/wallet/api/welcome" {
+            return Self.json(#"{"granted":false,"reason":"welcome_limit"}"#, status: 429, url: url)
+        }
         // A UI test only ever asserts the send form exists, so an actual transfer arriving here is
         // likewise unexpected; refuse it rather than pretend coins moved.
         if path == "/wallet/api/transfer" {

@@ -1,35 +1,37 @@
 import Foundation
 
-/// The free-coin faucet, claimed silently exactly once per install.
+/// The welcome: 100 coins a new user starts with, claimed silently, once per wallet.
 ///
-/// A brand-new wallet starts at a zero balance and every AI call costs at least 1 aicoin, so
-/// without this an app can do literally nothing until the user buys coins — a poor first run, and
-/// an App Review minimum-functionality problem. CONTRACT.md's `POST /wallet/api/claim` mints the
-/// starter coins, so it is fired once, in the background, as soon as the wallet exists: no
-/// onboarding step, no button, no prompt. A reviewer just opens the app and it works.
+/// A brand-new wallet starts at a zero balance and every AI call costs coins, so without this an
+/// app can do literally nothing until the user buys some — a poor first run, and an App Review
+/// minimum-functionality problem. CONTRACT.md's `POST /wallet/api/welcome` grants a wallet 100
+/// coins the first time it asks and never again, so it is fired in the background as soon as the
+/// wallet is settled (`AICoinAppStore.start()` reconciles with the user's other devices first): no
+/// onboarding step, no button, no prompt. The coins land in the balance the app already shows.
 ///
-/// Every documented outcome is swallowed on purpose. `claimFreeCoins` already folds the two `429`
-/// denials (`cooldown`, `pool_exhausted`) into a non-throwing `ClaimResult(granted: false, …)`, and
-/// a genuinely thrown error (offline, 5xx) is discarded here. In all of those cases the balance
-/// simply stays at 0 and the existing `402` → `AICoinEventBus.insufficientBalance` →
-/// `BuyAICoinSheet` path takes over; the user never sees a claim error.
+/// "Once" is the server's to decide, per wallet. A reinstall, or a second device that picks up the
+/// shared wallet through iCloud Keychain, has no flag here and asks again; the server answers
+/// `already_claimed` and nothing is granted. Before this, the faucet's `POST /wallet/api/claim`
+/// was used, which after its hour's cooldown granted the same wallet another 100 from the shared
+/// pool whenever the pool held coins.
+///
+/// Every outcome is swallowed on purpose. A denial or an error leaves the balance as it is, and the
+/// existing `402` → `AICoinEventBus.insufficientBalance` → `BuyAICoinSheet` path takes over; the
+/// user never sees a claim error.
 public enum AICoinFaucet {
-    /// Claims the faucet on first launch, and never again afterwards.
+    /// Claims the wallet's welcome unless this install already has the server's verdict.
     ///
-    /// The flag under `key` is written only once the server has actually answered — either a grant
-    /// or a `429` denial. A claim that never reached the server (an offline first launch) leaves it
-    /// unset so the next launch can retry, which is still at most one request per launch and never
-    /// repeats once the faucet has given its verdict. That is all the client-side restraint the
-    /// server's own 1-hour per-wallet cooldown and shared pool need.
+    /// The flag under `key` is written only on a verdict about this wallet: a grant, or
+    /// `already_claimed`. Anything else — `welcome_limit` (the day's welcomes are used up), a
+    /// `5xx`, an offline launch, or a proxy too old to have the endpoint (`401`) — leaves it unset,
+    /// so the next launch asks again: one request a launch at most, and never once settled.
     ///
     /// `disabled` (the `UITEST_AICOIN_DISABLE_FAUCET` hook) refuses before anything else, including
-    /// the already-attempted check, so a test never so much as touches the flag. The faucet pool is
-    /// shared across every wallet in production and finite, so an unattended UI-test run claiming
-    /// from it would take free coins away from real first-time users.
+    /// the already-settled check, so a test never so much as touches the flag: an unattended
+    /// UI-test run must not take real coins.
     ///
-    /// - Parameter key: The `UserDefaults` key the "already claimed" flag lives under. Apps that
-    ///   shipped their own faucet before this package pass their existing key, so an update doesn't
-    ///   look like a fresh install and claim a second time.
+    /// - Parameter key: The `UserDefaults` key the "settled" flag lives under —
+    ///   `AICoinAppRuntime.Configuration.welcomeKey`.
     /// - Returns: The server's verdict, or `nil` when the claim was skipped or failed. Callers use
     ///   it only to decide whether refreshing the balance is worthwhile.
     @discardableResult
@@ -43,13 +45,8 @@ public enum AICoinFaucet {
         guard !disabled else { return nil }
         guard !defaults.bool(forKey: key) else { return nil }
         do {
-            let result = try await walletClient.claimFreeCoins(identity: identity)
-            // Settled only by a grant or a cooldown (this wallet has claimed before). An empty
-            // pool is not a verdict on this wallet: it was marked settled too, so everyone who
-            // installed while the pool was dry stayed at zero for good, even once the server
-            // started welcoming every new wallet (CONTRACT.md, "Claim"). It is asked again on the
-            // next launch instead — one request a launch at most.
-            if result.granted || result.reason != "pool_exhausted" {
+            let result = try await walletClient.claimWelcome(identity: identity)
+            if result.granted || result.reason == "already_claimed" {
                 defaults.set(true, forKey: key)
             }
             return result

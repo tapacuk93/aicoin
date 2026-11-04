@@ -34,7 +34,7 @@ Sources/AICoinKit/
     AICoinTokenCache.swift      Caches/refreshes an issued API token for AICoinRouter
   Wallet/
     WalletModels.swift          Request/response DTOs (internal)
-    WalletClient.swift          balance / claim / transfer / revoke-tokens / offer / packages / redeem
+    WalletClient.swift          balance / claim / welcome / transfer / revoke-tokens / offer / packages / redeem
   IAP/
     AICoinPackage.swift         /iap/packages catalog model + bundle-ID-prefix filtering
     AICoinOffer.swift           /iap/offer model + per-app product selection
@@ -47,7 +47,7 @@ Sources/AICoinKit/
   App/
     AICoinAppRuntime.swift      An app's wallet, token cache and transport, swappable across devices
     AICoinAppStore.swift        Balance + IAP + buy-sheet state, faucet and reconcile at launch
-    AICoinFaucet.swift          The once-per-install free-coin claim
+    AICoinFaucet.swift          The welcome: 100 coins once per wallet, claimed at launch
     AICoinUITestHooks.swift     UITEST_AICOIN_* environment hooks
     AICoinUITestTransport.swift Offline wallet/IAP stub (and the app's canned AI replies) for UI tests
     DirectProviderKeyTransport.swift  SOAK_*_API_KEY provider keys for soak runs (apps gate with #if DEBUG)
@@ -180,9 +180,12 @@ What it keeps from the copies it replaces:
   a lock, so no request ever signs with one wallet and presents the other. `start()` reconciles
   *before* claiming the faucet: a claim that landed first would fund the local wallet, and
   reconcile would then keep both and hide the shared balance.
-- **The faucet is claimed once**, recorded only after the server answers, so an offline first
-  launch retries. Apps that shipped their own faucet pass its key as `faucetDefaultsKey` so an
-  update doesn't claim again.
+- **The welcome is 100 coins once per wallet** (`POST /wallet/api/welcome`, CONTRACT.md
+  "Welcome"). A new install asks once the wallet is reconciled; the server grants a wallet that has
+  never claimed and answers `already_claimed` to one that has, so a reinstall or a second device on
+  the shared iCloud wallet gets nothing twice. The install's flag (`welcomeKey`, the faucet key plus
+  `_welcome_v1`) is written only on a grant or `already_claimed`; the day's cap being used up, an
+  error, or offline is asked again next launch. The coins show in the balance like any others.
 - **UI tests never touch real coins**: any `UITEST_AICOIN_*` variable (`_BALANCE`,
   `_DISABLE_FAUCET`, `_FORCE_INSUFFICIENT`, `_FAKE_AI`) gives the runtime an ephemeral wallet and
   routes everything through `AICoinUITestTransport`, which stubs balance, packages
@@ -235,7 +238,7 @@ has no offer set. Both credit via the catalog's `coins` for the purchased produc
 - `AICoinTokenCache` — `currentToken()`, `invalidate()`.
 - `AICoinError` / `AICoinPurchaseError` — typed errors.
 - `AICoinEvent` / `AICoinEventBus` — `.paidCallSucceeded`, `.insufficientBalance`, `.purchaseCredited`.
-- `WalletClient` — `balance(address:)`, `claimFreeCoins(identity:)`, `transfer(to:amount:identity:)`,
+- `WalletClient` — `balance(address:)`, `claimFreeCoins(identity:)`, `claimWelcome(identity:)`, `transfer(to:amount:identity:)`,
   `revokeTokens(identity:)`, `iapPackages()`, `redeemIAP(to:signedTransaction:offerID:)`, `price()`,
   `freeCoinsAvailable()`, `currentOffer()`, `checkOffer()`.
 - `AICoinPackage` — `/iap/packages` model, plus `[AICoinPackage].filtered(byBundleIDPrefix:)`.

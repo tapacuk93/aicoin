@@ -75,8 +75,8 @@ public final class AICoinAppStore: ObservableObject {
 
     /// Called once at launch: picks up any purchase that was paid for but never credited (app
     /// killed mid-flow, a redeem call that failed) and retries crediting it, warms the buy sheet,
-    /// settles the wallet with the user's other devices, and silently tops up a brand-new wallet
-    /// from the free faucet. Repeat calls do nothing.
+    /// settles the wallet with the user's other devices, and claims the wallet's one welcome of 100
+    /// coins (`AICoinFaucet`), which the balance badge then shows. Repeat calls do nothing.
     ///
     /// Nothing on screen waits on any of it: the first view renders whether the claim succeeds, is
     /// refused, or never completes.
@@ -101,7 +101,7 @@ public final class AICoinAppStore: ObservableObject {
                 walletClient: runtime.walletClient,
                 identity: runtime.identity,
                 defaults: defaults,
-                key: runtime.configuration.faucetKey,
+                key: runtime.configuration.welcomeKey,
                 // Any hook, not only the faucet one: under the hooks the wallet is ephemeral and
                 // the network is a stub, so there is nothing a claim could do but write the flag.
                 disabled: runtime.hooks.isActive

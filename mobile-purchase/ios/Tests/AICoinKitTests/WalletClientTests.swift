@@ -121,6 +121,39 @@ final class WalletClientTests: XCTestCase {
         XCTAssertNil(result.nextEligibleAt)
     }
 
+    // MARK: - claimWelcome()
+
+    func testWelcomeGrantedIsALiveSignedPostToTheWelcomeEndpoint() async throws {
+        let identity = WalletIdentity.generate()
+        let url = WalletClient.endpointURL(baseURL, "/wallet/api/welcome")
+        let transport = MockHTTPTransport([(Data(#"{"granted":true,"amount":100}"#.utf8), httpResponse(url, statusCode: 200))])
+        let client = WalletClient(baseURL: baseURL, transport: transport)
+
+        let result = try await client.claimWelcome(identity: identity)
+
+        XCTAssertTrue(result.granted)
+        XCTAssertEqual(result.amount, 100)
+        let sent = transport.requests[0]
+        XCTAssertEqual(sent.httpMethod, "POST")
+        XCTAssertEqual(sent.url?.path, "/wallet/api/welcome")
+        XCTAssertEqual(sent.value(forHTTPHeaderField: "X-Api-Key"), identity.address)
+        XCTAssertEqual(sent.value(forHTTPHeaderField: "X-Api-Signature")?.count, 128)
+        XCTAssertNotNil(sent.value(forHTTPHeaderField: "X-Api-Timestamp"))
+    }
+
+    func testWelcomeDenialsDecodeTheirReasonWithoutThrowing() async throws {
+        let url = WalletClient.endpointURL(baseURL, "/wallet/api/welcome")
+        for reason in ["already_claimed", "welcome_limit"] {
+            let body = Data(#"{"granted":false,"reason":"\#(reason)"}"#.utf8)
+            let client = WalletClient(baseURL: baseURL, transport: MockHTTPTransport([(body, httpResponse(url, statusCode: 429))]))
+
+            let result = try await client.claimWelcome(identity: .generate())
+
+            XCTAssertFalse(result.granted)
+            XCTAssertEqual(result.reason, reason)
+        }
+    }
+
     // MARK: - transfer()
 
     func testTransferSendsCorrectBodyAndLiveSignatureOverThatExactBody() async throws {

@@ -31,6 +31,11 @@ struct ClaimGrantedBody: Decodable {
     }
 }
 
+struct WelcomeGrantedBody: Decodable {
+    let granted: Bool
+    let amount: Double
+}
+
 struct ClaimDeniedBody: Decodable {
     let granted: Bool
     let reason: String

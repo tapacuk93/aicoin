@@ -100,6 +100,28 @@ public struct WalletClient: Sendable {
         }
     }
 
+    /// `POST /wallet/api/welcome` — no body; identity is the signer. The 100 coins a new user starts
+    /// with, once per wallet ever (CONTRACT.md, "Welcome"): `200` grants, `429` is
+    /// `already_claimed` (this wallet has been welcomed, or has claimed the faucet, before) or
+    /// `welcome_limit` (today's welcomes are used up; ask again another day). Both `429`s come
+    /// back as a non-throwing `ClaimResult(granted: false, reason: …)`; anything else throws.
+    public func claimWelcome(identity: WalletIdentity) async throws -> ClaimResult {
+        let request = try Self.signedRequest(method: "POST", path: "/wallet/api/welcome", body: Data(), baseURL: baseURL, identity: identity)
+        let (data, response) = try await transport.data(for: AICoinStorefront.applied(to: request))
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+
+        switch status {
+        case 200:
+            let body = try JSONDecoder().decode(WelcomeGrantedBody.self, from: data)
+            return ClaimResult(granted: true, amount: body.amount, reason: nil, nextEligibleAt: nil)
+        case 429:
+            let body = try JSONDecoder().decode(ClaimDeniedBody.self, from: data)
+            return ClaimResult(granted: false, amount: nil, reason: body.reason, nextEligibleAt: nil)
+        default:
+            throw try Self.error(for: status, data: data)
+        }
+    }
+
     /// `POST /wallet/api/transfer` — live-signed; `from` is always the verified signer, never
     /// trusted from the body, per CONTRACT.md. This is the entire buy/sell mechanism CONTRACT.md
     /// describes: "another way" to acquire aicoin besides the faucet/IAP.
