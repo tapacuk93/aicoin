@@ -936,6 +936,12 @@ case-insensitively and is never forwarded to a provider. The wallet mapping is t
 callers that send no header. (A wallet that sends different app names on concurrent calls has each
 call's cost attributed to the app it named most recently.)
 
+**The cap, not coins, limits an app's own wallet.** A wallet the operator assigned to an app that
+has a cap (`usd_per_day` set) never gets `402` for an empty balance: each call still debits its
+coins, so the balance may go below zero and its history shows what it used, but only the cap (plus
+any top-up) stops it. A wallet in no app, one only named by `X-AICoin-App`, and one in an app with
+no cap are held to their coins as before.
+
 Spend is the proxy's own cost accounting: the same `costUsd` each priced call writes into the price
 signal (`AicoinLedger.recordEvent`), added to the app of the wallet that made the call. It is kept
 per UTC day, so the cap **resets at UTC midnight** without anything having to reset it.

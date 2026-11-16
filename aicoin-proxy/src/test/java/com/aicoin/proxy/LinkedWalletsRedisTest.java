@@ -317,4 +317,20 @@ class LinkedWalletsRedisTest {
         setBalance(OWNER, 5);
         assertEquals(",\"spendable\":5", spending(OWNER).balanceFieldsJson());
     }
+
+    // ---- an app's server wallet: the daily cap is its limit, not its coins -------------------------
+
+    @Test
+    void aCappedAppsWalletSpendsBelowZeroAndAnUncappedOneDoesNot() throws Exception {
+        setBalance(PLAIN, 0);
+        assertFalse(debit(PLAIN).isSuccess());                       // in no app: coins are the limit
+        ledger.appCaps().store().putApp(new AppCaps.AppConfig("earth-empire", null, List.of(PLAIN)), List.of())
+                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertFalse(debit(PLAIN).isSuccess());                       // an app with no cap: still coins
+        ledger.appCaps().store().putApp(new AppCaps.AppConfig("earth-empire", 10.0, List.of(PLAIN)), List.of())
+                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertTrue(debit(PLAIN).isSuccess());                        // capped: the cap decides
+        assertEquals(-1.0, balance(PLAIN));
+        assertFalse(debit(OTHER).isSuccess());                       // other wallets are untouched
+    }
 }

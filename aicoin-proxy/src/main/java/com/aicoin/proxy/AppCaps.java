@@ -277,6 +277,10 @@ final class AppCaps {
         this.store = store;
     }
 
+    Store store() {
+        return store;
+    }
+
     static boolean isValidAppName(String app) {
         return app != null && APP_NAME.matcher(app).matches();
     }
@@ -303,6 +307,17 @@ final class AppCaps {
      */
     void check(String wallet, Instant now, Consumer<Decision> onDecision) {
         check(wallet, null, now, onDecision);
+    }
+
+    /**
+     * Whether the operator assigned {@code wallet} to an app with a daily cap: such a wallet (an app's
+     * server wallet) spends against the cap, not against its coin balance. A header never makes a
+     * wallet so - only {@code PUT /admin/apps/{app}} does.
+     */
+    CompletionStage<Boolean> isCapLimited(String wallet) {
+        return store.appForWallet(wallet).thenCompose(app -> app.isEmpty()
+                ? CompletableFuture.completedFuture(false)
+                : store.getApp(app.get()).thenApply(c -> c.isPresent() && c.get().getUsdPerDay() != null));
     }
 
     /** HTTP header an app sends to name itself — see {@link #resolveApp}. */

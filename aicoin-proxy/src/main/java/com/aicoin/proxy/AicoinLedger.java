@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -215,7 +216,7 @@ class AicoinLedger implements AutoCloseable {
             + "if left and left < amount then "
             + "  return {0, tostring(own), 'link_limit', tostring(spendable), owner} "
             + "end "
-            + "if balance < amount then "
+            + "if balance < amount and ARGV[6] ~= '1' then "
             + "  return {0, tostring(own), '', tostring(spendable), owner} "
             + "end "
             + "local newBalance = tonumber(redis.call('INCRBYFLOAT', balKey, '-' .. ARGV[1])) "
@@ -775,10 +776,20 @@ class AicoinLedger implements AutoCloseable {
      * key on a call a wallet can't afford; {@link #refund} reverses this if the upstream call then fails.
      */
     void debitForCall(String address, double amount, String provider, Consumer<DebitResult> onResult) {
+        // A wallet the operator assigned to an app with a daily cap (an app's server wallet) is never
+        // short of coins: the cap is its limit, and its balance may go below zero. The coin is still
+        // debited, so the wallet's history shows what it used.
+        CompletionStage<Boolean> capped = appCaps == null ? CompletableFuture.completedFuture(false)
+                : appCaps.isCapLimited(address).exceptionally(err -> false);
+        capped.thenAccept(unlimited -> debitForCall(address, amount, provider, unlimited, onResult));
+    }
+
+    private void debitForCall(String address, double amount, String provider, boolean unlimited,
+                              Consumer<DebitResult> onResult) {
         long nowMillis = Instant.now().toEpochMilli();
         RedisFuture<List<Object>> future = commands.eval(DEBIT_SCRIPT, ScriptOutputType.MULTI,
                 new String[] {balanceKey(address), KNOWN_WALLETS_KEY, txKey(address), linkKey(address)},
-                String.valueOf(amount), address, provider, String.valueOf(nowMillis), KEY_PREFIX);
+                String.valueOf(amount), address, provider, String.valueOf(nowMillis), KEY_PREFIX, unlimited ? "1" : "0");
         future.whenComplete((raw, err) -> {
             if (err != null) {
                 LOG.log(Level.WARNING, "ledger debit failed for " + address, err);
